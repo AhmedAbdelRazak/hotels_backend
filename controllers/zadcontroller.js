@@ -6,6 +6,9 @@ const { OAuth2Client } = require("google-auth-library");
 const ZadWebsite = require("../models/zad_website");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
+const {
+	filterRoomToBookableFixedPackages,
+} = require("../services/fixedPackagePolicy");
 
 const ZAD_OWNER_EMAIL = String(
 	process.env.ZAD_OWNER_EMAIL || "mrgamal@xhoteltest.com"
@@ -949,23 +952,9 @@ exports.gettingZadRoomListFromQuery = async (req, res) => {
 	}
 };
 
-const safeNumber = (value) =>
-	Number.isFinite(Number(value)) ? Number(value) : Infinity;
-
-const isActiveOrUpcoming = (from, to, now = new Date()) => {
-	const f = from ? new Date(from) : null;
-	const t = to ? new Date(to) : null;
-	if (f && isNaN(f)) return false;
-	if (t && isNaN(t)) return false;
-	if (t && t < now) return false;
-	if (f && f >= now) return true;
-	if (t && t >= now) return true;
-	return false;
-};
-
 exports.listOfAllActiveZadHotelsMonthlyAndOffers = async (_req, res) => {
 	try {
-		setPublicHotelCacheHeaders(res);
+		res.setHeader("Cache-Control", "no-store");
 		const baseFilter = await buildZadPublicHotelFilter({ requireRoomGate: false });
 		const hotels = await HotelDetails.find({
 			...baseFilter,
@@ -990,35 +979,7 @@ exports.listOfAllActiveZadHotelsMonthlyAndOffers = async (_req, res) => {
 			.map((hotel) => {
 				const trimmedRooms = (hotel.roomCountDetails || [])
 					.filter((room) => isPublicRoomVisible(room))
-					.map((room) => {
-						const offers = (Array.isArray(room.offers) ? room.offers : [])
-							.filter((offer) =>
-								isActiveOrUpcoming(
-									offer.offerFrom || offer.from || offer.validFrom,
-									offer.offerTo || offer.to || offer.validTo,
-									now
-								)
-							)
-							.sort(
-								(a, b) =>
-									safeNumber(a.offerPrice ?? a.price) -
-									safeNumber(b.offerPrice ?? b.price)
-							);
-						const monthly = (Array.isArray(room.monthly) ? room.monthly : [])
-							.filter((month) =>
-								isActiveOrUpcoming(
-									month.monthFrom || month.from || month.validFrom,
-									month.monthTo || month.to || month.validTo,
-									now
-								)
-							)
-							.sort(
-								(a, b) =>
-									safeNumber(a.monthPrice ?? a.price ?? a.rate) -
-									safeNumber(b.monthPrice ?? b.price ?? b.rate)
-							);
-						return { ...room, offers, monthly };
-					})
+					.map((room) => filterRoomToBookableFixedPackages(room, { now }))
 					.filter((room) => room.offers.length || room.monthly.length);
 
 				return { ...hotel, roomCountDetails: trimmedRooms };

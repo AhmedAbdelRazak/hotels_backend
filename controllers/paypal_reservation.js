@@ -66,6 +66,11 @@ const {
 	markReservationPendingConfirmation,
 } = require("../services/pendingConfirmationPolicy");
 const {
+	fixedPackageConflictResponse,
+	fixedPackageSelectionsMatch,
+	validateFixedPackageReservationPayload,
+} = require("../services/fixedPackagePolicy");
+const {
 	scheduleReservationConfirmedConversion,
 	schedulePaymentCapturedConversion,
 } = require("../services/conversionTracking");
@@ -2685,6 +2690,15 @@ exports.preparePendingReservation = async (req, res) => {
 					"Error occurred, please contact Jannat Booking Customer Support In The Chat",
 			});
 		}
+		const fixedPackageValidation = validateFixedPackageReservationPayload({
+			payload: body,
+			hotel,
+		});
+		if (!fixedPackageValidation.valid) {
+			return res
+				.status(409)
+				.json(fixedPackageConflictResponse(fixedPackageValidation));
+		}
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			body,
@@ -2735,9 +2749,24 @@ exports.preparePendingReservation = async (req, res) => {
 		}
 
 		const reuseWindowMs = 15 * 60 * 1000;
+		let existingPendingMatchesPackage = true;
+		if (existingPending) {
+			const existingPendingValidation = validateFixedPackageReservationPayload({
+				payload:
+					typeof existingPending.toObject === "function"
+						? existingPending.toObject()
+						: existingPending,
+				hotel,
+			});
+			existingPendingMatchesPackage = fixedPackageSelectionsMatch(
+				existingPendingValidation,
+				fixedPackageValidation,
+			);
+		}
 		if (
 			existingPending?.confirmation_number &&
 			existingPending?.createdAt &&
+			existingPendingMatchesPackage &&
 			Date.now() - new Date(existingPending.createdAt).getTime() < reuseWindowMs
 		) {
 			return res.status(200).json({
@@ -2919,6 +2948,17 @@ exports.createReservationAndProcess = async (req, res) => {
 		}
 		const { owner } = await getHotelAndOwner(hotelId);
 		const ownerEmail = owner?.email || null;
+
+		const fixedPackageValidation = validateFixedPackageReservationPayload({
+			payload: body,
+			hotel,
+		});
+		if (!fixedPackageValidation.valid) {
+			return await fail(
+				409,
+				fixedPackageConflictResponse(fixedPackageValidation),
+			);
+		}
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			body,
@@ -3315,6 +3355,35 @@ exports.createReservationAndProcess = async (req, res) => {
 						message:
 							"Pending reservation does not match customer email. Please retry the payment.",
 					});
+				}
+				const pendingPackageValidation =
+					validateFixedPackageReservationPayload({
+						payload:
+							typeof pendingReservation.toObject === "function"
+								? pendingReservation.toObject()
+								: pendingReservation,
+						hotel,
+					});
+				if (!pendingPackageValidation.valid) {
+					return await fail(
+						409,
+						fixedPackageConflictResponse(pendingPackageValidation),
+					);
+				}
+				if (
+					!fixedPackageSelectionsMatch(
+						pendingPackageValidation,
+						fixedPackageValidation,
+					)
+				) {
+					return await fail(
+						409,
+						fixedPackageConflictResponse({
+							code: "fixed_package_pending_selection_mismatch",
+							message:
+								"The package selection changed after payment started. Please refresh the offers page and begin checkout again.",
+						}),
+					);
 				}
 			}
 
@@ -6511,6 +6580,18 @@ exports.verifyReservationAndCreate = async (req, res) => {
 
 		// Duplicates
 		const reservationData = decoded;
+		const packageHotel = mongoose.Types.ObjectId.isValid(reservationData.hotelId)
+			? await HotelDetails.findById(reservationData.hotelId).exec()
+			: null;
+		const fixedPackageValidation = validateFixedPackageReservationPayload({
+			payload: reservationData,
+			hotel: packageHotel || {},
+		});
+		if (!fixedPackageValidation.valid) {
+			return res
+				.status(409)
+				.json(fixedPackageConflictResponse(fixedPackageValidation));
+		}
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			reservationData,
 			{ allowOverbook: false },

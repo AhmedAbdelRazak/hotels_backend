@@ -64,6 +64,12 @@ const {
 	hidePendingConfirmationForClient,
 } = require("../services/pendingConfirmationPolicy");
 const {
+	fixedPackageConflictResponse,
+	filterRoomToBookableFixedPackages,
+	hasFixedPackageReservationSignal,
+	validateFixedPackageReservationPayload,
+} = require("../services/fixedPackagePolicy");
+const {
 	OTA_PLATFORM_REVIEW_PENDING,
 	OTA_PLATFORM_REVIEW_RELEASED,
 	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
@@ -702,43 +708,11 @@ exports.listOfAllActiveHotels = async (req, res) => {
 
 exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 	try {
-		setPublicHotelCacheHeaders(res);
-		// ---- Controls (safe defaults) ----
-		const mode = String(req.query.mode || "activeOrUpcoming").toLowerCase();
-		const requireActiveRoom =
-			String(req.query.activeRoom || "true").toLowerCase() === "true";
+		// Deal eligibility changes at the Saudi business-date boundary. Do not let
+		// a browser/CDN replay yesterday's now-started package after midnight.
+		res.setHeader("Cache-Control", "no-store");
 		const minPhotos = Math.max(1, Number(req.query.minPhotos) || 1);
-
 		const now = new Date();
-
-		const inRangeActiveNow = (from, to) => {
-			const f = from ? new Date(from) : null;
-			const t = to ? new Date(to) : null;
-			if (f && isNaN(f)) return false;
-			if (t && isNaN(t)) return false;
-			if (f && t) return f <= now && now <= t;
-			if (f && !t) return f <= now; // open-ended end -> treat as active if started
-			if (!f && t) return now <= t; // open-ended start -> treat as active if not ended
-			return false;
-		};
-
-		const isActiveOrUpcoming = (from, to) => {
-			const f = from ? new Date(from) : null;
-			const t = to ? new Date(to) : null;
-			if (f && isNaN(f)) return false;
-			if (t && isNaN(t)) return false;
-			if (t && t < now) return false; // expired
-			if (f && f >= now) return true; // upcoming
-			if (t && t >= now) return true; // active (or open-ended start)
-			return false;
-		};
-
-		const keepByMode = (from, to) => {
-			if (mode === "all") return true;
-			if (mode === "activenow") return inRangeActiveNow(from, to);
-			// default
-			return isActiveOrUpcoming(from, to);
-		};
 
 		// ---- Base mongo filter — reduce doc count early ----
 		// Require hotel active, photos exist, coordinates valid, and at least one room with media+basePrice.
@@ -751,7 +725,7 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 				$elemMatch: {
 					"price.basePrice": { $gt: 0 },
 					[`photos.${minPhotos - 1}`]: { $exists: true }, // at least minPhotos
-					...(requireActiveRoom ? { activeRoom: true } : {}),
+					activeRoom: true,
 					// rooms must have either offers or monthly arrays non-empty (coarse gate)
 					$or: [
 						{ "offers.0": { $exists: true } },
@@ -774,59 +748,10 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 						const okPrice = room?.price?.basePrice > 0;
 						const okPhotos =
 							Array.isArray(room.photos) && room.photos.length >= minPhotos;
-						const okActive = requireActiveRoom
-							? room.activeRoom === true
-							: true;
+						const okActive = room.activeRoom === true;
 						return okPrice && okPhotos && okActive;
 					})
-					.map((room) => {
-						const offersAll = Array.isArray(room.offers) ? room.offers : [];
-						const monthlyAll = Array.isArray(room.monthly) ? room.monthly : [];
-
-						const offers = offersAll.filter((o) =>
-							keepByMode(
-								o.offerFrom || o.from || o.validFrom,
-								o.offerTo || o.to || o.validTo,
-							),
-						);
-						const monthly = monthlyAll.filter((m) =>
-							keepByMode(
-								m.monthFrom || m.from || m.validFrom,
-								m.monthTo || m.to || m.validTo,
-							),
-						);
-
-						// Optional sort for nicer UX in all consumers
-						const byValue = (a, b, getFrom, getPrice) => {
-							const priceDiff =
-								safeNumber(getPrice(a)) - safeNumber(getPrice(b));
-							if (priceDiff !== 0) return priceDiff;
-							const da = getFrom(a) ? new Date(getFrom(a)).getTime() : Infinity;
-							const db = getFrom(b) ? new Date(getFrom(b)).getTime() : Infinity;
-							return da - db;
-						};
-						const safeNumber = (v) =>
-							Number.isFinite(Number(v)) ? Number(v) : Infinity;
-
-						offers.sort((a, b) =>
-							byValue(
-								a,
-								b,
-								(x) => x.offerFrom || x.from || x.validFrom,
-								(x) => x.offerPrice ?? x.price,
-							),
-						);
-						monthly.sort((a, b) =>
-							byValue(
-								a,
-								b,
-								(x) => x.monthFrom || x.from || x.validFrom,
-								(x) => x.monthPrice ?? x.price ?? x.rate,
-							),
-						);
-
-						return { ...room, offers, monthly };
-					})
+					.map((room) => filterRoomToBookableFixedPackages(room, { now }))
 					.filter(
 						(r) =>
 							(r.offers && r.offers.length) || (r.monthly && r.monthly.length),
@@ -5845,6 +5770,30 @@ exports.createNewReservationClient2 = async (req, res) => {
 			return null;
 		};
 		/** ------------------ END DUPLICATE GUARD (helpers) ------------------ */
+
+		const fixedPackageSignalled = hasFixedPackageReservationSignal(req.body);
+		if (fixedPackageSignalled) {
+			const packageHotel = mongoose.Types.ObjectId.isValid(String(hotelId || ""))
+				? await HotelDetails.findOne({
+						_id: hotelId,
+						activateHotel: true,
+						xHotelProActive: { $ne: false },
+				  }).exec()
+				: null;
+			const fixedPackageValidation =
+				validateFixedPackageReservationPayload({
+					payload: req.body,
+					hotel: packageHotel || {},
+					// OrderTaker saves the PMS-configured package total. The public
+					// reserve-now/pay-in-hotel flow keeps its existing 10% markup.
+					applyPayInHotelMarkup: sentFrom !== "employee",
+				});
+			if (!fixedPackageValidation.valid) {
+				return res
+					.status(409)
+					.json(fixedPackageConflictResponse(fixedPackageValidation));
+			}
+		}
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			req.body,
