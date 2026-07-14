@@ -12,6 +12,7 @@
 		"ai:hotel-vector:worker:once": "node workers/hotelOpenAiKnowledgeSyncWorker.js --once",
 		"test:ai-hotel-vector": "node scripts/aiKnowledge/hotelOpenAiSyncChecks.js",
 		"test:hotel-reviews": "node --test scripts/hotelReviewRegressionChecks.test.js scripts/jannatGuestReviewSummary.test.js scripts/janatGuestReviewCacheInvalidation.test.js",
+		"test:guest-card": "node --test scripts/guestCardRegressionChecks.test.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
 	},
@@ -21,6 +22,7 @@
 	"author": "Ahmed Abdelrazak",
 	"license": "ISC",
 	"dependencies": {
+		"@fontsource/noto-sans-arabic": "^5.2.10",
 		"@paypal/checkout-server-sdk": "^1.0.3",
 		"@paypal/payouts-sdk": "^1.1.1",
 		"@sendgrid/mail": "^7.6.0",
@@ -29,6 +31,7 @@
 		"authorizenet": "^1.0.9",
 		"axios-retry": "^4.5.0",
 		"braintree": "^3.8.0",
+		"bwip-js": "^4.11.2",
 		"cloudinary": "^1.27.1",
 		"compression": "^1.7.4",
 		"cors": "^2.8.5",

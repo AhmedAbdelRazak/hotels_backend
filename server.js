@@ -20,6 +20,9 @@ const {
 const {
 	hotelReviewJsonParser,
 } = require("./services/hotelReviewJsonParser");
+const {
+	guestCardJsonParser,
+} = require("./services/guestCardJsonParser");
 
 const app = express();
 const server = http.createServer(app);
@@ -114,6 +117,12 @@ app.use(cors(corsOptions));
 app.use(
 	["/api/hotel-reviews", "/api/admin/hotel-reviews"],
 	hotelReviewJsonParser
+);
+// Guest Card email accepts one small JSON field. Reject oversized bodies before
+// they reach the legacy parser used by PMS upload-heavy endpoints.
+app.use(
+	/^\/api\/admin\/reservations\/[^/]+\/guest-card\/email\/[^/]+\/?$/,
+	guestCardJsonParser
 );
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
