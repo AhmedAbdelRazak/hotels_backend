@@ -57,6 +57,10 @@ const {
 	distinctBookingSources,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
+const {
+	getAdminGuestCard,
+	emailAdminGuestCard,
+} = require("../controllers/guestCard");
 
 router.post("/janat-website/:documentId", createUpdateDocument);
 router.get("/janat-website-document", list);
@@ -165,6 +169,22 @@ router.post(
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
 	sendingEmailForPaymentLink
+);
+
+router.get(
+	"/admin/reservations/:reservationId/guest-card/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	getAdminGuestCard
+);
+
+router.post(
+	"/admin/reservations/:reservationId/guest-card/email/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	emailAdminGuestCard
 );
 
 router.post(
