@@ -18,8 +18,11 @@ const embeddedArabicFontCss = [
   })
   .join("");
 
-const CARD_VERSION = 1;
+const CARD_VERSION = 2;
 const BARCODE_MAX_LENGTH = 80;
+const BARCODE_SOURCE_SCALE = 3;
+const BARCODE_QUIET_ZONE_MODULES = 10;
+const BARCODE_MAX_DISPLAY_WIDTH = 370;
 const PAYMENT_BREAKDOWN_FIELDS = [
   "paid_online_via_link",
   "paid_online_via_instapay",
@@ -331,25 +334,37 @@ const buildPaymentStatus = (reservation = {}) => {
   };
 };
 
-const barcodeSvgDataUri = (reference) => {
+const buildBarcodePng = async (reference) => {
   const text = cleanText(reference, BARCODE_MAX_LENGTH);
-  if (!text) return "";
-  const svg = bwipjs.toSVG({
+  if (!text) return { dataUri: "", displayWidth: 0 };
+  const encoded = bwipjs.raw({ bcid: "code128", text })?.[0];
+  const barcodeModules =
+    (encoded?.sbs || []).reduce((sum, width) => sum + width, 0) +
+    BARCODE_QUIET_ZONE_MODULES * 2;
+  const displayModuleWidth = Math.min(
+    BARCODE_SOURCE_SCALE,
+    Math.floor(BARCODE_MAX_DISPLAY_WIDTH / barcodeModules)
+  );
+  if (!Number.isFinite(displayModuleWidth) || displayModuleWidth < 1) {
+    return { dataUri: "", displayWidth: 0 };
+  }
+  const png = await bwipjs.toBuffer({
     bcid: "code128",
     text,
-    scale: 2,
-    height: 12,
+    scale: BARCODE_SOURCE_SCALE,
+    height: 5,
     includetext: false,
-    paddingwidth: 4,
+    paddingwidth: BARCODE_QUIET_ZONE_MODULES,
     paddingheight: 2,
     backgroundcolor: "FFFFFF",
   });
-  return `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString(
-    "base64"
-  )}`;
+  return {
+    dataUri: `data:image/png;base64,${png.toString("base64")}`,
+    displayWidth: barcodeModules * displayModuleWidth,
+  };
 };
 
-const buildGuestCardData = (reservation = {}, populatedHotel = null) => {
+const buildGuestCardData = async (reservation = {}, populatedHotel = null) => {
   const hotel =
     populatedHotel ||
     (reservation?.hotelId && typeof reservation.hotelId === "object"
@@ -389,6 +404,7 @@ const buildGuestCardData = (reservation = {}, populatedHotel = null) => {
     reservation?.days_of_residence
   );
   const paymentStatus = buildPaymentStatus(reservation);
+  const barcode = await buildBarcodePng(confirmationNumber);
 
   return {
     version: CARD_VERSION,
@@ -403,7 +419,8 @@ const buildGuestCardData = (reservation = {}, populatedHotel = null) => {
       english: "Hotel Confirmation No.",
       arabic: "رقم تأكيد الفندق",
     },
-    barcodeDataUri: barcodeSvgDataUri(confirmationNumber),
+    barcodeDataUri: barcode.dataUri,
+    barcodeDisplayWidth: barcode.displayWidth,
     hotelNameEnglish:
       titleCaseLatin(hotel?.hotelName || reservation?.hotelName) ||
       "Jannat Booking",
@@ -431,7 +448,7 @@ const buildGuestCardData = (reservation = {}, populatedHotel = null) => {
 };
 
 const guestCardCss = `
-${embeddedArabicFontCss}*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#050505;font-family:Arial,"Jannat Noto Arabic",Tahoma,sans-serif}[lang="ar"]{font-family:"Jannat Noto Arabic",Tahoma,sans-serif}.guest-card-page{align-items:center;background:#fff;display:flex;height:820px;justify-content:center;width:1200px}.jannat-guest-card{background:#fff;border:4px solid #050505;display:grid;grid-template-rows:138px 22px 85px 70px 1fr 96px;height:800px;overflow:hidden;width:1170px}.jgc-header{align-items:center;background:#4e5654;display:flex;justify-content:space-between;padding:16px 62px 12px}.jgc-brand{color:#fff;display:grid;line-height:1}.jgc-brand-main{font-size:58px;font-weight:300;letter-spacing:5px}.jgc-brand-sub{color:#ff861c;font-size:19px;font-weight:800;justify-self:end;margin-right:5px}.jgc-title{color:#ff861c;font-size:52px;font-weight:800}.jgc-stripe{background:#ff861c}.jgc-hotel{align-content:center;background:#e4e5e8;display:grid;gap:2px;justify-items:center;padding:7px 20px;text-align:center}.jgc-hotel-en,.jgc-hotel-ar{font-size:28px;font-weight:800;line-height:1.15}.jgc-hotel-en.compact,.jgc-hotel-ar.compact{font-size:23px}.jgc-hotel-en.dense,.jgc-hotel-ar.dense{font-size:19px}.jgc-booking{align-content:center;background:#050505;color:#fff;display:grid;font-size:21px;gap:3px;justify-items:center;line-height:1.15;padding:7px}.jgc-body{display:grid;grid-template-rows:minmax(0,1fr) 116px;min-height:0}.jgc-main{display:grid;gap:32px;grid-template-columns:1.35fr 1fr;min-height:0;padding:8px 22px 8px}.jgc-section-title{font-size:27px;font-weight:900;line-height:1.05;margin:0 0 10px;text-align:center}.jgc-section-title .ar{display:block;font-size:24px;margin-top:2px}.jgc-detail-list{display:grid;gap:10px}.jgc-detail-row{border:3px solid #111;display:grid;grid-template-columns:220px 1fr;min-height:62px}.jgc-detail-label{align-content:center;border-right:3px solid #111;display:grid;font-size:20px;font-weight:800;line-height:1.1;padding:4px;text-align:center}.jgc-detail-value{align-content:center;display:grid;font-size:21px;font-weight:700;line-height:1.16;overflow-wrap:anywhere;padding:5px 12px;text-align:center}.jgc-detail-value.compact{font-size:17px}.jgc-detail-value.dense{font-size:13px;line-height:1.1}.jgc-confirm{align-content:start;display:grid;padding-top:6px}.jgc-confirm-heading{font-size:30px;font-weight:900;margin:0 0 11px;text-align:center}.jgc-confirm-box{background:linear-gradient(135deg,#f7f8f9,#e2e5e8);border:2px solid #333;display:grid;justify-items:center;margin:0 auto;max-width:420px;padding:8px 22px 6px;width:100%}.jgc-confirm-label{font-size:18px;font-weight:800;text-align:center}.jgc-confirm-number{color:#167234;font-size:40px;font-weight:900;line-height:1.05;margin:3px 0;overflow-wrap:anywhere;text-align:center}.jgc-confirm-number.compact{font-size:31px}.jgc-confirm-number.dense{font-size:23px}.jgc-barcode{display:block;height:52px;max-width:320px;object-fit:contain;width:100%}.jgc-stay{display:grid;grid-template-columns:2fr repeat(3,1fr);min-height:0;padding:0 18px 6px}.jgc-dates,.jgc-metric{border:3px solid #111;min-height:0;min-width:0}.jgc-dates{display:grid;grid-template-rows:1fr 1fr}.jgc-date-row{display:grid;grid-template-columns:190px 1fr;min-height:0}.jgc-date-row:first-child{border-bottom:3px solid #111}.jgc-date-label{align-content:center;border-right:3px solid #111;display:grid;font-size:16px;font-weight:900;line-height:1.1;padding:2px;text-align:center}.jgc-date-value{align-content:center;display:grid;font-size:16px;line-height:1.14;padding:2px 7px;text-align:center}.jgc-metric{border-left:0;display:grid;grid-template-rows:1fr 1fr;text-align:center}.jgc-metric-label{align-content:center;border-bottom:3px solid #111;display:grid;font-size:17px;font-weight:900;line-height:1.08;padding:2px}.jgc-metric-value{align-content:center;display:grid;font-size:20px;line-height:1.08;padding:2px}.jgc-payment.paid{background:#c6f1cf;color:#078320;font-weight:900}.jgc-payment.partial{background:#fff0bd;color:#8b5a00;font-weight:900}.jgc-payment.pending{background:#fff5d7;color:#7a4b00;font-weight:900}.jgc-payment.unpaid{background:#fee2e2;color:#a31313;font-weight:900}.jgc-footer{border-top:3px solid #111;display:grid;font-size:14px;line-height:1.18;padding:6px 34px}.jgc-footer strong{font-size:16px}.jgc-footer-en{direction:ltr;text-align:left}.jgc-footer-ar{direction:rtl;text-align:right}.jgc-ltr{direction:ltr;unicode-bidi:isolate}@page{size:1200px 820px;margin:0}@media print{html,body{height:820px;width:1200px}}
+${embeddedArabicFontCss}*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#050505;font-family:Arial,"Jannat Noto Arabic",Tahoma,sans-serif}[lang="ar"]{font-family:"Jannat Noto Arabic",Tahoma,sans-serif}.guest-card-page{align-items:center;background:#fff;display:flex;height:820px;justify-content:center;width:1200px}.jannat-guest-card{background:#fff;border:4px solid #050505;display:grid;grid-template-rows:138px 22px 85px 70px 1fr 96px;height:800px;overflow:hidden;width:1170px}.jgc-header{align-items:center;background:#4e5654;display:flex;justify-content:space-between;padding:16px 62px 12px}.jgc-brand{color:#fff;display:grid;line-height:1}.jgc-brand-main{font-size:58px;font-weight:300;letter-spacing:5px}.jgc-brand-sub{color:#ff861c;font-size:19px;font-weight:800;justify-self:end;margin-right:5px}.jgc-title{color:#ff861c;font-size:52px;font-weight:800}.jgc-stripe{background:#ff861c}.jgc-hotel{align-content:center;background:#e4e5e8;display:grid;gap:2px;justify-items:center;padding:7px 20px;text-align:center}.jgc-hotel-en,.jgc-hotel-ar{font-size:28px;font-weight:800;line-height:1.15}.jgc-hotel-en.compact,.jgc-hotel-ar.compact{font-size:23px}.jgc-hotel-en.dense,.jgc-hotel-ar.dense{font-size:19px}.jgc-booking{align-content:center;background:#050505;color:#fff;display:grid;font-size:21px;gap:3px;justify-items:center;line-height:1.15;padding:7px}.jgc-body{display:grid;grid-template-rows:minmax(0,1fr) 116px;min-height:0}.jgc-main{display:grid;gap:32px;grid-template-columns:1.35fr 1fr;min-height:0;padding:8px 22px 8px}.jgc-section-title{font-size:27px;font-weight:900;line-height:1.05;margin:0 0 10px;text-align:center}.jgc-section-title .ar{display:block;font-size:24px;margin-top:2px}.jgc-detail-list{display:grid;gap:10px}.jgc-detail-row{border:3px solid #111;display:grid;grid-template-columns:220px 1fr;min-height:62px}.jgc-detail-label{align-content:center;border-right:3px solid #111;display:grid;font-size:20px;font-weight:800;line-height:1.1;padding:4px;text-align:center}.jgc-detail-value{align-content:center;display:grid;font-size:21px;font-weight:700;line-height:1.16;overflow-wrap:anywhere;padding:5px 12px;text-align:center}.jgc-detail-value.compact{font-size:17px}.jgc-detail-value.dense{font-size:13px;line-height:1.1}.jgc-confirm{align-content:start;display:grid;padding-top:6px}.jgc-confirm-heading{font-size:30px;font-weight:900;margin:0 0 11px;text-align:center}.jgc-confirm-box{background:linear-gradient(135deg,#f7f8f9,#e2e5e8);border:2px solid #333;display:grid;justify-items:center;margin:0 auto;max-width:420px;padding:8px 22px 6px;width:100%}.jgc-confirm-label{font-size:18px;font-weight:800;text-align:center}.jgc-confirm-number{color:#167234;font-size:40px;font-weight:900;line-height:1.05;margin:3px 0;overflow-wrap:anywhere;text-align:center}.jgc-confirm-number.compact{font-size:31px}.jgc-confirm-number.dense{font-size:23px}.jgc-barcode{display:block;height:56px;image-rendering:crisp-edges;image-rendering:pixelated;max-width:370px;object-fit:fill;width:auto}.jgc-stay{display:grid;grid-template-columns:2fr repeat(3,1fr);min-height:0;padding:0 18px 6px}.jgc-dates,.jgc-metric{border:3px solid #111;min-height:0;min-width:0}.jgc-dates{display:grid;grid-template-rows:1fr 1fr}.jgc-date-row{display:grid;grid-template-columns:190px 1fr;min-height:0}.jgc-date-row:first-child{border-bottom:3px solid #111}.jgc-date-label{align-content:center;border-right:3px solid #111;display:grid;font-size:16px;font-weight:900;line-height:1.1;padding:2px;text-align:center}.jgc-date-value{align-content:center;display:grid;font-size:16px;line-height:1.14;padding:2px 7px;text-align:center}.jgc-metric{border-left:0;display:grid;grid-template-rows:1fr 1fr;text-align:center}.jgc-metric-label{align-content:center;border-bottom:3px solid #111;display:grid;font-size:17px;font-weight:900;line-height:1.08;padding:2px}.jgc-metric-value{align-content:center;display:grid;font-size:20px;line-height:1.08;padding:2px}.jgc-payment.paid{background:#c6f1cf;color:#078320;font-weight:900}.jgc-payment.partial{background:#fff0bd;color:#8b5a00;font-weight:900}.jgc-payment.pending{background:#fff5d7;color:#7a4b00;font-weight:900}.jgc-payment.unpaid{background:#fee2e2;color:#a31313;font-weight:900}.jgc-footer{border-top:3px solid #111;display:grid;font-size:14px;line-height:1.18;padding:6px 34px}.jgc-footer strong{font-size:16px}.jgc-footer-en{direction:ltr;text-align:left}.jgc-footer-ar{direction:rtl;text-align:right}.jgc-ltr{direction:ltr;unicode-bidi:isolate}@page{size:1200px 820px;margin:0}@media print{html,body{height:820px;width:1200px}}
 `;
 
 const renderGuestCardMarkup = (card = {}) => {
@@ -444,7 +461,10 @@ const renderGuestCardMarkup = (card = {}) => {
     return "";
   };
   const barcode = card?.barcodeDataUri
-    ? `<img class="jgc-barcode" alt="Barcode for confirmation ${value(
+    ? `<img class="jgc-barcode" style="width:${Math.min(
+        Math.max(toFiniteNumber(card.barcodeDisplayWidth, 330), 1),
+        BARCODE_MAX_DISPLAY_WIDTH
+      )}px" alt="Barcode for confirmation ${value(
         card.confirmationNumber
       )}" src="${escapeHtml(card.barcodeDataUri)}">`
     : "";
