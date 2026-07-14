@@ -21,6 +21,10 @@ const {
 	addHotelManagementReservationVisibilityToFilter,
 	withHotelManagementSourceViewContext,
 } = require("../services/reservationVisibility");
+const {
+	PaidBreakdownDateFilterError,
+	buildPaidBreakdownDateFilter,
+} = require("../services/paidBreakdownDateFilter");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -4598,13 +4602,22 @@ const parseReportPagination = (req) => {
 	return { page, limit, skip };
 };
 
-const buildPaidBreakdownFilter = ({ hotelId, searchQuery, actor }) => {
+const buildPaidBreakdownFilter = ({
+	hotelId,
+	searchQuery,
+	actor,
+	dateBy,
+	dateFrom,
+	dateTo,
+}) => {
 	const filters = [];
 	if (hotelId) {
 		filters.push({ hotelId: new ObjectId(hotelId) });
 	}
 	filters.push(buildExcludePendingOtaReviewFilter());
 	filters.push(buildPaidBreakdownNonZeroFilter());
+	const dateFilter = buildPaidBreakdownDateFilter({ dateBy, dateFrom, dateTo });
+	if (dateFilter) filters.push(dateFilter);
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
 	const filter = filters.length > 1 ? { $and: filters } : filters[0];
@@ -4671,11 +4684,21 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 
 		const { page, limit, skip } = parseReportPagination(req);
 		const searchQuery = req.query.searchQuery || "";
-		const baseFilter = buildPaidBreakdownFilter({ hotelId, actor: req.profile });
+		const dateFilterOptions = {
+			dateBy: req.query.dateBy,
+			dateFrom: req.query.dateFrom,
+			dateTo: req.query.dateTo,
+		};
+		const baseFilter = buildPaidBreakdownFilter({
+			hotelId,
+			actor: req.profile,
+			...dateFilterOptions,
+		});
 		const finalFilter = buildPaidBreakdownFilter({
 			hotelId,
 			searchQuery,
 			actor: req.profile,
+			...dateFilterOptions,
 		});
 
 		const totalDocuments = await Reservations.countDocuments(finalFilter);
@@ -4702,6 +4725,9 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 
 		return res.json({ data, totalDocuments, page, limit, scorecards });
 	} catch (err) {
+		if (err instanceof PaidBreakdownDateFilterError) {
+			return res.status(err.statusCode).json({ error: err.message });
+		}
 		console.error("Error in paidBreakdownReportAdmin:", err);
 		return res.status(500).json({ error: err.message });
 	}
