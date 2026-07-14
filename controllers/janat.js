@@ -2,6 +2,7 @@ const Janat = require("../models/janat");
 const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
 const Reservations = require("../models/reservations"); // Assuming this is your reservations model
+const Rooms = require("../models/rooms");
 const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
 const axios = require("axios");
@@ -81,6 +82,9 @@ const {
 	isOtaPlatformReviewPending,
 	normalizeId: normalizeOtaReviewId,
 } = require("../services/otaReservationVisibility");
+const {
+	attachAdminReservationRoomDetails,
+} = require("../services/adminReservationRoomDetails");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -576,9 +580,21 @@ const assignedHotelIdsFromUser = (user = {}) =>
 		.map(normalizeId)
 		.filter((id, index, arr) => id && arr.indexOf(id) === index);
 
+const userRoleNumbers = (user = {}) =>
+	[
+		user.role,
+		...(Array.isArray(user.roles) ? user.roles : []),
+	]
+		.map(Number)
+		.filter(Number.isFinite);
+
 const platformReservationScopeFilter = (req = {}) => {
 	const actor = req.profile;
-	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+	if (
+		!actor ||
+		isConfiguredSuperAdmin(actor) ||
+		!userRoleNumbers(actor).includes(1000)
+	) {
 		return null;
 	}
 	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
@@ -4538,6 +4554,25 @@ exports.paginatedReservationList = async (req, res) => {
 		const startIndex = (pageNumber - 1) * pageSize;
 		const endIndex = startIndex + pageSize;
 		const finalDocs = filteredDocs.slice(startIndex, endIndex);
+		let finalDocsWithRoomDetails = finalDocs.map((reservation) => ({
+			...reservation,
+			roomDetails: [],
+		}));
+		try {
+			finalDocsWithRoomDetails = await attachAdminReservationRoomDetails(
+				finalDocs,
+				(roomIds) =>
+					Rooms.find({ _id: { $in: roomIds } })
+						.select("_id hotelId room_number room_type display_name")
+						.lean()
+						.exec(),
+			);
+		} catch (roomDetailsError) {
+			console.error(
+				"[ADMIN RESERVATIONS] Room details enrichment failed:",
+				roomDetailsError?.message || roomDetailsError,
+			);
+		}
 
 		// 7) Scorecards logic (unchanged)
 		function isToday(date) {
@@ -4895,6 +4930,9 @@ exports.paginatedReservationList = async (req, res) => {
 				pickedRoomsPricing: compactRoomSelection(
 					reservation.pickedRoomsPricing || reservation.pickedRoomsType
 				),
+				roomDetails: Array.isArray(reservation.roomDetails)
+					? reservation.roomDetails
+					: [],
 				hotel_visible_amount: reservation.hotel_visible_amount || 0,
 				ota_financial_summary: reservation.ota_financial_summary || undefined,
 				isCheckinToday: Boolean(reservation.isCheckinToday),
@@ -4907,7 +4945,7 @@ exports.paginatedReservationList = async (req, res) => {
 		return res.status(200).json({
 			success: true,
 			data: sanitizeReservationAuditLogsCollectionForViewer(
-				finalDocs,
+				finalDocsWithRoomDetails,
 				req.profile
 			).map(compactAdminReservationRow), // after filter+search + skip/limit
 			totalDocuments,
