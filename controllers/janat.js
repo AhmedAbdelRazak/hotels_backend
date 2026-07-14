@@ -172,6 +172,7 @@ const stripAgentRoomOverrides = (hotel = {}) => {
 const PUBLIC_HOTEL_CACHE_TTL_MS = 60 * 1000;
 const PUBLIC_HOTEL_CACHE_MAX_KEYS = 80;
 const publicHotelResponseCache = new Map();
+let publicHotelGuestReviewCacheGeneration = 0;
 const MAKKAH_HARAM_COORDS = [39.8262, 21.4225]; // [lng, lat]
 const MADINAH_PROPHET_MOSQUE_COORDS = [39.6142, 24.4672]; // [lng, lat]
 const PUBLIC_CURRENCY_CODES = [
@@ -252,6 +253,30 @@ const PUBLIC_HOTEL_LIST_SELECT = [
 ].join(" ");
 const PUBLIC_HOTEL_DEALS_SELECT = `${PUBLIC_HOTEL_LIST_SELECT} roomCountDetails.offers roomCountDetails.monthly`;
 
+const isGuestReviewSummaryPublicHotelCacheKey = (key) =>
+	key === "active-hotels" ||
+	key === "active-hotel-list" ||
+	String(key || "").startsWith("room-query-list:");
+
+const invalidatePublicHotelGuestReviewSummaryCache = () => {
+	publicHotelGuestReviewCacheGeneration += 1;
+	let deletedKeys = 0;
+
+	for (const key of publicHotelResponseCache.keys()) {
+		if (!isGuestReviewSummaryPublicHotelCacheKey(key)) continue;
+		publicHotelResponseCache.delete(key);
+		deletedKeys += 1;
+	}
+
+	return deletedKeys;
+};
+
+// Hotel-review moderation calls this synchronously after a successful change.
+// The generation bump also prevents an older in-flight loader from restoring
+// a review summary that was read before the moderation completed.
+exports.invalidatePublicHotelGuestReviewSummaryCache =
+	invalidatePublicHotelGuestReviewSummaryCache;
+
 const publicCacheGet = (key) => {
 	const hit = publicHotelResponseCache.get(key);
 	if (!hit) return null;
@@ -273,8 +298,13 @@ const publicCacheSet = (key, value) => {
 	});
 };
 
-const setPublicHotelCacheHeaders = (res) => {
-	res.setHeader("Cache-Control", "public, max-age=60, s-maxage=120");
+const setPublicHotelCacheHeaders = (res, { containsGuestReviews = false } = {}) => {
+	res.setHeader(
+		"Cache-Control",
+		containsGuestReviews
+			? "no-store, max-age=0"
+			: "public, max-age=60, s-maxage=120",
+	);
 };
 
 const parseTimeToMinutes = (timeStr) => {
@@ -465,13 +495,37 @@ const compactPublicHotel = (
 });
 
 const sendCachedPublicJson = async (req, res, cacheKey, loader) => {
-	setPublicHotelCacheHeaders(res);
+	const containsGuestReviews =
+		isGuestReviewSummaryPublicHotelCacheKey(cacheKey);
+	setPublicHotelCacheHeaders(res, { containsGuestReviews });
 	const cached = publicCacheGet(cacheKey);
 	if (cached) return res.status(200).json(cached);
 
+	const guestReviewCacheGeneration =
+		containsGuestReviews
+			? publicHotelGuestReviewCacheGeneration
+			: null;
 	const value = await loader();
-	publicCacheSet(cacheKey, value);
+	if (
+		guestReviewCacheGeneration === null ||
+		guestReviewCacheGeneration === publicHotelGuestReviewCacheGeneration
+	) {
+		publicCacheSet(cacheKey, value);
+	}
 	return res.status(200).json(value);
+};
+
+exports.__test = {
+	getPublicHotelGuestReviewCacheGeneration: () =>
+		publicHotelGuestReviewCacheGeneration,
+	isGuestReviewSummaryPublicHotelCacheKey,
+	publicCacheGet,
+	publicCacheSet,
+	resetPublicHotelResponseCache: () => {
+		publicHotelResponseCache.clear();
+		publicHotelGuestReviewCacheGeneration = 0;
+	},
+	sendCachedPublicJson,
 };
 
 const fetchJsonWithTimeout = async (url, timeoutMs) => {

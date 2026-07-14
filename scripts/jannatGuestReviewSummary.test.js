@@ -6,6 +6,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const HotelReview = require("../models/hotel_review");
+const {
+	effectiveRatingVisibilityMongoFilter,
+} = require("../services/hotelReviewVisibility");
 
 const {
 	guestReviewSummaryForHotel,
@@ -41,7 +44,7 @@ test("guest review summary serialization exposes a compact real-rating shape", (
 	});
 });
 
-test("bulk summary pipeline is active-only, indexed by hotel, and deduplicates ids", () => {
+test("bulk summary pipeline uses effective rating visibility and deduplicates ids", () => {
 	const first = new mongoose.Types.ObjectId();
 	const second = new mongoose.Types.ObjectId();
 	const pipeline = summary.buildActiveGuestReviewSummaryPipeline([
@@ -52,7 +55,10 @@ test("bulk summary pipeline is active-only, indexed by hotel, and deduplicates i
 	]);
 
 	assert.equal(pipeline.length, 2);
-	assert.equal(pipeline[0].$match.status, "active");
+	assert.deepEqual(
+		pipeline[0].$match.$or,
+		effectiveRatingVisibilityMongoFilter().$or,
+	);
 	assert.deepEqual(
 		pipeline[0].$match.hotelId.$in.map(String),
 		[String(first), String(second)]
@@ -103,7 +109,10 @@ test("bulk loader executes one aggregation and maps only grouped summaries", asy
 			new mongoose.Types.ObjectId(),
 		]);
 		assert.equal(aggregateCalls, 1);
-		assert.equal(capturedPipeline[0].$match.status, "active");
+		assert.deepEqual(
+			capturedPipeline[0].$match.$or,
+			effectiveRatingVisibilityMongoFilter().$or,
+		);
 		assert.deepEqual(summaries.get(String(hotelId)), {
 			ratingCount: 2,
 			ratingSum: 9,

@@ -4,6 +4,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
 const express = require("express");
 const fetch = require("node-fetch");
@@ -16,6 +17,7 @@ const HotelReview = require("../models/hotel_review");
 const HotelReviewSummary = require("../models/hotel_review_summary");
 const HotelReviewInvitation = require("../models/hotel_review_invitation");
 const { __test: review } = require("../controllers/hoteldetails");
+const visibility = require("../services/hotelReviewVisibility");
 const {
 	hotelReviewJsonParser,
 } = require("../services/hotelReviewJsonParser");
@@ -185,7 +187,7 @@ test("summary freshness and repair guards reject stale or concurrently changed r
 	});
 });
 
-test("public review serialization is minimal and includes only a verification badge", () => {
+test("public review serialization shows both legacy-active rating and comment", () => {
 	const publicReview = review.serializePublicReview({
 		_id: new mongoose.Types.ObjectId(),
 		rating: 5,
@@ -203,16 +205,231 @@ test("public review serialization is minimal and includes only a verification ba
 	assert.deepEqual(Object.keys(publicReview).sort(), [
 		"_id",
 		"comment",
+		"commentVisible",
 		"createdAt",
 		"displayName",
 		"rating",
+		"ratingVisible",
 		"updatedAt",
 		"verifiedStay",
 	]);
 	assert.equal(publicReview.verifiedStay, true);
+	assert.equal(publicReview.ratingVisible, true);
+	assert.equal(publicReview.commentVisible, true);
 	assert.equal("firstName" in publicReview, false);
 	assert.equal("confirmationNumber" in publicReview, false);
 	assert.equal("roomLabel" in publicReview, false);
+});
+
+test("public serialization can hide only the comment", () => {
+	const publicReview = review.serializePublicReview({
+		_id: new mongoose.Types.ObjectId(),
+		rating: 4,
+		comment: "Private comment",
+		status: "active",
+		ratingVisible: true,
+		commentVisible: false,
+	});
+	assert.equal(publicReview.rating, 4);
+	assert.equal(publicReview.comment, "");
+	assert.equal(publicReview.ratingVisible, true);
+	assert.equal(publicReview.commentVisible, false);
+});
+
+test("public serialization can hide only the rating", () => {
+	const publicReview = review.serializePublicReview({
+		_id: new mongoose.Types.ObjectId(),
+		rating: 2,
+		comment: "Comment stays public",
+		status: "active",
+		ratingVisible: false,
+		commentVisible: true,
+	});
+	assert.equal(publicReview.rating, null);
+	assert.equal(publicReview.comment, "Comment stays public");
+	assert.equal(publicReview.ratingVisible, false);
+	assert.equal(publicReview.commentVisible, true);
+});
+
+test("public list pagination filter includes rating-only and comment-only rows", () => {
+	const hotelId = new mongoose.Types.ObjectId();
+	const filter = review.buildPublicReviewListFilter(hotelId);
+	assert.equal(filter.hotelId, hotelId);
+	assert.deepEqual(
+		filter.$or,
+		visibility.publicReviewContentMongoFilter().$or,
+	);
+	assert.equal(filter.$or.length, 2);
+	assert.ok(filter.$or[1].$and[1].comment.$regex.test("public comment"));
+	assert.equal(filter.$or[1].$and[1].comment.$regex.test("   "), false);
+});
+
+test("fully hidden reviews are omitted from the public response", () => {
+	assert.equal(
+		review.serializePublicReview({
+			_id: new mongoose.Types.ObjectId(),
+			rating: 5,
+			comment: "Hidden",
+			status: "active",
+			ratingVisible: false,
+			commentVisible: false,
+		}),
+		null,
+	);
+	assert.equal(
+		review.serializePublicReview({
+			_id: new mongoose.Types.ObjectId(),
+			rating: 5,
+			comment: "Legacy hidden",
+			status: "inactive",
+		}),
+		null,
+	);
+	assert.equal(
+		review.serializePublicReview({
+			_id: new mongoose.Types.ObjectId(),
+			rating: 5,
+			comment: "Malformed visibility must fail closed",
+			status: "active",
+			ratingVisible: "true",
+			commentVisible: "true",
+		}),
+		null,
+	);
+});
+
+test("a missing comment cannot create a comment-only public row", () => {
+	const source = {
+		_id: new mongoose.Types.ObjectId(),
+		rating: 3,
+		comment: "",
+		status: "active",
+		ratingVisible: false,
+		commentVisible: true,
+	};
+	assert.equal(review.serializePublicReview(source), null);
+	assert.deepEqual(
+		visibility.resolveHotelReviewVisibility(source),
+		{
+			ratingVisible: false,
+			commentVisible: false,
+			commentConfiguredVisible: true,
+			hasComment: false,
+			hasPublicContent: false,
+			status: "inactive",
+		},
+	);
+	const transition = review.buildReviewVisibilityTransition(source, {
+		hasCommentVisible: true,
+		commentVisible: true,
+	});
+	assert.equal(transition.next.commentVisible, false);
+	assert.equal(transition.next.status, "inactive");
+	assert.equal(transition.normalizesBlankComment, true);
+	assert.equal(transition.changed, true);
+});
+
+test("rating-hidden rows are excluded by every rating aggregation policy", () => {
+	const hotelId = new mongoose.Types.ObjectId();
+	const expectedVisibilityFilter =
+		visibility.effectiveRatingVisibilityMongoFilter();
+	assert.deepEqual(
+		review.buildHotelReviewSummaryPipeline(hotelId)[0].$match,
+		{
+			hotelId,
+			...expectedVisibilityFilter,
+		},
+	);
+	assert.equal(
+		visibility.resolveHotelReviewVisibility({
+			status: "active",
+			ratingVisible: false,
+			commentVisible: true,
+			comment: "Still public",
+		}).ratingVisible,
+		false,
+	);
+	const adminGroup = review.adminSummaryPipeline({})[1].$group;
+	assert.deepEqual(
+		adminGroup.visibleRatingCount.$sum.$cond[0],
+		visibility.effectiveRatingVisibilityAggregationExpression(),
+	);
+	assert.deepEqual(
+		adminGroup.activeRatingSum.$sum.$cond[0],
+		visibility.effectiveRatingVisibilityAggregationExpression(),
+	);
+	assert.equal(
+		review.serializeAdminSummary({
+			total: 2,
+			active: 2,
+			inactive: 0,
+			visibleRatingCount: 1,
+			visibleCommentCount: 2,
+			activeRatingSum: 5,
+		}).averageRating,
+		5,
+	);
+	assert.deepEqual(
+		adminGroup.visibleCommentCount.$sum.$cond[0],
+		visibility.effectiveCommentVisibilityAggregationExpression(),
+	);
+	const commentExpression =
+		visibility.effectiveCommentVisibilityAggregationExpression();
+	assert.deepEqual(commentExpression.$and[1], {
+		$ne: [
+			{ $trim: { input: { $ifNull: ["$comment", ""] } } },
+			"",
+		],
+	});
+});
+
+test("admin active and inactive filters use effective public visibility", async () => {
+	const active = await review.buildAdminReviewFilters({ status: "active" });
+	assert.deepEqual(active.listFilter, {
+		$and: [{}, visibility.publicReviewContentMongoFilter()],
+	});
+	const inactive = await review.buildAdminReviewFilters({ status: "inactive" });
+	assert.deepEqual(inactive.listFilter, {
+		$and: [
+			{},
+			{ $nor: [visibility.publicReviewContentMongoFilter()] },
+		],
+	});
+});
+
+test("legacy status projection hides every partial row during rollback", () => {
+	assert.equal(
+		visibility.legacyRollbackSafeReviewStatus({
+			ratingVisible: true,
+			commentVisible: true,
+			hasComment: true,
+		}),
+		"active",
+	);
+	assert.equal(
+		visibility.legacyRollbackSafeReviewStatus({
+			ratingVisible: true,
+			commentVisible: false,
+			hasComment: true,
+		}),
+		"inactive",
+	);
+	assert.equal(
+		visibility.legacyRollbackSafeReviewStatus({
+			ratingVisible: false,
+			commentVisible: true,
+			hasComment: true,
+		}),
+		"inactive",
+	);
+	assert.equal(
+		visibility.legacyRollbackSafeReviewStatus({
+			ratingVisible: true,
+			commentVisible: false,
+			hasComment: false,
+		}),
+		"active",
+	);
 });
 
 test("confirmation values use authenticated encryption and deterministic private lookup", () => {
@@ -377,6 +594,31 @@ test("pagination and moderation inputs remain bounded and explicit", () => {
 	assert.equal(review.requestedModerationStatus({ status: "inactive" }), "inactive");
 	assert.equal(review.requestedModerationStatus({ active: true }), "active");
 	assert.throws(() => review.requestedModerationStatus({ status: "deleted" }), /active or inactive/);
+	assert.deepEqual(review.requestedReviewVisibilityPatch({ status: "inactive" }), {
+		mode: "legacy-status",
+		hasRatingVisible: true,
+		hasCommentVisible: true,
+		ratingVisible: false,
+		commentVisible: false,
+	});
+	assert.deepEqual(review.requestedReviewVisibilityPatch({ commentVisible: false }), {
+		mode: "visibility",
+		hasRatingVisible: false,
+		hasCommentVisible: true,
+		commentVisible: false,
+	});
+	assert.throws(
+		() =>
+			review.requestedReviewVisibilityPatch({
+				status: "active",
+				ratingVisible: false,
+			}),
+		/visibility fields or legacy status/i,
+	);
+	assert.throws(
+		() => review.requestedReviewVisibilityPatch({ ratingVisible: "false" }),
+		/must be true or false/i,
+	);
 	assert.deepEqual(
 		review.parsePagination(
 			{ page: "2", limit: "100" },
@@ -415,6 +657,8 @@ test("admin review rows provide the PMS-compatible straightforward fields", () =
 		"rating",
 		"comment",
 		"status",
+		"ratingVisible",
+		"commentVisible",
 		"verifiedStay",
 		"createdAt",
 		"updatedAt",
@@ -423,6 +667,8 @@ test("admin review rows provide the PMS-compatible straightforward fields", () =
 	}
 	assert.equal(row.confirmationNumber, "7581369106");
 	assert.equal(row.hotel._id, String(hotelId));
+	assert.equal(row.ratingVisible, true);
+	assert.equal(row.commentVisible, true);
 });
 
 test("review schemas enforce status/rating and hide sensitive fields by default", () => {
@@ -437,6 +683,8 @@ test("review schemas enforce status/rating and hide sensitive fields by default"
 		lastName: "Abdelrazak",
 	});
 	assert.equal(valid.validateSync(), undefined);
+	assert.equal(valid.ratingVisible, undefined);
+	assert.equal(valid.commentVisible, undefined);
 	valid.rating = 4.5;
 	assert.ok(valid.validateSync()?.errors?.rating);
 	assert.equal(HotelReview.schema.path("firstName").options.select, false);
@@ -455,6 +703,147 @@ test("review schemas enforce status/rating and hide sensitive fields by default"
 		.filter(([, options]) => options.name === "uniq_active_hotel_review_invitation");
 	assert.equal(activeInvitationIndexes.length, 1);
 	assert.equal(activeInvitationIndexes[0][1].unique, true);
+});
+
+test("visibility compare-and-swap guards status and both current flags", () => {
+	const id = new mongoose.Types.ObjectId();
+	assert.deepEqual(
+		visibility.buildHotelReviewVisibilityCasFilter({
+			_id: id,
+			status: "active",
+			ratingVisible: true,
+			commentVisible: false,
+		}),
+		{
+			_id: id,
+			status: "active",
+			ratingVisible: true,
+			commentVisible: false,
+		},
+	);
+	assert.deepEqual(
+		visibility.buildHotelReviewVisibilityCasFilter({
+			_id: id,
+			status: "inactive",
+		}),
+		{
+			_id: id,
+			status: "inactive",
+			ratingVisible: { $in: [null] },
+			commentVisible: { $in: [null] },
+		},
+	);
+	assert.deepEqual(
+		visibility.buildHotelReviewVisibilityCasFilter({
+			_id: id,
+			status: "active",
+			ratingVisible: "malformed",
+			commentVisible: 1,
+		}),
+		{
+			_id: id,
+			status: "active",
+			ratingVisible: "malformed",
+			commentVisible: 1,
+		},
+	);
+});
+
+test("comment visibility moderation uses rollback-safe status without a rating delta", () => {
+	const transition = review.buildReviewVisibilityTransition(
+		{
+			status: "active",
+			rating: 5,
+			comment: "Visible",
+		},
+		{
+			hasCommentVisible: true,
+			commentVisible: false,
+		},
+	);
+	assert.equal(transition.changed, true);
+	assert.equal(transition.ratingVisibilityChanged, false);
+	assert.deepEqual(transition.next, {
+		ratingVisible: true,
+		commentVisible: false,
+		status: "inactive",
+	});
+	assert.equal(
+		review.visibilityTransitionMatchesReview(transition, {
+			status: "inactive",
+			comment: "Visible",
+			ratingVisible: true,
+			commentVisible: false,
+		}),
+		true,
+	);
+	assert.equal(
+		review.visibilityTransitionMatchesReview(transition, {
+			status: "active",
+			comment: "Visible",
+			ratingVisible: true,
+			commentVisible: false,
+		}),
+		false,
+	);
+	const changedAt = new Date("2026-07-13T12:00:00.000Z");
+	const actorId = new mongoose.Types.ObjectId();
+	assert.deepEqual(
+		review.buildReviewModerationAudit({
+			sourceReview: { status: "active" },
+			transition,
+			reason: "Hide guest comment",
+			actorId,
+			changedAt,
+		}).history,
+		{
+			fromStatus: "active",
+			toStatus: "inactive",
+			fromRatingVisible: true,
+			toRatingVisible: true,
+			fromCommentVisible: true,
+			toCommentVisible: false,
+			reason: "Hide guest comment",
+			changedBy: actorId,
+			changedAt,
+		},
+	);
+});
+
+test("comment-only public visibility stays available while legacy status is inactive", () => {
+	const transition = review.buildReviewVisibilityTransition(
+		{
+			status: "active",
+			rating: 2,
+			comment: "Public comment",
+		},
+		{
+			hasRatingVisible: true,
+			ratingVisible: false,
+		},
+	);
+	assert.deepEqual(transition.next, {
+		ratingVisible: false,
+		commentVisible: true,
+		status: "inactive",
+	});
+	assert.equal(transition.ratingVisibilityChanged, true);
+	assert.deepEqual(
+		visibility.resolveHotelReviewVisibility({
+			status: transition.next.status,
+			comment: "Public comment",
+			ratingVisible: transition.next.ratingVisible,
+			commentVisible: transition.next.commentVisible,
+		}),
+		{
+			ratingVisible: false,
+			commentVisible: true,
+			commentConfiguredVisible: true,
+			hasComment: true,
+			hasPublicContent: true,
+			status: "active",
+		},
+	);
 });
 
 test("summary deltas touch only count, sum, and the selected star bucket", () => {
@@ -538,6 +927,34 @@ test("standalone fallback is limited to explicit unsupported-transaction errors"
 		review.isUnsupportedTransactionError({ message: "network timeout" }),
 		false
 	);
+});
+
+test("every moderation error clears public aggregates before responding", () => {
+	const controllerSource = fs.readFileSync(
+		require.resolve("../controllers/hoteldetails"),
+		"utf8",
+	);
+	const moderationController = controllerSource.indexOf(
+		"exports.updateHotelReviewStatus = async",
+	);
+	const errorResponse = controllerSource.indexOf(
+		'return sendControllerError(res, error, "moderate review");',
+		moderationController,
+	);
+	const outerCatch = controllerSource.lastIndexOf(
+		"} catch (error) {",
+		errorResponse,
+	);
+	const cacheInvalidation = controllerSource.lastIndexOf(
+		"invalidatePublicHotelGuestReviewSummaryCache();",
+		errorResponse,
+	);
+
+	assert.ok(moderationController >= 0);
+	assert.ok(outerCatch > moderationController);
+	assert.ok(cacheInvalidation > outerCatch);
+	assert.ok(errorResponse > cacheInvalidation);
+	assert.ok(errorResponse - cacheInvalidation < 500);
 });
 
 test("transaction runner ends its session before executing standalone fallback", async () => {
