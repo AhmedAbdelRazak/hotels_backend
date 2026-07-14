@@ -4,6 +4,9 @@
 
 const mongoose = require("mongoose");
 const HotelReview = require("../models/hotel_review");
+const {
+	effectiveRatingVisibilityMongoFilter,
+} = require("./hotelReviewVisibility");
 
 const serializeGuestReviewSummary = (row = {}) => {
 	const ratingCount = Math.max(0, Math.trunc(Number(row.ratingCount || 0)));
@@ -47,7 +50,7 @@ const buildActiveGuestReviewSummaryPipeline = (hotelIds = []) => {
 		{
 			$match: {
 				hotelId: { $in: objectIds },
-				status: "active",
+				...effectiveRatingVisibilityMongoFilter(),
 			},
 		},
 		{

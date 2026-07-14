@@ -10,6 +10,8 @@ const moderationSchema = new mongoose.Schema(
 		reason: { type: String, trim: true, maxlength: 500, default: "" },
 		changedBy: { type: ObjectId, ref: "User", default: null },
 		changedAt: { type: Date, default: null },
+		ratingVisible: { type: Boolean, default: undefined },
+		commentVisible: { type: Boolean, default: undefined },
 	},
 	{ _id: false }
 );
@@ -26,6 +28,10 @@ const moderationHistorySchema = new mongoose.Schema(
 			enum: ["active", "inactive"],
 			required: true,
 		},
+		fromRatingVisible: { type: Boolean, default: undefined },
+		toRatingVisible: { type: Boolean, default: undefined },
+		fromCommentVisible: { type: Boolean, default: undefined },
+		toCommentVisible: { type: Boolean, default: undefined },
 		reason: { type: String, trim: true, maxlength: 500, default: "" },
 		changedBy: { type: ObjectId, ref: "User", required: true },
 		changedAt: { type: Date, default: Date.now },
@@ -75,6 +81,16 @@ const hotelReviewSchema = new mongoose.Schema(
 			enum: ["active", "inactive"],
 			default: "active",
 			required: true,
+		},
+		// Optional by design: missing values belong to legacy rows and inherit the
+		// existing active/inactive behavior. New writes set both explicitly.
+		ratingVisible: {
+			type: Boolean,
+			default: undefined,
+		},
+		commentVisible: {
+			type: Boolean,
+			default: undefined,
 		},
 
 		// Only the masked display name is public. Full identity fields must be

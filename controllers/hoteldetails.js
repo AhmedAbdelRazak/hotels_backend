@@ -11,6 +11,19 @@ const HotelReviewSummary = require("../models/hotel_review_summary");
 const HotelReviewInvitation = require("../models/hotel_review_invitation");
 const Reservations = require("../models/reservations");
 const User = require("../models/user");
+const {
+	invalidatePublicHotelGuestReviewSummaryCache,
+} = require("./janat");
+const {
+	buildHotelReviewVisibilityCasFilter,
+	effectiveCommentVisibilityAggregationExpression,
+	effectiveRatingVisibilityAggregationExpression,
+	effectiveRatingVisibilityMongoFilter,
+	legacyRollbackSafeReviewStatus,
+	publicReviewContentAggregationExpression,
+	publicReviewContentMongoFilter,
+	resolveHotelReviewVisibility,
+} = require("../services/hotelReviewVisibility");
 
 const REVIEW_COMMENT_MAX = 2000;
 const REVIEW_NAME_MAX = 80;
@@ -66,6 +79,9 @@ const PUBLIC_REVIEW_SELECT = [
 	"_id",
 	"rating",
 	"comment",
+	"status",
+	"ratingVisible",
+	"commentVisible",
 	"displayName",
 	"createdAt",
 	"updatedAt",
@@ -80,6 +96,8 @@ const ADMIN_REVIEW_SELECT = [
 	"rating",
 	"comment",
 	"status",
+	"ratingVisible",
+	"commentVisible",
 	"displayName",
 	"language",
 	"source",
@@ -477,25 +495,38 @@ const summaryHasValidInvariants = (summary = null) => {
 };
 
 const reviewSummarySourceState = async (hotelId) => {
-	const [latestReview, activeCount] = await Promise.all([
+	const [latestReview, visibleRatingCount] = await Promise.all([
 		HotelReview.findOne({ hotelId })
 			.select("updatedAt")
 			.sort({ updatedAt: -1, _id: -1 })
 			.lean()
 			.exec(),
-		HotelReview.countDocuments({ hotelId, status: "active" }).exec(),
+		HotelReview.countDocuments({
+			hotelId,
+			...effectiveRatingVisibilityMongoFilter(),
+		}).exec(),
 	]);
-	return { latestReview, activeCount };
+	return {
+		latestReview,
+		visibleRatingCount,
+		// Kept as an alias for callers/tests written before visibility was split.
+		activeCount: visibleRatingCount,
+	};
 };
 
-const summaryIsFreshForSource = (summary, { latestReview, activeCount } = {}) => {
+const summaryIsFreshForSource = (
+	summary,
+	{ latestReview, visibleRatingCount, activeCount } = {},
+) => {
 	if (!summaryHasValidInvariants(summary)) return false;
 	const summaryUpdatedAt = new Date(summary.updatedAt || 0).getTime();
 	const sourceUpdatedAt = new Date(latestReview?.updatedAt || 0).getTime();
+	const sourceCount =
+		visibleRatingCount === undefined ? activeCount : visibleRatingCount;
 	return (
 		Number.isFinite(summaryUpdatedAt) &&
 		summaryUpdatedAt >= sourceUpdatedAt &&
-		Number(summary.ratingCount) === Number(activeCount)
+		Number(summary.ratingCount) === Number(sourceCount)
 	);
 };
 
@@ -515,22 +546,29 @@ const buildSummaryCompareAndSwapFilter = (summary) => {
 	return filter;
 };
 
-const aggregateHotelReviewSummary = async (hotelId, session = null) => {
-	const pipeline = [
-		{ $match: { hotelId: mongoose.Types.ObjectId(stringId(hotelId)), status: "active" } },
-		{
-			$group: {
-				_id: null,
-				ratingCount: { $sum: 1 },
-				ratingSum: { $sum: "$rating" },
-				oneStar: { $sum: { $cond: [{ $eq: ["$rating", 1] }, 1, 0] } },
-				twoStar: { $sum: { $cond: [{ $eq: ["$rating", 2] }, 1, 0] } },
-				threeStar: { $sum: { $cond: [{ $eq: ["$rating", 3] }, 1, 0] } },
-				fourStar: { $sum: { $cond: [{ $eq: ["$rating", 4] }, 1, 0] } },
-				fiveStar: { $sum: { $cond: [{ $eq: ["$rating", 5] }, 1, 0] } },
-			},
+const buildHotelReviewSummaryPipeline = (hotelId) => [
+	{
+		$match: {
+			hotelId: mongoose.Types.ObjectId(stringId(hotelId)),
+			...effectiveRatingVisibilityMongoFilter(),
 		},
-	];
+	},
+	{
+		$group: {
+			_id: null,
+			ratingCount: { $sum: 1 },
+			ratingSum: { $sum: "$rating" },
+			oneStar: { $sum: { $cond: [{ $eq: ["$rating", 1] }, 1, 0] } },
+			twoStar: { $sum: { $cond: [{ $eq: ["$rating", 2] }, 1, 0] } },
+			threeStar: { $sum: { $cond: [{ $eq: ["$rating", 3] }, 1, 0] } },
+			fourStar: { $sum: { $cond: [{ $eq: ["$rating", 4] }, 1, 0] } },
+			fiveStar: { $sum: { $cond: [{ $eq: ["$rating", 5] }, 1, 0] } },
+		},
+	},
+];
+
+const aggregateHotelReviewSummary = async (hotelId, session = null) => {
+	const pipeline = buildHotelReviewSummaryPipeline(hotelId);
 	const aggregation = HotelReview.aggregate(pipeline);
 	if (session) aggregation.session(session);
 	const [row] = await aggregation.exec();
@@ -697,14 +735,25 @@ const applySummaryDelta = async ({ hotelId, rating, direction, session }) => {
 	return summary;
 };
 
-const serializePublicReview = (review = {}) => ({
-	_id: stringId(review._id),
-	rating: Number(review.rating),
-	comment: String(review.comment || ""),
-	displayName: String(review.displayName || "Guest"),
-	verifiedStay: review.verifiedStay === true,
-	createdAt: review.createdAt || null,
-	updatedAt: review.updatedAt || null,
+const serializePublicReview = (review = {}) => {
+	const visibility = resolveHotelReviewVisibility(review);
+	if (!visibility.hasPublicContent) return null;
+	return {
+		_id: stringId(review._id),
+		rating: visibility.ratingVisible ? Number(review.rating) : null,
+		comment: visibility.commentVisible ? String(review.comment || "") : "",
+		ratingVisible: visibility.ratingVisible,
+		commentVisible: visibility.commentVisible,
+		displayName: String(review.displayName || "Guest"),
+		verifiedStay: review.verifiedStay === true,
+		createdAt: review.createdAt || null,
+		updatedAt: review.updatedAt || null,
+	};
+};
+
+const buildPublicReviewListFilter = (hotelId) => ({
+	hotelId,
+	...publicReviewContentMongoFilter(),
 });
 
 const hashReviewToken = (token = "") =>
@@ -1084,23 +1133,25 @@ exports.listPublicHotelReviews = async (req, res) => {
 		}
 		const { page, limit } = parsePagination(req.query);
 		const skip = (page - 1) * limit;
-		const [summaryDocument, reviews] = await Promise.all([
+		const publicContentFilter = buildPublicReviewListFilter(hotel._id);
+		const [summaryDocument, reviews, publicReviewCount] = await Promise.all([
 			ensureHotelReviewSummary(hotel._id, null),
-			HotelReview.find({ hotelId: hotel._id, status: "active" })
+			HotelReview.find(publicContentFilter)
 				.select(PUBLIC_REVIEW_SELECT)
 				.sort({ _id: -1 })
 				.skip(skip)
 				.limit(limit)
 				.lean()
 				.exec(),
+			HotelReview.countDocuments(publicContentFilter).exec(),
 		]);
 		const summary = serializeSummary(summaryDocument);
-		const total = summary.ratingCount;
+		const total = Number(publicReviewCount || 0);
 		const totalPages = total ? Math.ceil(total / limit) : 0;
 		return res.status(200).json({
 			hotel: serializeHotel(hotel),
 			summary,
-			reviews: reviews.map(serializePublicReview),
+			reviews: reviews.map(serializePublicReview).filter(Boolean),
 			pagination: {
 				page,
 				limit,
@@ -1243,6 +1294,8 @@ exports.submitHotelReview = async (req, res) => {
 					rating: validated.rating,
 					comment: validated.comment,
 					status: "active",
+					ratingVisible: true,
+					commentVisible: Boolean(validated.comment),
 					displayName: buildPublicDisplayName(firstName, lastName),
 					firstName,
 					lastName,
@@ -1345,6 +1398,7 @@ exports.submitHotelReview = async (req, res) => {
 					return performSubmission(null, true);
 				})
 		);
+		invalidatePublicHotelGuestReviewSummaryCache();
 
 		return res.status(201).json({
 			success: true,
@@ -1714,8 +1768,14 @@ const buildAdminReviewFilters = async (query = {}) => {
 		if (reservation?._id) conditions.push({ reservationId: reservation._id });
 		baseFilter.$or = conditions;
 	}
-	const listFilter = { ...baseFilter };
-	if (status !== "all") listFilter.status = status;
+	let listFilter = { ...baseFilter };
+	if (status === "active") {
+		listFilter = { $and: [baseFilter, publicReviewContentMongoFilter()] };
+	} else if (status === "inactive") {
+		listFilter = {
+			$and: [baseFilter, { $nor: [publicReviewContentMongoFilter()] }],
+		};
+	}
 	return { baseFilter, listFilter, status };
 };
 
@@ -1729,6 +1789,7 @@ const serializeAdminReview = (review = {}) => {
 		String(reservation?.confirmation_number || "").trim() ||
 		decryptReviewSensitiveValue(review.confirmationNumberEncrypted) ||
 		String(review.confirmationNumberMasked || "");
+	const visibility = resolveHotelReviewVisibility(review);
 	return {
 		_id: stringId(review._id),
 		firstName: String(review.firstName || ""),
@@ -1742,7 +1803,9 @@ const serializeAdminReview = (review = {}) => {
 		},
 		rating: Number(review.rating),
 		comment: String(review.comment || ""),
-		status: String(review.status || "inactive"),
+		ratingVisible: visibility.ratingVisible,
+		commentVisible: visibility.commentVisible,
+		status: visibility.status,
 		verifiedStay: review.verifiedStay === true,
 		verificationMethod: String(review.verificationMethod || "none"),
 		authenticatedReviewer: review.authenticatedReviewer === true,
@@ -1760,10 +1823,38 @@ const adminSummaryPipeline = (baseFilter = {}) => [
 		$group: {
 			_id: null,
 			total: { $sum: 1 },
-			active: { $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] } },
-			inactive: { $sum: { $cond: [{ $eq: ["$status", "inactive"] }, 1, 0] } },
+			active: {
+				$sum: {
+					$cond: [publicReviewContentAggregationExpression(), 1, 0],
+				},
+			},
+			inactive: {
+				$sum: {
+					$cond: [publicReviewContentAggregationExpression(), 0, 1],
+				},
+			},
+			visibleRatingCount: {
+				$sum: {
+					$cond: [effectiveRatingVisibilityAggregationExpression(), 1, 0],
+				},
+			},
+			visibleCommentCount: {
+				$sum: {
+					$cond: [
+						effectiveCommentVisibilityAggregationExpression(),
+						1,
+						0,
+					],
+				},
+			},
 			activeRatingSum: {
-				$sum: { $cond: [{ $eq: ["$status", "active"] }, "$rating", 0] },
+				$sum: {
+					$cond: [
+						effectiveRatingVisibilityAggregationExpression(),
+						"$rating",
+						0,
+					],
+				},
 			},
 		},
 	},
@@ -1771,12 +1862,17 @@ const adminSummaryPipeline = (baseFilter = {}) => [
 
 const serializeAdminSummary = (row = {}) => {
 	const active = Number(row.active || 0);
+	const visibleRatingCount = Number(row.visibleRatingCount || 0);
 	const activeRatingSum = Number(row.activeRatingSum || 0);
 	return {
 		total: Number(row.total || 0),
 		active,
 		inactive: Number(row.inactive || 0),
-		averageRating: active ? Number((activeRatingSum / active).toFixed(2)) : 0,
+		visibleRatingCount,
+		visibleCommentCount: Number(row.visibleCommentCount || 0),
+		averageRating: visibleRatingCount
+			? Number((activeRatingSum / visibleRatingCount).toFixed(2))
+			: 0,
 	};
 };
 
@@ -1854,6 +1950,159 @@ const requestedModerationStatus = (body = {}) => {
 	return status;
 };
 
+const requestedReviewVisibilityPatch = (body = {}) => {
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		throw new HotelReviewHttpError(
+			400,
+			"Invalid review visibility request.",
+			"INVALID_VISIBILITY",
+		);
+	}
+	const hasRatingVisible = Object.prototype.hasOwnProperty.call(
+		body,
+		"ratingVisible",
+	);
+	const hasCommentVisible = Object.prototype.hasOwnProperty.call(
+		body,
+		"commentVisible",
+	);
+	const hasLegacyStatus =
+		Object.prototype.hasOwnProperty.call(body, "status") ||
+		Object.prototype.hasOwnProperty.call(body, "active");
+	if ((hasRatingVisible || hasCommentVisible) && hasLegacyStatus) {
+		throw new HotelReviewHttpError(
+			400,
+			"Send visibility fields or legacy status, not both.",
+			"INVALID_VISIBILITY",
+		);
+	}
+	if (hasRatingVisible || hasCommentVisible) {
+		if (hasRatingVisible && typeof body.ratingVisible !== "boolean") {
+			throw new HotelReviewHttpError(
+				400,
+				"Rating visibility must be true or false.",
+				"INVALID_VISIBILITY",
+			);
+		}
+		if (hasCommentVisible && typeof body.commentVisible !== "boolean") {
+			throw new HotelReviewHttpError(
+				400,
+				"Comment visibility must be true or false.",
+				"INVALID_VISIBILITY",
+			);
+		}
+		return {
+			mode: "visibility",
+			hasRatingVisible,
+			hasCommentVisible,
+			...(hasRatingVisible ? { ratingVisible: body.ratingVisible } : {}),
+			...(hasCommentVisible ? { commentVisible: body.commentVisible } : {}),
+		};
+	}
+
+	const status = requestedModerationStatus(body);
+	const visible = status === "active";
+	return {
+		mode: "legacy-status",
+		hasRatingVisible: true,
+		hasCommentVisible: true,
+		ratingVisible: visible,
+		commentVisible: visible,
+	};
+};
+
+const buildReviewVisibilityTransition = (review = {}, patch = {}) => {
+	const current = resolveHotelReviewVisibility(review);
+	const requestedRatingVisible = patch.hasRatingVisible
+		? patch.ratingVisible
+		: current.ratingVisible;
+	const requestedCommentVisible = patch.hasCommentVisible
+		? patch.commentVisible
+		: current.commentConfiguredVisible;
+	const next = {
+		ratingVisible: requestedRatingVisible === true,
+		// A blank comment can never be public, even when a caller asks to show it.
+		commentVisible: requestedCommentVisible === true && current.hasComment,
+	};
+	next.status = legacyRollbackSafeReviewStatus({
+		...next,
+		hasComment: current.hasComment,
+	});
+	const normalizesBlankComment =
+		!current.hasComment && review.commentVisible !== false;
+	return {
+		current,
+		next,
+		changed:
+			current.ratingVisible !== next.ratingVisible ||
+			current.commentVisible !== next.commentVisible ||
+			String(review.status || "") !== next.status ||
+			normalizesBlankComment,
+		ratingVisibilityChanged:
+			current.ratingVisible !== next.ratingVisible,
+		normalizesBlankComment,
+	};
+};
+
+const visibilityTransitionMatchesReview = (transition, review = {}) => {
+	if (!transition?.next) return false;
+	const current = resolveHotelReviewVisibility(review);
+	return (
+		current.ratingVisible === transition.next.ratingVisible &&
+		current.commentVisible === transition.next.commentVisible &&
+		String(review.status || "") === transition.next.status &&
+		(!transition.normalizesBlankComment || review.commentVisible === false)
+	);
+};
+
+const buildReviewModerationAudit = ({
+	sourceReview = {},
+	transition = {},
+	reason = "",
+	actorId = null,
+	changedAt = new Date(),
+} = {}) => ({
+	moderation: {
+		reason,
+		changedBy: actorId,
+		changedAt,
+		ratingVisible: transition.next?.ratingVisible,
+		commentVisible: transition.next?.commentVisible,
+	},
+	history: {
+		fromStatus: sourceReview.status,
+		toStatus: transition.next?.status,
+		fromRatingVisible: transition.current?.ratingVisible,
+		toRatingVisible: transition.next?.ratingVisible,
+		fromCommentVisible: transition.current?.commentVisible,
+		toCommentVisible: transition.next?.commentVisible,
+		reason,
+		changedBy: actorId,
+		changedAt,
+	},
+});
+
+const touchHotelReviewSummary = async (hotelId, session = null) => {
+	const summary = await HotelReviewSummary.findOneAndUpdate(
+		{ hotelId },
+		{ $set: { updatedAt: new Date() } },
+		{
+			new: true,
+			lean: true,
+			runValidators: true,
+			...(session ? { session } : {}),
+		},
+	).exec();
+	if (!summary) {
+		throw new HotelReviewHttpError(
+			503,
+			"The rating could not be updated safely. Please try again.",
+			"SUMMARY_CONFLICT",
+		);
+	}
+	return summary;
+};
+
 const findAdminReviewById = (reviewId) =>
 	HotelReview.findById(reviewId)
 		.select(ADMIN_REVIEW_SELECT)
@@ -1873,7 +2122,7 @@ exports.updateHotelReviewStatus = async (req, res) => {
 		) {
 			throw new HotelReviewHttpError(400, "Invalid review.", "INVALID_REVIEW");
 		}
-		const status = requestedModerationStatus(req.body);
+		const visibilityPatch = requestedReviewVisibilityPatch(req.body);
 		const reason = normalizeTextField(req.body?.reason, {
 			field: "Moderation reason",
 			max: 500,
@@ -1882,9 +2131,12 @@ exports.updateHotelReviewStatus = async (req, res) => {
 
 		const performModeration = async (session = null, compensate = false) => {
 			let sourceReview = null;
+			let transition = null;
 			try {
 				const reviewQuery = HotelReview.findById(reviewId)
-					.select("_id hotelId rating status")
+					.select(
+						"_id hotelId rating comment status ratingVisible commentVisible",
+					)
 					.lean();
 				if (session) reviewQuery.session(session);
 				sourceReview = await reviewQuery.exec();
@@ -1896,30 +2148,38 @@ exports.updateHotelReviewStatus = async (req, res) => {
 					);
 				}
 				await ensureHotelReviewSummary(sourceReview.hotelId, session);
-				if (sourceReview.status === status) {
+				transition = buildReviewVisibilityTransition(
+					sourceReview,
+					visibilityPatch,
+				);
+				if (!transition.changed) {
 					return {
 						summary: await getHotelReviewSummary(sourceReview.hotelId, session),
+						visibilityChanged: false,
 					};
 				}
 
 				const changedAt = new Date();
+				const audit = buildReviewModerationAudit({
+					sourceReview,
+					transition,
+					reason,
+					actorId,
+					changedAt,
+				});
 				const updated = await HotelReview.findOneAndUpdate(
-					{ _id: sourceReview._id, status: sourceReview.status },
+					buildHotelReviewVisibilityCasFilter(sourceReview),
 					{
 						$set: {
-							status,
-							moderation: { reason, changedBy: actorId, changedAt },
+							status: transition.next.status,
+							ratingVisible: transition.next.ratingVisible,
+							commentVisible: transition.next.commentVisible,
+							moderation: audit.moderation,
 						},
 						$push: {
 							moderationHistory: {
 								$each: [
-									{
-										fromStatus: sourceReview.status,
-										toStatus: status,
-										reason,
-										changedBy: actorId,
-										changedAt,
-									},
+									audit.history,
 								],
 								$slice: -50,
 							},
@@ -1934,33 +2194,49 @@ exports.updateHotelReviewStatus = async (req, res) => {
 				if (!updated) {
 					throw new HotelReviewHttpError(
 						409,
-						"The review changed while it was being updated. Please try again.",
-						"REVIEW_STATUS_CONFLICT"
+						"The review visibility changed while it was being updated. Please try again.",
+						"REVIEW_VISIBILITY_CONFLICT"
 					);
 				}
-				const summary = compensate
-					? await rebuildHotelReviewSummary(sourceReview.hotelId)
-					: await applySummaryDelta({
-							hotelId: sourceReview.hotelId,
-							rating: sourceReview.rating,
-							direction: status === "active" ? 1 : -1,
-							session,
-					  });
-				return { summary };
+				let summary;
+				if (compensate) {
+					summary = await rebuildHotelReviewSummary(sourceReview.hotelId);
+				} else if (transition.ratingVisibilityChanged) {
+					summary = await applySummaryDelta({
+						hotelId: sourceReview.hotelId,
+						rating: sourceReview.rating,
+						direction: transition.next.ratingVisible ? 1 : -1,
+						session,
+					});
+				} else {
+					// Comment-only moderation still advances the summary timestamp so a
+					// subsequent freshness check does not perform a needless rebuild.
+					summary = await touchHotelReviewSummary(
+						sourceReview.hotelId,
+						session,
+					);
+				}
+				return { summary, visibilityChanged: true };
 			} catch (error) {
-				if (compensate && sourceReview?._id) {
-					// On a standalone topology, status is the source of truth. If the
-					// status write landed but its counter delta failed or was uncertain,
+				if (compensate && sourceReview?._id && transition) {
+					// On a standalone topology, the stored visibility is the source of
+					// truth. If its write landed but the summary update failed or was uncertain,
 					// rebuild the materialized summary and treat the idempotent outcome as
 					// successful only after that reconciliation completes.
 					const current = await HotelReview.findById(sourceReview._id)
-						.select("_id hotelId status")
+						.select(
+							"_id hotelId comment status ratingVisible commentVisible",
+						)
 						.lean()
 						.exec();
-					if (current?.status === status) {
+					if (visibilityTransitionMatchesReview(transition, current)) {
 						try {
 							const summary = await rebuildHotelReviewSummary(current.hotelId);
-							return { summary, reconciled: true };
+							return {
+								summary,
+								reconciled: true,
+								visibilityChanged: true,
+							};
 						} catch (reconciliationError) {
 							console.error(
 								"[hotel-reviews] standalone moderation reconciliation failed:",
@@ -1997,6 +2273,9 @@ exports.updateHotelReviewStatus = async (req, res) => {
 				});
 			}
 		);
+		if (transactionResult.visibilityChanged) {
+			invalidatePublicHotelGuestReviewSummaryCache();
+		}
 
 		const review = await findAdminReviewById(reviewId);
 		if (!review) {
@@ -2008,6 +2287,10 @@ exports.updateHotelReviewStatus = async (req, res) => {
 			summary: serializeSummary(transactionResult.summary),
 		});
 	} catch (error) {
+		// A failed moderation may still have an ambiguous commit outcome after a
+		// standalone write or driver-level commit failure. This endpoint is admin
+		// only, so clearing just the review-bearing caches is a safe fail-closed step.
+		invalidatePublicHotelGuestReviewSummaryCache();
 		return sendControllerError(res, error, "moderate review");
 	}
 };
@@ -2015,7 +2298,13 @@ exports.updateHotelReviewStatus = async (req, res) => {
 Object.defineProperty(module.exports, "__test", {
 	value: {
 		HotelReviewHttpError,
+		adminSummaryPipeline,
 		buildHotelSlugRegex,
+		buildHotelReviewSummaryPipeline,
+		buildAdminReviewFilters,
+		buildPublicReviewListFilter,
+		buildReviewModerationAudit,
+		buildReviewVisibilityTransition,
 		buildSummaryCompareAndSwapFilter,
 		buildPublicDisplayName,
 		buildReviewReservationContext,
@@ -2037,12 +2326,14 @@ Object.defineProperty(module.exports, "__test", {
 		parsePagination,
 		parseStrictRating,
 		requestedModerationStatus,
+		requestedReviewVisibilityPatch,
 		reviewInvitationWriteConflictError,
 		resetTransactionSupportCache: () => {
 			reviewTransactionsUnsupported = false;
 		},
 		runReviewTransaction,
 		serializeAdminReview,
+		serializeAdminSummary,
 		serializePublicReview,
 		serializeSummary,
 		splitFullName,
@@ -2050,6 +2341,7 @@ Object.defineProperty(module.exports, "__test", {
 		summaryHasValidInvariants,
 		summaryIsFreshForSource,
 		validateReviewPayload,
+		visibilityTransitionMatchesReview,
 		withHotelReviewFallbackMutex,
 	},
 	enumerable: false,
