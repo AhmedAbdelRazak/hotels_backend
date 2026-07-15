@@ -85,6 +85,9 @@ const {
 const {
 	attachAdminReservationRoomDetails,
 } = require("../services/adminReservationRoomDetails");
+const {
+	compactAdminPricingForReservationList,
+} = require("../services/adminReservationListPricing");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -4911,14 +4914,7 @@ exports.paginatedReservationList = async (req, res) => {
 					mit: compactPaypalCollection(paypalDetails.mit),
 					captures: compactPaypalCollection(paypalDetails.captures),
 				},
-				adminPricing: {
-					mode: adminPricing.mode || "",
-					clientTotal: adminPricing.clientTotal || 0,
-					rootTotal: adminPricing.rootTotal || 0,
-					platformMarginTotal: adminPricing.platformMarginTotal || 0,
-					otaExpenseTotal: adminPricing.otaExpenseTotal || 0,
-					netAfterExpensesTotal: adminPricing.netAfterExpensesTotal || 0,
-				},
+				adminPricing: compactAdminPricingForReservationList(adminPricing),
 				pendingConfirmation: reservation.pendingConfirmation
 					? {
 							status: reservation.pendingConfirmation.status || "",
