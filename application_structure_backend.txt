@@ -228,7 +228,6 @@ Important Services
   - expediaReservationSync prepares OTA-general jobs, builds target hotel aliases from the same name-expansion logic used by OTA inbound email, and respects OTA_INBOUND_EMAIL_HOTEL_IDS while allowing inactive but existing PMS hotels when allowlisted.
   - expediaReservationCollector runs a single supervised persistent-browser session, attempts server-env login with OTA_EXPEDIA_USERNAME and OTA_PASSWORD, pauses for MFA through the job/MFA endpoint, processes selected hotels sequentially, and writes read-only preview buckets.
   - expediaReservationApply saves only safe writes after review: new non-cancelled reservations and cancelled/no-show status changes for existing matched reservations. Existing reservation pricing, payment breakdowns, commission, finance, hotel assignment, and admin-managed nightly rows must not be overwritten by sync.
-  - Full runbook: docs/ota-reservation-sync-expedia-2026-06-15.md.
 
 Critical Workflows To Protect
 - Reservation creation
@@ -2651,8 +2650,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Date-range rule:
   - The inventory tab must use invStart/invEnd derived from the selected inventory Hijri/Gregorian month.
   - A broad parent summary dateTo must not stretch a single selected Hijri month.
-- Debug note:
-  - See docs/hotel-management-inventory-occupancy-debugging-2026-06-13.md for the Zad Al Safa Ramadan 1447 data audit and regression checks.
 
 2026-06-13 Expedia Web Scraping Approval Evidence
 - Evidence files:
@@ -2668,8 +2665,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Any Expedia scraper should stay conservative: authorized credentials only, rate limits/backoff, no CAPTCHA/security bypass, scoped to approved PMS synchronization, and clear audit logs.
 
 2026-06-13 Super Admin Reservation Update And Jannat Tools Source Guard
-- Details:
-  - See docs/super-admin-reservation-update-and-jannat-source-2026-06-13.md.
 - Reservation update behavior:
   - controllers/reservations.js resolves superAdminUpdateActor and prevents super admins from being treated as orderTakerBasicEditOnly.
   - services/reservationPricing.js normalizeReservationStayPricing accepts an optional allowBlockedCalendar flag.
@@ -2721,11 +2716,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     Expedia Collect dashboard-sync reservation can be saved.
 
 2026-06-21 Chatbot Patient Escalation And Availability Recovery
-- Documentation:
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md is the
-    current compact contract for direct answers, multilingual parsing,
-    confidential-document handling, Google Maps links, repeated-question
-    escalation, and unavailable-room recovery.
 - Patient escalation:
   - aiagent/core/orchestrator.js now normalizes repeatable guest questions into
     semantic keys for contact, location, distance, bus, direct-hotel
@@ -2758,7 +2748,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - aiagent/core/orchestrator.js
   - aiagent/core/db.js
   - server.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Duplicate-reply prevention:
   - planTurn uses a top-level per-case async lock before any policy, hotel, or
     LLM work. Concurrent scheduled turns for the same support case are queued
@@ -2819,7 +2808,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - server.js
   - services/supportCaseMaintenance.js
   - services/reservationConfirmationDispatcher.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Support-case maintenance:
   - The existing once-per-minute maintenance job now has access to the AI
     planner scheduler after aiagent initialization.
@@ -2850,7 +2838,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - aiagent/core/brain.js
   - aiagent/core/llm.js
   - aiagent/i18n/strings.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Opening greeting contract:
   - First AI openings now use a readable Islamic greeting before the guest name
     instead of generic Hi/Hello/Hola/Bonjour/Halo wording.
@@ -2869,7 +2856,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 2026-06-21 AI Chat Room Options Readability And Recovery Priority
 - Files:
   - aiagent/core/orchestrator.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Root-cause fix:
   - Selected-hotel room-options questions no longer require a specific room type
     or guest capacity before being recognized.
@@ -2892,7 +2878,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - aiagent/core/orchestrator.js
   - controllers/supportcase.js
   - models/supportcase.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Conversation-state fixes:
   - Guest pause/later language such as "talk later", "not now", and Arabic
     "حكلمك بعدين / شكرا على اى حال" is recognized before quote/proceed
@@ -2917,7 +2902,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 2026-06-21 AI Chat Date Memory And Hotel Fact Priority
 - Files:
   - aiagent/core/orchestrator.js
-  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Date memory:
   - Support-case hydration now reads guest messages in order and keeps the
     latest complete guest-provided date range, rather than scanning the whole
@@ -2940,7 +2924,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - services/otaReservationVisibility.js
   - controllers/janat.js
   - routes/janat.js
-  - docs/ota-reservation-sync-expedia-2026-06-15.md
 - Behavior:
   - Complete OTA inbound emails no longer fail solely because the hotel cannot
     be resolved. If confirmation number, guest name, check-in, and checkout are
@@ -2964,10 +2947,7 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - PUT /api/admin/ota-reservations/:reservationId/hotel/:userId assigns the
     hotel, owner, audit metadata, and clears the assignment-required flags.
 
-2026-06-22 Chatbot Production Stabilization Runbook
-- Documentation:
-  - docs/chatbot-production-stabilization-2026-06-22.md is the future-us
-    runbook for the June 21/22 production chatbot incident and stabilization.
+2026-06-22 Chatbot Production Stabilization
 - Covered challenges:
   - Support-case watcher memory pressure and old Node.js OOM logs.
   - Restart recovery after PM2/backend crashes.
@@ -3052,8 +3032,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     infinite loops, or unnecessary escalation.
 
 2026-06-28 Chatbot Room Signal And 10 Second Wait Notice
-- Reference:
-  - docs/chatbot-room-signal-and-10-second-wait-2026-06-28.md.
 - Files:
   - aiagent/core/nlu.js
   - aiagent/core/orchestrator.js

@@ -56,7 +56,7 @@ Implementation references:
 - `services/expediaReservationCollector.js`
 - `services/expediaReservationApply.js`
 - `services/otaReservationMapper.js`
-- Full runbook: `docs/ota-reservation-sync-expedia-2026-06-15.md`
+- Durable architecture reference: `application_structure_backend.txt`
 
 Operating policy:
 
