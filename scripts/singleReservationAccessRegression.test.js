@@ -260,7 +260,7 @@ test("full legacy reservation policy is active, permissioned, and hotel scoped",
 	);
 });
 
-test("verified review scope grants only the exact reservation", () => {
+test("verified review scope never bypasses current actor and hotel policy", () => {
 	const actor = { _id: "review-admin", activeUser: true };
 	assert.equal(
 		reservationAccess.canReadFullLegacyReservation(
@@ -268,12 +268,17 @@ test("verified review scope grants only the exact reservation", () => {
 			{ _id: "reservation-a", hotelId: "hotel-a" },
 			{ verifiedReservationId: "reservation-a", superAdminIds: [] }
 		),
-		true
+		false
 	);
 	assert.equal(
 		reservationAccess.canReadFullLegacyReservation(
-			actor,
-			{ _id: "reservation-b", hotelId: "hotel-a" },
+			{
+				...actor,
+				role: 1000,
+				accessTo: ["AllReservations"],
+				hotelsToSupport: ["hotel-a"],
+			},
+			{ _id: "reservation-a", hotelId: "hotel-b" },
 			{ verifiedReservationId: "reservation-a", superAdminIds: [] }
 		),
 		false

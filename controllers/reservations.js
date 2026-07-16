@@ -5969,17 +5969,9 @@ const legacyReservationActorHotelIds = (actor = {}) =>
 const canReadFullLegacyReservation = (
 	actor,
 	reservation,
-	{ verifiedReservationId = "", superAdminIds } = {}
+	{ superAdminIds } = {}
 ) => {
 	if (!actor || actor.activeUser === false || !reservation) return false;
-
-	const reservationId = normalizeId(reservation._id);
-	if (
-		reservationId &&
-		normalizeId(verifiedReservationId) === reservationId
-	) {
-		return true;
-	}
 
 	const actorId = normalizeId(actor._id || actor.id);
 	const configuredSuperAdmin = Array.isArray(superAdminIds)
@@ -6145,10 +6137,7 @@ exports.singleReservationById = async (req, res) => {
 
 		const fullDetailsAllowed = canReadFullLegacyReservation(
 			reservationActor,
-			reservation,
-			{
-				verifiedReservationId: verifiedReviewScopeId,
-			}
+			reservation
 		);
 		if (detailsView && !fullDetailsAllowed) {
 			return res.status(404).json({ message: "Reservation not found." });
