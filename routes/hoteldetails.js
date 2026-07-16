@@ -12,12 +12,14 @@ const {
 	requireAdminAccess,
 } = require("../controllers/auth");
 const { userById } = require("../controllers/user");
+const { singleReservationById } = require("../controllers/reservations");
 const {
 	listPublicHotelReviews,
 	submitHotelReview,
 	resolveHotelReviewInvitation,
 	createHotelReviewInvitation,
 	listAdminHotelReviews,
+	requireHotelReviewReservationScope,
 	updateHotelReviewStatus,
 } = require("../controllers/hoteldetails");
 
@@ -36,6 +38,16 @@ router.patch(
 	isAuth,
 	requireAdminAccess("JannatBookingWebsite"),
 	updateHotelReviewStatus
+);
+
+router.get(
+	"/admin/hotel-reviews/reservation-details/:reservationId/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("JannatBookingWebsite"),
+	requireAdminAccess("AllReservations", "HotelsReservations"),
+	requireHotelReviewReservationScope,
+	singleReservationById
 );
 
 router.post(
