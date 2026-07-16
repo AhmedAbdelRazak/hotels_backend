@@ -75,6 +75,19 @@ const attachCurrentlyHousedFlag = (rooms = [], housedRoomIds = new Set()) =>
 		};
 	});
 
+const buildRoomListScope = (accountId, mainUserId) => {
+	if (
+		!mongoose.Types.ObjectId.isValid(accountId) ||
+		!mongoose.Types.ObjectId.isValid(mainUserId)
+	) {
+		return null;
+	}
+	return {
+		hotelId: new mongoose.Types.ObjectId(accountId),
+		belongsTo: new mongoose.Types.ObjectId(mainUserId),
+	};
+};
+
 const positiveNumber = (value, fallback = 0) => {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -299,8 +312,14 @@ exports.deleteRooms = (req, res) => {
 };
 
 exports.list = async (req, res) => {
-	const hotelId = mongoose.Types.ObjectId(req.params.accountId);
-	const belongsTo = mongoose.Types.ObjectId(req.params.mainUserId);
+	const scope = buildRoomListScope(
+		req.params.accountId,
+		req.params.mainUserId
+	);
+	if (!scope) {
+		return res.status(400).json({ error: "Invalid room lookup scope." });
+	}
+	const { hotelId, belongsTo } = scope;
 
 	try {
 		const [rooms, housedRoomIds] = await Promise.all([
@@ -318,6 +337,11 @@ exports.list = async (req, res) => {
 		});
 	}
 };
+
+Object.defineProperty(module.exports, "__test", {
+	value: { buildRoomListScope },
+	enumerable: false,
+});
 
 exports.remove = async (req, res) => {
 	const room = req.room;
