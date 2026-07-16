@@ -5917,14 +5917,178 @@ const safeDecryptCustomerSecret = (value) => {
 	}
 };
 
+const LEGACY_RESERVATION_FULL_ACCESS_KEYS = new Set([
+	"admindashboard",
+	"allreservations",
+	"hotelsreservations",
+	"hotelreports",
+	"otareservations",
+]);
+const LEGACY_HOTEL_STAFF_ROLE_NUMBERS = new Set([
+	2000,
+	3000,
+	4000,
+	5000,
+	6000,
+	7000,
+	8000,
+	9000,
+	10000,
+]);
+const LEGACY_HOTEL_STAFF_ROLE_DESCRIPTIONS = new Set([
+	"hotelmanager",
+	"reception",
+	"housekeepingmanager",
+	"housekeeping",
+	"finance",
+	"ordertaker",
+	"reservationemployee",
+	"humanresource",
+	"systemadmin",
+	"systemadministrator",
+]);
+
+const normalizeLegacyRoleDescription = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[\s_-]+/g, "")
+		.trim();
+
+const legacyReservationActorHotelIds = (actor = {}) =>
+	new Set(
+		[
+			actor.hotelIdWork,
+			...(Array.isArray(actor.hotelIdsWork) ? actor.hotelIdsWork : []),
+			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
+		]
+			.map(normalizeId)
+			.filter(Boolean)
+	);
+
+const canReadFullLegacyReservation = (
+	actor,
+	reservation,
+	{ superAdminIds } = {}
+) => {
+	if (!actor || actor.activeUser === false || !reservation) return false;
+
+	const actorId = normalizeId(actor._id || actor.id);
+	const configuredSuperAdmin = Array.isArray(superAdminIds)
+		? superAdminIds.map(normalizeId).filter(Boolean).includes(actorId)
+		: isConfiguredSuperAdminReservationActor(actor);
+	if (configuredSuperAdmin) return true;
+
+	const hotelId = normalizeId(reservation.hotelId);
+	if (!hotelId) return false;
+	const assignedToHotel = legacyReservationActorHotelIds(actor).has(hotelId);
+	const roles = reservationActorRoles(actor);
+	if (roles.includes(1000)) {
+		const access = new Set(
+			(Array.isArray(actor.accessTo) ? actor.accessTo : [])
+				.map((key) => String(key || "").trim().toLowerCase())
+				.filter(Boolean)
+		);
+		return (
+			assignedToHotel &&
+			[...LEGACY_RESERVATION_FULL_ACCESS_KEYS].some((key) => access.has(key))
+		);
+	}
+
+	const descriptions = reservationActorDescriptions(actor).map(
+		normalizeLegacyRoleDescription
+	);
+	const isHotelStaff =
+		roles.some((role) => LEGACY_HOTEL_STAFF_ROLE_NUMBERS.has(role)) ||
+		descriptions.some((description) =>
+			LEGACY_HOTEL_STAFF_ROLE_DESCRIPTIONS.has(description)
+		);
+	if (!isHotelStaff) return false;
+	if (assignedToHotel) return true;
+
+	const reservationOwnerId = normalizeId(
+		reservation.hotelId?.belongsTo || reservation.belongsTo
+	);
+	return roles.includes(2000) && actorId === reservationOwnerId;
+};
+
+const buildLegacyClientPaymentPayload = (reservation = {}) => {
+	const plainReservation = reservationSourcePlainObject(reservation);
+	const customerDetails = reservationSourcePlainObject(
+		plainReservation.customer_details
+	);
+	const hotelDetails = reservationSourcePlainObject(plainReservation.hotelId);
+	const paymentDetails = reservationSourcePlainObject(
+		plainReservation.payment_details
+	);
+	const pickedRoomsType = Array.isArray(plainReservation.pickedRoomsType)
+		? plainReservation.pickedRoomsType.map((room) => {
+				const plainRoom = reservationSourcePlainObject(room);
+				return {
+					room_type:
+						plainRoom.room_type ||
+						plainRoom.roomType ||
+						plainRoom.displayName ||
+						"",
+				};
+		  })
+		: [];
+
+	return {
+		_id: plainReservation._id,
+		confirmation_number: plainReservation.confirmation_number,
+		total_amount: plainReservation.total_amount,
+		booked_at: plainReservation.booked_at,
+		checkin_date: plainReservation.checkin_date,
+		checkout_date: plainReservation.checkout_date,
+		days_of_residence: plainReservation.days_of_residence,
+		total_guests: plainReservation.total_guests,
+		customer_details: {
+			name: customerDetails.name,
+			phone: customerDetails.phone,
+			email: customerDetails.email,
+			nationality: customerDetails.nationality,
+		},
+		hotelId: {
+			_id: hotelDetails._id || plainReservation.hotelId,
+			hotelName: hotelDetails.hotelName,
+		},
+		pickedRoomsType,
+		payment_details: {
+			transactionId: paymentDetails.transactionId,
+		},
+	};
+};
+
+const setSingleReservationNoStoreHeaders = (res) => {
+	if (!res || typeof res.setHeader !== "function") return;
+	res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate");
+	res.setHeader("Pragma", "no-cache");
+	res.setHeader("Expires", "0");
+	res.setHeader("Referrer-Policy", "no-referrer");
+	res.setHeader("X-Content-Type-Options", "nosniff");
+};
+
+if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
+	Object.assign(exports.__test || (exports.__test = {}), {
+		buildLegacyClientPaymentPayload,
+		canReadFullLegacyReservation,
+		legacyReservationActorHotelIds,
+	});
+}
+
 /**
  * Retrieves a single reservation by ID, decrypts sensitive customer details,
  * masks the card number, and excludes other sensitive information from the response.
  */
 exports.singleReservationById = async (req, res) => {
+	setSingleReservationNoStoreHeaders(res);
 	try {
 		// Extract reservationId from request parameters
 		const { reservationId } = req.params;
+		if (!ObjectId.isValid(reservationId)) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
 		const viewKey = String(req.query?.view || req.query?.payload || "")
 			.toLowerCase()
 			.trim();
@@ -5933,10 +6097,18 @@ exports.singleReservationById = async (req, res) => {
 			"reservation-details",
 			"details-modal",
 		].includes(viewKey);
-		const auditViewer = (await resolveAuditViewerFromRequest(req)) || {
-			role: "client",
-			roleDescription: "client",
-		};
+		const verifiedReviewScopeId = normalizeId(
+			req.hotelReviewReservationScopeVerifiedId
+		);
+		const reservationActor =
+			verifiedReviewScopeId === normalizeId(reservationId) && req.profile
+				? req.profile
+				: await resolveReservationVisibilityActor(req);
+		const auditViewer =
+			(await resolveAuditViewerFromRequest(req, reservationActor)) || {
+				role: "client",
+				roleDescription: "client",
+			};
 
 		// Find the reservation by its ID and apply hotel-management history visibility.
 		const reservationQuery = withHotelManagementReservationVisibility(
@@ -5954,17 +6126,26 @@ exports.singleReservationById = async (req, res) => {
 
 		// If reservation not found, return a 404 error
 		if (!reservation) {
-			return res.status(404).json({
-				message: `Reservation not found with id ${reservationId}`,
-			});
+			return res.status(404).json({ message: "Reservation not found." });
 		}
 		if (
 			isOtaPlatformReviewPending(reservation) &&
 			!canManageOtaReservations(auditViewer)
 		) {
-			return res.status(404).json({
-				message: `Reservation not found with id ${reservationId}`,
-			});
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		const fullDetailsAllowed = canReadFullLegacyReservation(
+			reservationActor,
+			reservation
+		);
+		if (detailsView && !fullDetailsAllowed) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+		if (!fullDetailsAllowed) {
+			return res
+				.status(200)
+				.json(buildLegacyClientPaymentPayload(reservation));
 		}
 
 		// Decrypt sensitive customer details
@@ -6006,9 +6187,7 @@ exports.singleReservationById = async (req, res) => {
 
 		// Handle specific errors related to invalid ObjectId
 		if (error.kind === "ObjectId") {
-			return res.status(404).json({
-				message: `Reservation not found with id ${req.params.reservationId}`,
-			});
+			return res.status(404).json({ message: "Reservation not found." });
 		}
 
 		// Handle generic server errors

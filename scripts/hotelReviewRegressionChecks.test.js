@@ -632,7 +632,7 @@ test("admin review rows provide the PMS-compatible straightforward fields", () =
 	const reviewId = new mongoose.Types.ObjectId();
 	const hotelId = new mongoose.Types.ObjectId();
 	const reservationId = new mongoose.Types.ObjectId();
-	const row = review.serializeAdminReview({
+	const sourceReview = {
 		_id: reviewId,
 		firstName: "Ahmed",
 		lastName: "Abdelrazak",
@@ -646,6 +646,9 @@ test("admin review rows provide the PMS-compatible straightforward fields", () =
 		verifiedStay: true,
 		createdAt: new Date(),
 		updatedAt: new Date(),
+	};
+	const row = review.serializeAdminReview(sourceReview, {
+		includeReservationId: true,
 	});
 	for (const field of [
 		"firstName",
@@ -666,9 +669,199 @@ test("admin review rows provide the PMS-compatible straightforward fields", () =
 		assert.equal(Object.prototype.hasOwnProperty.call(row, field), true, field);
 	}
 	assert.equal(row.confirmationNumber, "7581369106");
+	assert.equal(row.reservationId, String(reservationId));
 	assert.equal(row.hotel._id, String(hotelId));
 	assert.equal(row.ratingVisible, true);
 	assert.equal(row.commentVisible, true);
+	assert.equal(review.serializeAdminReview(sourceReview).reservationId, null);
+});
+
+test("review reservation ids require exact active admin permissions", () => {
+	const superId = new mongoose.Types.ObjectId();
+	const assignedHotelId = new mongoose.Types.ObjectId();
+	const otherHotelId = new mongoose.Types.ObjectId();
+	assert.equal(
+		review.canViewHotelReviewReservationDetails(
+			{ _id: superId, activeUser: true, role: 1000, accessTo: [] },
+			{ superAdminIds: [String(superId)] }
+		),
+		true
+	);
+	assert.equal(
+		review.canViewHotelReviewReservationDetailsForHotel(
+			{
+				activeUser: true,
+				role: 1000,
+				accessTo: ["JannatBookingWebsite", "AllReservations"],
+				hotelsToSupport: [assignedHotelId],
+			},
+			assignedHotelId,
+			{ superAdminIds: [] }
+		),
+		true
+	);
+	assert.equal(
+		review.canViewHotelReviewReservationDetailsForHotel(
+			{
+				activeUser: true,
+				role: 1000,
+				accessTo: ["JannatBookingWebsite", "AllReservations"],
+				hotelsToSupport: [assignedHotelId],
+			},
+			otherHotelId,
+			{ superAdminIds: [] }
+		),
+		false
+	);
+	assert.equal(
+		review.canViewHotelReviewReservationDetailsForHotel(
+			{ _id: superId, activeUser: true },
+			otherHotelId,
+			{ superAdminIds: [String(superId)] }
+		),
+		true
+	);
+	assert.equal(
+		review.canViewHotelReviewReservationDetails(
+			{
+				activeUser: true,
+				role: 1000,
+				accessTo: ["JannatBookingWebsite", "AllReservations"],
+			},
+			{ superAdminIds: [] }
+		),
+		true
+	);
+	for (const actor of [
+		{
+			activeUser: false,
+			role: 1000,
+			accessTo: ["JannatBookingWebsite", "AllReservations"],
+		},
+		{ activeUser: true, role: 1000, accessTo: ["JannatBookingWebsite"] },
+		{ activeUser: true, role: 1000, accessTo: ["AllReservations"] },
+		{
+			activeUser: true,
+			role: 2000,
+			accessTo: ["JannatBookingWebsite", "HotelsReservations"],
+		},
+	]) {
+		assert.equal(
+			review.canViewHotelReviewReservationDetails(actor, {
+				superAdminIds: [],
+			}),
+			false
+		);
+	}
+});
+
+test("review reservation details route requires website and reservation access", () => {
+	const routesSource = fs.readFileSync(
+		require.resolve("../routes/hoteldetails"),
+		"utf8"
+	);
+	assert.match(
+		routesSource,
+		/router\.get\(\s*"\/admin\/hotel-reviews\/reservation-details\/:reservationId\/:userId"\s*,\s*requireSignin\s*,\s*isAuth\s*,\s*requireAdminAccess\("JannatBookingWebsite"\)\s*,\s*requireAdminAccess\("AllReservations",\s*"HotelsReservations"\)\s*,\s*requireHotelReviewReservationScope\s*,\s*singleReservationById\s*\)/
+	);
+});
+
+test("review reservation details enforce assigned hotels for platform employees", async () => {
+	const reservationId = new mongoose.Types.ObjectId();
+	const assignedHotelId = new mongoose.Types.ObjectId();
+	const actorId = new mongoose.Types.ObjectId();
+	const queries = [];
+	const middleware = review.buildRequireHotelReviewReservationScope({
+		ReservationModel: {
+			exists: async (query) => {
+				queries.push(query);
+				return { _id: reservationId };
+			},
+		},
+		superAdminIds: [],
+	});
+	const response = () => ({
+		statusCode: 200,
+		body: null,
+		setHeader() {},
+		status(code) {
+			this.statusCode = code;
+			return this;
+		},
+		json(body) {
+			this.body = body;
+			return this;
+		},
+	});
+	let nextCalls = 0;
+	const allowedResponse = response();
+	await middleware(
+		{
+			params: { reservationId: String(reservationId) },
+			profile: {
+				_id: actorId,
+				role: 1000,
+				accessTo: ["JannatBookingWebsite", "AllReservations"],
+				hotelIdWork: assignedHotelId,
+			},
+		},
+		allowedResponse,
+		() => {
+			nextCalls += 1;
+		}
+	);
+	assert.equal(nextCalls, 1);
+	assert.equal(queries.length, 1);
+	assert.equal(String(queries[0]._id), String(reservationId));
+	assert.deepEqual(
+		queries[0].hotelId.$in.map(String),
+		[String(assignedHotelId)]
+	);
+
+	const deniedMiddleware = review.buildRequireHotelReviewReservationScope({
+		ReservationModel: { exists: async () => null },
+		superAdminIds: [],
+	});
+	const deniedResponse = response();
+	await deniedMiddleware(
+		{
+			params: { reservationId: String(reservationId) },
+			profile: {
+				_id: actorId,
+				roles: [1000],
+				accessTo: ["JannatBookingWebsite", "HotelsReservations"],
+				hotelsToSupport: [assignedHotelId],
+			},
+		},
+		deniedResponse,
+		() => {
+			nextCalls += 1;
+		}
+	);
+	assert.equal(deniedResponse.statusCode, 404);
+	assert.deepEqual(deniedResponse.body, { message: "Reservation not found." });
+	assert.equal(nextCalls, 1);
+
+	const websiteOnlyResponse = response();
+	await middleware(
+		{
+			params: { reservationId: String(reservationId) },
+			profile: {
+				_id: actorId,
+				role: 1000,
+				activeUser: true,
+				accessTo: ["JannatBookingWebsite"],
+				hotelIdWork: assignedHotelId,
+			},
+		},
+		websiteOnlyResponse,
+		() => {
+			nextCalls += 1;
+		}
+	);
+	assert.equal(websiteOnlyResponse.statusCode, 404);
+	assert.equal(queries.length, 1);
+	assert.equal(nextCalls, 1);
 });
 
 test("review schemas enforce status/rating and hide sensitive fields by default", () => {

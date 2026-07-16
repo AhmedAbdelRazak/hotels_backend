@@ -154,6 +154,94 @@ const invitationActorHotelIds = (actor = {}) => {
 	return new Set(candidates.map(stringId).filter(Boolean));
 };
 
+const platformReservationActorRoles = (actor = {}) =>
+	[actor.role, ...(Array.isArray(actor.roles) ? actor.roles : [])]
+		.map(Number)
+		.filter(Number.isFinite);
+
+const canViewHotelReviewReservationDetails = (
+	actor = {},
+	{ superAdminIds = configuredSuperAdminIds() } = {}
+) => {
+	if (!actor || actor.activeUser === false) return false;
+	const actorId = stringId(actor._id || actor.id);
+	if (superAdminIds.map(String).includes(actorId)) return true;
+	if (!platformReservationActorRoles(actor).includes(1000)) return false;
+	const access = new Set(
+		(Array.isArray(actor.accessTo) ? actor.accessTo : [])
+			.map((value) => String(value || "").trim())
+			.filter(Boolean)
+	);
+	return (
+		access.has("JannatBookingWebsite") &&
+		(access.has("AllReservations") || access.has("HotelsReservations"))
+	);
+};
+
+const canViewHotelReviewReservationDetailsForHotel = (
+	actor = {},
+	hotelId,
+	{ superAdminIds = configuredSuperAdminIds() } = {}
+) => {
+	if (
+		!canViewHotelReviewReservationDetails(actor, { superAdminIds })
+	) {
+		return false;
+	}
+	const actorId = stringId(actor._id || actor.id);
+	if (superAdminIds.map(String).includes(actorId)) return true;
+	return invitationActorHotelIds(actor).has(stringId(hotelId));
+};
+
+const buildRequireHotelReviewReservationScope = ({
+	ReservationModel = Reservations,
+	superAdminIds = configuredSuperAdminIds(),
+} = {}) => async (req, res, next) => {
+	setNoStoreHeaders(res);
+	try {
+		const reservationId = stringId(req.params?.reservationId);
+		const actor = req.profile;
+		if (
+			!mongoose.Types.ObjectId.isValid(reservationId) ||
+			!canViewHotelReviewReservationDetails(actor, { superAdminIds })
+		) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		const actorId = stringId(actor._id || actor.id);
+		const isSuperAdmin = superAdminIds.map(String).includes(actorId);
+		if (isSuperAdmin) {
+			req.hotelReviewReservationScopeVerifiedId = reservationId;
+			return next();
+		}
+
+		const hotelIds = [...invitationActorHotelIds(actor)]
+			.filter((id) => mongoose.Types.ObjectId.isValid(id))
+			.map((id) => new mongoose.Types.ObjectId(id));
+		if (!hotelIds.length) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		const allowedReservation = await ReservationModel.exists({
+			_id: new mongoose.Types.ObjectId(reservationId),
+			hotelId: { $in: hotelIds },
+		});
+		if (!allowedReservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+		req.hotelReviewReservationScopeVerifiedId = reservationId;
+		return next();
+	} catch (error) {
+		console.error("Unable to verify review reservation access:", error.message);
+		return res.status(500).json({
+			error: "Could not verify reservation access.",
+		});
+	}
+};
+
+exports.requireHotelReviewReservationScope =
+	buildRequireHotelReviewReservationScope();
+
 const canCreateReviewInvitationForHotel = (
 	actor = {},
 	hotelId,
@@ -1779,7 +1867,10 @@ const buildAdminReviewFilters = async (query = {}) => {
 	return { baseFilter, listFilter, status };
 };
 
-const serializeAdminReview = (review = {}) => {
+const serializeAdminReview = (
+	review = {},
+	{ includeReservationId = false } = {}
+) => {
 	const hotel = review.hotelId && typeof review.hotelId === "object" ? review.hotelId : null;
 	const reservation =
 		review.reservationId && typeof review.reservationId === "object"
@@ -1810,7 +1901,9 @@ const serializeAdminReview = (review = {}) => {
 		verificationMethod: String(review.verificationMethod || "none"),
 		authenticatedReviewer: review.authenticatedReviewer === true,
 		userId: stringId(review.userId) || null,
-		reservationId: stringId(reservation?._id || review.reservationId) || null,
+		reservationId: includeReservationId
+			? stringId(reservation?._id || review.reservationId) || null
+			: null,
 		moderation: review.moderation || null,
 		createdAt: review.createdAt || null,
 		updatedAt: review.updatedAt || null,
@@ -1913,7 +2006,15 @@ exports.listAdminHotelReviews = async (req, res) => {
 			: [];
 		const totalPages = total ? Math.ceil(total / limit) : 0;
 		return res.status(200).json({
-			reviews: reviews.map(serializeAdminReview),
+			reviews: reviews.map((review) =>
+				serializeAdminReview(review, {
+					includeReservationId:
+						canViewHotelReviewReservationDetailsForHotel(
+							req.profile,
+							review.hotelId
+						),
+				})
+			),
 			pagination: {
 				page,
 				limit,
@@ -2283,7 +2384,13 @@ exports.updateHotelReviewStatus = async (req, res) => {
 		}
 		return res.status(200).json({
 			success: true,
-			review: serializeAdminReview(review),
+			review: serializeAdminReview(review, {
+				includeReservationId:
+					canViewHotelReviewReservationDetailsForHotel(
+						req.profile,
+						review.hotelId
+					),
+			}),
 			summary: serializeSummary(transactionResult.summary),
 		});
 	} catch (error) {
@@ -2309,9 +2416,12 @@ Object.defineProperty(module.exports, "__test", {
 		buildPublicDisplayName,
 		buildReviewReservationContext,
 		buildReviewInvitationUrl,
+		buildRequireHotelReviewReservationScope,
 		buildRoomLabel,
 		activeReviewInvitationExistsError,
 		canCreateReviewInvitationForHotel,
+		canViewHotelReviewReservationDetails,
+		canViewHotelReviewReservationDetailsForHotel,
 		canonicalHotelSlug,
 		confirmationNumberLookupHash,
 		containsHtmlMarkup,
