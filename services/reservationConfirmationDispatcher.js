@@ -40,7 +40,6 @@ const uniqueValidEmails = (emails = []) => {
 	});
 	return result;
 };
-
 const publicClientBaseUrl = () =>
 	String(
 		process.env.PUBLIC_CLIENT_URL ||
@@ -128,7 +127,9 @@ async function hydrateReservationForConfirmation(reservation = {}) {
 			: null;
 	if (!hotel && hotelId && mongoose.Types.ObjectId.isValid(String(hotelId))) {
 		hotel = await HotelDetails.findById(hotelId)
-			.select("hotelName hotelAddress hotelCity phone belongsTo suppliedBy")
+			.select(
+				"hotelName hotelName_OtherLanguage hotelAddress hotelCity phone belongsTo suppliedBy roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage"
+			)
 			.lean()
 			.exec()
 			.catch(() => null);
@@ -139,6 +140,7 @@ async function hydrateReservationForConfirmation(reservation = {}) {
 		hotelAddress: doc.hotelAddress || hotel?.hotelAddress || "",
 		hotelCity: doc.hotelCity || hotel?.hotelCity || "",
 		hotelPhone: doc.hotelPhone || hotel?.phone || "",
+		receiptHotelInfo: hotel || null,
 	};
 }
 
@@ -196,12 +198,13 @@ async function sendOwnerEmailIfAvailable(baseEmail, reservationData = {}) {
 async function buildConfirmationEmail(reservationData = {}, { includePdf = true } = {}) {
 	const html = ClientConfirmationEmail(reservationData);
 	const hotelForPdf =
-		reservationData?.hotelId && typeof reservationData.hotelId === "object"
+		reservationData?.receiptHotelInfo ||
+		(reservationData?.hotelId && typeof reservationData.hotelId === "object"
 			? reservationData.hotelId
 			: {
 					hotelName: reservationData?.hotelName || "",
 					suppliedBy: reservationData?.belongsTo?.name || "",
-			  };
+			  });
 	let pdfBuffer = null;
 	let pdfError = "";
 	if (includePdf) {

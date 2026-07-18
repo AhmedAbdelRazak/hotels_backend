@@ -44,6 +44,7 @@
 		"dotenv": "^10.0.0",
 		"express": "^4.17.1",
 		"express-jwt": "^6.1.0",
+		"flag-icons": "^7.5.0",
 		"google-auth-library": "^7.10.3",
 		"google-libphonenumber": "^3.2.42",
 		"i18n-iso-countries": "^7.14.0",
