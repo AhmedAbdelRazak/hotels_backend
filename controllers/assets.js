@@ -1,4 +1,7 @@
 const moment = require("moment-timezone");
+const {
+	renderOfficialReceiptHtml,
+} = require("../services/officialReceipt");
 
 const confirmationEmail = (reservationData) => {
 	const customerDetails = reservationData.customer_details || {};
@@ -169,7 +172,6 @@ const confirmationEmail = (reservationData) => {
 
 	return email;
 };
-
 const reservationUpdate = (reservationData, hotelName) => {
 	const customerDetails = reservationData.customer_details || {};
 	const pickedRoomsType = Array.isArray(reservationData.pickedRoomsType)
@@ -2098,7 +2100,7 @@ module.exports = {
 	emailPaymentLink,
 	paymentReceipt,
 	ClientConfirmationEmail,
-	receiptPdfTemplate,
+	receiptPdfTemplate: renderOfficialReceiptHtml,
 	SendingReservationLinkEmail,
 	ReservationVerificationEmail,
 	newSupportCaseEmail,

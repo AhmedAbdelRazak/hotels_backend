@@ -161,7 +161,6 @@ const normalizeEmployeeBookingSource = (value) => {
 	}
 	return source;
 };
-
 const stripAgentRoomOverrides = (hotel = {}) => {
 	const plain =
 		hotel && typeof hotel.toObject === "function" ? hotel.toObject() : { ...hotel };
@@ -7132,7 +7131,8 @@ exports.getSingleReservationInvoice = async (req, res) => {
 		})
 			.populate({
 				path: "hotelId",
-				select: "hotelName hotelAddress hotelCity phone belongsTo",
+				select:
+					"hotelName hotelName_OtherLanguage hotelAddress hotelCity phone belongsTo roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage",
 				populate: { path: "belongsTo", select: "name" },
 			})
 			.lean()
@@ -7147,10 +7147,20 @@ exports.getSingleReservationInvoice = async (req, res) => {
 			? {
 					_id: reservation.hotelId._id,
 					hotelName: reservation.hotelId.hotelName || "Hotel",
+					hotelName_OtherLanguage:
+						reservation.hotelId.hotelName_OtherLanguage || "",
 					hotelAddress: reservation.hotelId.hotelAddress || "",
 					hotelCity: reservation.hotelId.hotelCity || "",
 					phone: reservation.hotelId.phone || "",
 					suppliedBy: reservation.hotelId.belongsTo?.name || null, // optional display
+					roomCountDetails: (reservation.hotelId.roomCountDetails || []).map(
+						(room) => ({
+							roomType: room.roomType || "",
+							displayName: room.displayName || "",
+							displayName_OtherLanguage:
+								room.displayName_OtherLanguage || "",
+						})
+					),
 			  }
 			: null;
 
