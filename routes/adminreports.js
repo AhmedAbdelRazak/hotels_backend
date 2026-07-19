@@ -22,6 +22,7 @@ const {
 	exportToExcel,
 	bookingSourcePaymentSummary,
 	checkoutDatePaymentSummary,
+	reservationExecutiveSummary,
 	adminDashboardReport,
 	hotelOccupancyCalendar,
 	hotelOccupancyWarnings,
@@ -142,6 +143,14 @@ router.get(
 	isAuth,
 	requireAdminAccess("HotelReports", "AdminDashboard"),
 	checkoutDatePaymentSummary
+);
+
+router.get(
+	"/adminreports/reservation-executive-summary/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("AdminDashboard"),
+	reservationExecutiveSummary
 );
 
 router.get(
