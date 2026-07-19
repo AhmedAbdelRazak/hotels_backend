@@ -96,3 +96,67 @@ test("official receipt print layout never exceeds the A4 page width", () => {
   assert.doesNotMatch(html, /width:\s*111\.112%/);
   assert.doesNotMatch(html, /zoom:\s*\.9/);
 });
+
+test(
+  "representative official receipt renders as one complete A4 page",
+  { timeout: 30000 },
+  async () => {
+    const puppeteer = require("puppeteer");
+    const html = renderOfficialReceiptHtml(
+      {
+        confirmation_number: "7163348135",
+        checkin_date: "2026-07-26",
+        checkout_date: "2026-08-03",
+        total_amount: 560,
+        paid_amount: 0,
+        customer_details: {
+          name: "Production Layout Check",
+          nationality: "EG",
+        },
+        pickedRoomsType: [
+          {
+            room_type: "tripleRooms",
+            displayName: "Triple Room - Premium Comfort",
+            count: 1,
+            chosenPrice: 70,
+            pricingByDay: Array.from({ length: 8 }, () => ({ price: 70 })),
+          },
+        ],
+      },
+      { hotelName: "Zad Ajyad" }
+    );
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    try {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 794, height: 1123 });
+      await page.emulateMediaType("print");
+      await page.setContent(html, { waitUntil: "domcontentloaded" });
+      const layout = await page.evaluate(() => {
+        const receipt = document.querySelector(".receipt");
+        const bounds = receipt.getBoundingClientRect();
+        return {
+          documentWidth: document.documentElement.scrollWidth,
+          receiptHeight: bounds.height,
+          receiptRight: bounds.right,
+          viewportWidth: document.documentElement.clientWidth,
+        };
+      });
+      const pdf = await page.pdf({ format: "A4", printBackground: true });
+      const pageCount = (
+        pdf.toString("latin1").match(/\/Type\s*\/Page\b/g) || []
+      ).length;
+
+      assert.equal(layout.documentWidth, layout.viewportWidth);
+      assert.ok(layout.receiptRight <= layout.viewportWidth);
+      assert.ok(layout.receiptHeight <= 1123);
+      assert.equal(pageCount, 1);
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  }
+);

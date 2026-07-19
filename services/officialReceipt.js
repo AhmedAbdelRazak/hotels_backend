@@ -649,9 +649,11 @@ const renderOfficialReceiptHtml = (reservationData = {}, hotelInfo = {}) => {
     @page { size:A4; margin:0; }
     @media print {
       .receipt { max-width:none; width:100%; }
-      .receipt-hero { min-height:140px; }
+      /* Leave a vertical buffer for the taller font metrics in production Chromium 121. */
+      .receipt-hero { min-height:132px; }
       .receipt-accent { height:20px; }
       .hotel-banner { min-height:68px; }
+      .booking-band { min-height:70px; }
       .rooms-table tr,.payment-details,.payment-method,.receipt-footer { break-inside:avoid; page-break-inside:avoid; }
     }
   </style>
