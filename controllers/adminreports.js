@@ -25,6 +25,11 @@ const {
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
 } = require("../services/paidBreakdownDateFilter");
+const {
+	buildExecutiveDateWindow,
+	buildExecutiveReservationMatch,
+	buildExecutiveReservationSummary,
+} = require("../services/adminReservationExecutiveSummary");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -538,6 +543,40 @@ exports.checkoutsByDay = async (req, res) => {
 	} catch (err) {
 		console.error("Error in checkoutsByDay:", err);
 		return res.status(500).json({ error: err.message });
+	}
+};
+
+exports.reservationExecutiveSummary = async (req, res) => {
+	try {
+		const dateWindow = buildExecutiveDateWindow(req.query.day);
+		const match = buildExecutiveReservationMatch(dateWindow);
+		match.$and = [
+			...(Array.isArray(match.$and) ? match.$and : []),
+			buildExcludePendingOtaReviewFilter(),
+		];
+		addHotelManagementReservationVisibilityToFilter(match, req.profile);
+
+		const reservations = await Reservations.find(
+			withPlatformHotelScope(req, match)
+		)
+			.select(
+				"confirmation_number hotelId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency"
+			)
+			.populate("hotelId", "hotelName hotelName_OtherLanguage")
+			.sort({ createdAt: -1, _id: -1 })
+			.maxTimeMS(15000)
+			.lean();
+
+		return res.json(
+			buildExecutiveReservationSummary(reservations, dateWindow)
+		);
+	} catch (error) {
+		console.error("Error in reservationExecutiveSummary:", error);
+		return res.status(500).json({
+			error: "Unable to load the reservation executive summary.",
+			errorArabic:
+				"\u062a\u0639\u0630\u0631 \u062a\u062d\u0645\u064a\u0644 \u0645\u0644\u062e\u0635 \u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a \u0627\u0644\u062a\u0646\u0641\u064a\u0630\u064a.",
+		});
 	}
 };
 
