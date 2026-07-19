@@ -58,3 +58,41 @@ test("official receipt escapes customer-controlled HTML and embeds a local flag"
   assert.equal(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), true);
   assert.equal(html.includes("data:image/svg+xml;base64,"), true);
 });
+
+test("official receipt print layout never exceeds the A4 page width", () => {
+  const html = renderOfficialReceiptHtml(
+    {
+      confirmation_number: "PDF-WIDTH-CHECK",
+      checkin_date: "2026-07-26",
+      checkout_date: "2026-08-03",
+      pickedRoomsType: [
+        {
+          room_type: "tripleRooms",
+          displayName: "Triple Room - Premium Comfort",
+          count: 1,
+          chosenPrice: 70,
+        },
+      ],
+      customer_details: {
+        name: "Mohamed Adel Fathy Hussein",
+        nationality: "EG",
+      },
+    },
+    { hotelName: "Zad Ajyad" }
+  );
+
+  assert.match(
+    html,
+    /@media print\s*\{\s*\.receipt\s*\{\s*max-width:none;\s*width:100%;\s*\}/
+  );
+  assert.match(
+    html,
+    /\.payment-method,\.receipt-footer\s*\{\s*break-inside:avoid;/
+  );
+  assert.match(
+    html,
+    /\.confirmation-number\s*\{[^}]*overflow-wrap:anywhere;/
+  );
+  assert.doesNotMatch(html, /width:\s*111\.112%/);
+  assert.doesNotMatch(html, /zoom:\s*\.9/);
+});
