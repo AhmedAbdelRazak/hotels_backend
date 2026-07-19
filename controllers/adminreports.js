@@ -560,7 +560,7 @@ exports.reservationExecutiveSummary = async (req, res) => {
 			withPlatformHotelScope(req, match)
 		)
 			.select(
-				"confirmation_number hotelId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency"
+				"confirmation_number hotelId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency pickedRoomsType pickedRoomsPricing"
 			)
 			.populate("hotelId", "hotelName hotelName_OtherLanguage")
 			.sort({ createdAt: -1, _id: -1 })
