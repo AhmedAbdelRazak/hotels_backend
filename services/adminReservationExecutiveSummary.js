@@ -44,6 +44,24 @@ const buildExecutiveDateWindow = (value = "today", now = new Date()) => {
 	};
 };
 
+const buildExecutiveComparisonWindow = (
+	window = buildExecutiveDateWindow("today")
+) => {
+	const target = moment
+		.tz(window.start, EXECUTIVE_SUMMARY_TIMEZONE)
+		.startOf("day")
+		.subtract(1, "day");
+
+	return {
+		filter: "comparison",
+		timezone: EXECUTIVE_SUMMARY_TIMEZONE,
+		date: target.format("YYYY-MM-DD"),
+		label: target.format("dddd, MMMM D, YYYY"),
+		start: target.clone().utc().toDate(),
+		end: target.clone().add(1, "day").utc().toDate(),
+	};
+};
+
 const buildOperationalStatusFilter = () => ({
 	reservation_status: { $nin: [...OPERATIONAL_EXCLUDED_STATUSES] },
 	state: { $nin: [...OPERATIONAL_EXCLUDED_STATUSES] },
@@ -242,36 +260,121 @@ const serializeExecutiveReservation = (reservation, activityTypes) => {
 	};
 };
 
+const executiveActivityTypesForWindow = (reservation, window) => {
+	const activityTypes = [];
+	const operational = isOperationalReservation(reservation);
+
+	if (operational && dateIsWithinWindow(reservation.checkin_date, window)) {
+		activityTypes.push("checkin");
+	}
+	if (operational && dateIsWithinWindow(reservation.checkout_date, window)) {
+		activityTypes.push("checkout");
+	}
+	if (dateIsWithinWindow(reservation.createdAt, window)) {
+		activityTypes.push("new-reservation");
+	}
+
+	return activityTypes;
+};
+
+const activityMetricKey = (activityType) =>
+	activityType === "checkin"
+		? "checkins"
+		: activityType === "checkout"
+		  ? "checkouts"
+		  : "newReservations";
+
+const emptyActivityMetrics = () => ({
+	checkins: { count: 0, sarAmount: 0, excludedNonSarCount: 0, invalidAmountCount: 0 },
+	checkouts: { count: 0, sarAmount: 0, excludedNonSarCount: 0, invalidAmountCount: 0 },
+	newReservations: {
+		count: 0,
+		sarAmount: 0,
+		excludedNonSarCount: 0,
+		invalidAmountCount: 0,
+	},
+});
+
+const addReservationToActivityMetrics = (metrics, reservation, activityTypes) => {
+	const currency = String(reservation.currency || "SAR")
+		.trim()
+		.toUpperCase();
+	const amount = finiteNumberOrNull(reservation.total_amount);
+
+	for (const activityType of activityTypes) {
+		const metric = metrics[activityMetricKey(activityType)];
+		metric.count += 1;
+		if (currency !== "SAR") {
+			metric.excludedNonSarCount += 1;
+		} else if (amount === null || amount < 0) {
+			metric.invalidAmountCount += 1;
+		} else {
+			metric.sarAmount = roundCurrency(metric.sarAmount + amount);
+		}
+	}
+};
+
+const percentageVariance = (current, previous) => {
+	if (previous === 0) return current === 0 ? 0 : null;
+	return Math.round((((current - previous) / previous) * 100 + Number.EPSILON) * 10) / 10;
+};
+
+const varianceState = (current, previous) => {
+	if (previous === 0 && current > 0) return "new";
+	if (current > previous) return "increase";
+	if (current < previous) return "decrease";
+	return "unchanged";
+};
+
+const compareActivityMetrics = (currentMetrics, previousMetrics) =>
+	Object.fromEntries(
+		Object.keys(currentMetrics).map((key) => {
+			const current = currentMetrics[key];
+			const previous = previousMetrics[key];
+			return [
+				key,
+				{
+					...current,
+					previousCount: previous.count,
+					previousSarAmount: roundCurrency(previous.sarAmount),
+					variancePercent: percentageVariance(current.count, previous.count),
+					amountVariancePercent: percentageVariance(
+						current.sarAmount,
+						previous.sarAmount
+					),
+					varianceState: varianceState(current.count, previous.count),
+				},
+			];
+		})
+	);
+
 const buildExecutiveReservationSummary = (
 	reservations = [],
-	window = buildExecutiveDateWindow("today")
+	window = buildExecutiveDateWindow("today"),
+	comparisonWindow = buildExecutiveComparisonWindow(window)
 ) => {
 	const rows = [];
-	let checkins = 0;
-	let checkouts = 0;
-	let newReservations = 0;
+	const currentMetrics = emptyActivityMetrics();
+	const previousMetrics = emptyActivityMetrics();
 
 	for (const reservation of Array.isArray(reservations) ? reservations : []) {
-		const activityTypes = [];
-		const operational = isOperationalReservation(reservation);
-
-		if (operational && dateIsWithinWindow(reservation.checkin_date, window)) {
-			activityTypes.push("checkin");
-			checkins += 1;
-		}
-		if (operational && dateIsWithinWindow(reservation.checkout_date, window)) {
-			activityTypes.push("checkout");
-			checkouts += 1;
-		}
-		if (dateIsWithinWindow(reservation.createdAt, window)) {
-			activityTypes.push("new-reservation");
-			newReservations += 1;
-		}
+		const activityTypes = executiveActivityTypesForWindow(reservation, window);
+		const comparisonActivityTypes = executiveActivityTypesForWindow(
+			reservation,
+			comparisonWindow
+		);
+		addReservationToActivityMetrics(currentMetrics, reservation, activityTypes);
+		addReservationToActivityMetrics(
+			previousMetrics,
+			reservation,
+			comparisonActivityTypes
+		);
 
 		if (activityTypes.length) {
 			rows.push(serializeExecutiveReservation(reservation, activityTypes));
 		}
 	}
+	const metrics = compareActivityMetrics(currentMetrics, previousMetrics);
 
 	const totalsByCurrency = rows.reduce((totals, row) => {
 		const currency = row.currency || "SAR";
@@ -295,10 +398,15 @@ const buildExecutiveReservationSummary = (
 		timezoneLabel: EXECUTIVE_SUMMARY_TIMEZONE_LABEL,
 		timezoneOffset: "UTC+03:00",
 		generatedAt: new Date().toISOString(),
+		comparison: {
+			date: comparisonWindow.date,
+			dateLabel: comparisonWindow.label,
+		},
 		summary: {
-			checkins,
-			checkouts,
-			newReservations,
+			checkins: metrics.checkins.count,
+			checkouts: metrics.checkouts.count,
+			newReservations: metrics.newReservations.count,
+			metrics,
 			totalUniqueReservations: rows.length,
 			totalAmount: primaryCurrency ? totalsByCurrency[primaryCurrency] || 0 : null,
 			currency: primaryCurrency,
@@ -315,6 +423,7 @@ module.exports = {
 	EXECUTIVE_SUMMARY_TIMEZONE,
 	EXECUTIVE_SUMMARY_TIMEZONE_LABEL,
 	OPERATIONAL_EXCLUDED_STATUSES,
+	buildExecutiveComparisonWindow,
 	buildExecutiveDateWindow,
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,

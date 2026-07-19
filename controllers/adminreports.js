@@ -27,6 +27,7 @@ const {
 } = require("../services/paidBreakdownDateFilter");
 const {
 	buildExecutiveDateWindow,
+	buildExecutiveComparisonWindow,
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,
 } = require("../services/adminReservationExecutiveSummary");
@@ -549,7 +550,12 @@ exports.checkoutsByDay = async (req, res) => {
 exports.reservationExecutiveSummary = async (req, res) => {
 	try {
 		const dateWindow = buildExecutiveDateWindow(req.query.day);
-		const match = buildExecutiveReservationMatch(dateWindow);
+		const comparisonWindow = buildExecutiveComparisonWindow(dateWindow);
+		const currentMatch = buildExecutiveReservationMatch(dateWindow);
+		const comparisonMatch = buildExecutiveReservationMatch(comparisonWindow);
+		const match = {
+			$or: [...currentMatch.$or, ...comparisonMatch.$or],
+		};
 		match.$and = [
 			...(Array.isArray(match.$and) ? match.$and : []),
 			buildExcludePendingOtaReviewFilter(),
@@ -568,7 +574,11 @@ exports.reservationExecutiveSummary = async (req, res) => {
 			.lean();
 
 		return res.json(
-			buildExecutiveReservationSummary(reservations, dateWindow)
+			buildExecutiveReservationSummary(
+				reservations,
+				dateWindow,
+				comparisonWindow
+			)
 		);
 	} catch (error) {
 		console.error("Error in reservationExecutiveSummary:", error);
