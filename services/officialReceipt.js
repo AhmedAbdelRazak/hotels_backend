@@ -607,7 +607,7 @@ const renderOfficialReceiptHtml = (reservationData = {}, hotelInfo = {}) => {
     .confirmation-panel { display:grid; align-content:start; gap:10px; }
     .confirmation-title { text-align:center; font-size:25px; font-weight:900; }
     .confirmation-box { min-height:112px; padding:8px 16px 7px; display:grid; place-items:center; border-top:2px solid #1a1a1a; border-bottom:2px solid #1a1a1a; background:#f1f3f5; }
-    .confirmation-number { color:#19723a; font-size:clamp(18px,2.7vw,30px); font-weight:900; line-height:1; white-space:nowrap; }
+    .confirmation-number { max-width:100%; color:#19723a; font-size:clamp(18px,2.7vw,30px); font-weight:900; line-height:1; overflow-wrap:anywhere; text-align:center; }
     .receipt-barcode { width:100%; height:42px; display:block; }
     .nationality-card { min-height:58px; padding:8px 18px; font-size:17px; }
     .nationality-flag { width:34px; height:25px; object-fit:cover; box-shadow:0 0 0 1px rgba(0,0,0,.15); }
@@ -647,7 +647,13 @@ const renderOfficialReceiptHtml = (reservationData = {}, hotelInfo = {}) => {
     .payment-deposit>strong,.payment-remaining>strong { color:var(--green); }
     .receipt-footer { min-height:83px; margin-top:12px; padding:15px 28px; display:grid; place-content:center; text-align:center; background:#080808; color:#fff; font-size:16px; line-height:1.55; }
     @page { size:A4; margin:0; }
-    @media print { .receipt { max-width:none; width:111.112%; zoom:.9; } .rooms-table tr,.payment-details,.payment-method { break-inside:avoid; page-break-inside:avoid; } }
+    @media print {
+      .receipt { max-width:none; width:100%; }
+      .receipt-hero { min-height:140px; }
+      .receipt-accent { height:20px; }
+      .hotel-banner { min-height:68px; }
+      .rooms-table tr,.payment-details,.payment-method,.receipt-footer { break-inside:avoid; page-break-inside:avoid; }
+    }
   </style>
 </head>
 <body>
