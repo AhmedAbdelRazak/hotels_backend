@@ -5,6 +5,7 @@ const {
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,
 	normalizeExecutiveDayFilter,
+	reconcileReservationAmount,
 } = require("./adminReservationExecutiveSummary");
 
 test("executive day filters normalize and use Riyadh calendar boundaries", () => {
@@ -55,6 +56,13 @@ test("executive summary categorizes unique rows without exposing private fields"
 			total_amount: 560,
 			total_rooms: 1,
 			total_guests: 2,
+			pickedRoomsType: [
+				{
+					count: 1,
+					chosenPrice: 280,
+					pricingByDay: [{ price: 280 }, { price: 280 }],
+				},
+			],
 		},
 		{
 			_id: "r2",
@@ -73,13 +81,82 @@ test("executive summary categorizes unique rows without exposing private fields"
 	];
 
 	const result = buildExecutiveReservationSummary(reservations, window);
-	assert.deepEqual(result.summary, {
-		checkins: 1,
-		checkouts: 1,
-		newReservations: 2,
-		totalUniqueReservations: 3,
-	});
+	assert.equal(result.summary.checkins, 1);
+	assert.equal(result.summary.checkouts, 1);
+	assert.equal(result.summary.newReservations, 2);
+	assert.equal(result.summary.totalUniqueReservations, 3);
+	assert.equal(result.summary.totalAmount, 560);
+	assert.equal(result.summary.currency, "SAR");
+	assert.equal(result.summary.verifiedAmounts, 1);
+	assert.equal(result.timezoneLabel, "Makkah Time");
 	assert.deepEqual(result.reservations[0].activityTypes, ["checkin", "new-reservation"]);
+	assert.equal(result.reservations[0].nights, 2);
+	assert.equal(result.reservations[0].averageNightlyAmount, 280);
+	assert.equal(result.reservations[0].amountQuality.status, "verified");
 	assert.deepEqual(result.reservations[2].activityTypes, ["new-reservation"]);
 	assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
+});
+
+test("amount audit reconciles a long-stay total without changing its stored value", () => {
+	const result = reconcileReservationAmount({
+		checkin_date: "2027-02-14T00:00:00.000Z",
+		checkout_date: "2027-03-12T00:00:00.000Z",
+		total_amount: 15842.58,
+		pickedRoomsType: [
+			{
+				count: 1,
+				chosenPrice: "609.33",
+				pricingByDay: Array.from({ length: 26 }, () => ({ price: 609.33 })),
+			},
+		],
+	});
+
+	assert.equal(result.nights, 26);
+	assert.equal(result.averageNightlyAmount, 609.33);
+	assert.equal(result.amountQuality.status, "verified");
+	assert.equal(result.amountQuality.expectedAmount, 15842.58);
+	assert.equal(result.amountQuality.difference, 0);
+
+	const discrepancy = reconcileReservationAmount({
+		checkin_date: "2027-02-14T00:00:00.000Z",
+		checkout_date: "2027-03-12T00:00:00.000Z",
+		total_amount: 15000,
+		pickedRoomsType: [
+			{
+				count: 1,
+				chosenPrice: "609.33",
+				pricingByDay: Array.from({ length: 26 }, () => ({ price: 609.33 })),
+			},
+		],
+	});
+	assert.equal(discrepancy.amountQuality.status, "discrepancy");
+	assert.equal(discrepancy.amountQuality.expectedAmount, 15842.58);
+});
+
+test("executive totals never add unlike currencies together", () => {
+	const window = buildExecutiveDateWindow(
+		"today",
+		new Date("2026-07-19T02:00:00.000Z")
+	);
+	const result = buildExecutiveReservationSummary(
+		[
+			{
+				_id: "sar-row",
+				createdAt: "2026-07-19T03:00:00.000Z",
+				total_amount: 100,
+				currency: "sar",
+			},
+			{
+				_id: "usd-row",
+				createdAt: "2026-07-19T04:00:00.000Z",
+				total_amount: 50,
+				currency: "usd",
+			},
+		],
+		window
+	);
+
+	assert.equal(result.summary.mixedCurrencies, true);
+	assert.equal(result.summary.totalAmount, null);
+	assert.deepEqual(result.summary.totalsByCurrency, { SAR: 100, USD: 50 });
 });

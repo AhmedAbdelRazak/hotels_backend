@@ -1,6 +1,7 @@
 const moment = require("moment-timezone");
 
 const EXECUTIVE_SUMMARY_TIMEZONE = "Asia/Riyadh";
+const EXECUTIVE_SUMMARY_TIMEZONE_LABEL = "Makkah Time";
 const EXECUTIVE_DAY_OFFSETS = Object.freeze({
 	today: 0,
 	yesterday: -1,
@@ -95,6 +96,112 @@ const safeNumber = (value, fallback = 0) => {
 	return Number.isFinite(number) ? number : fallback;
 };
 
+const finiteNumberOrNull = (value) => {
+	if (value === null || value === undefined || String(value).trim() === "") return null;
+	const number = Number(value);
+	return Number.isFinite(number) ? number : null;
+};
+
+const roundCurrency = (value) =>
+	Math.round((safeNumber(value) + Number.EPSILON) * 100) / 100;
+
+const reservationNights = (reservation = {}) => {
+	const checkin = safeDate(reservation.checkin_date);
+	const checkout = safeDate(reservation.checkout_date);
+	if (!checkin || !checkout) return 0;
+	return Math.max(
+		0,
+		moment
+			.tz(checkout, EXECUTIVE_SUMMARY_TIMEZONE)
+			.startOf("day")
+			.diff(
+				moment.tz(checkin, EXECUTIVE_SUMMARY_TIMEZONE).startOf("day"),
+				"days"
+			)
+	);
+};
+
+const roomCount = (room = {}) => {
+	const count = finiteNumberOrNull(room.count);
+	return count !== null && count > 0 ? count : 1;
+};
+
+const roomDailyPrice = (day = {}) => {
+	for (const value of [
+		day.clientPrice,
+		day.price,
+		day.mainPrice,
+		day.totalPriceWithCommission,
+	]) {
+		const price = finiteNumberOrNull(value);
+		if (price !== null && price >= 0) return price;
+	}
+	return null;
+};
+
+const expectedStayAmount = (
+	reservation = {},
+	nights = reservationNights(reservation)
+) => {
+	if (nights <= 0) return null;
+	const rooms =
+		Array.isArray(reservation.pickedRoomsPricing) &&
+		reservation.pickedRoomsPricing.length
+			? reservation.pickedRoomsPricing
+			: reservation.pickedRoomsType;
+	if (!Array.isArray(rooms) || !rooms.length) return null;
+
+	let expected = 0;
+	for (const room of rooms) {
+		const count = roomCount(room);
+		const dailyPrices = (Array.isArray(room.pricingByDay) ? room.pricingByDay : [])
+			.map(roomDailyPrice)
+			.filter((price) => price !== null);
+
+		if (dailyPrices.length === nights) {
+			expected += dailyPrices.reduce((sum, price) => sum + price, 0) * count;
+			continue;
+		}
+
+		const chosenPrice = finiteNumberOrNull(room.chosenPrice);
+		if (chosenPrice === null || chosenPrice < 0) return null;
+		expected += chosenPrice * nights * count;
+	}
+
+	return roundCurrency(expected);
+};
+
+const reconcileReservationAmount = (reservation = {}) => {
+	const nights = reservationNights(reservation);
+	const totalAmount = finiteNumberOrNull(reservation.total_amount);
+	if (totalAmount === null || totalAmount < 0) {
+		return {
+			nights,
+			averageNightlyAmount: null,
+			amountQuality: { status: "invalid", expectedAmount: null, difference: null },
+		};
+	}
+
+	const expectedAmount = expectedStayAmount(reservation, nights);
+	const difference =
+		expectedAmount === null ? null : roundCurrency(totalAmount - expectedAmount);
+	const tolerance = Math.max(0.05, Math.abs(totalAmount) * 0.00001);
+	return {
+		nights,
+		averageNightlyAmount: nights > 0 ? roundCurrency(totalAmount / nights) : null,
+		amountQuality: {
+			status:
+				expectedAmount === null
+					? "unverified"
+					: Math.abs(difference) <= tolerance
+					  ? "verified"
+					  : "discrepancy",
+			expectedAmount,
+			difference,
+		},
+	};
+};
+
 const reservationHotel = (reservation = {}) => {
 	const hotel = reservation.hotelId;
 	if (!hotel || typeof hotel !== "object") {
@@ -113,6 +220,7 @@ const reservationHotel = (reservation = {}) => {
 
 const serializeExecutiveReservation = (reservation, activityTypes) => {
 	const hotel = reservationHotel(reservation);
+	const amountAudit = reconcileReservationAmount(reservation);
 	return {
 		id: String(reservation._id || reservation.id || ""),
 		confirmationNumber: String(reservation.confirmation_number || "N/A"),
@@ -129,6 +237,7 @@ const serializeExecutiveReservation = (reservation, activityTypes) => {
 		guests: Math.max(0, safeNumber(reservation.total_guests)),
 		totalAmount: safeNumber(reservation.total_amount),
 		currency: String(reservation.currency || "SAR").toUpperCase(),
+		...amountAudit,
 		activityTypes,
 	};
 };
@@ -164,17 +273,39 @@ const buildExecutiveReservationSummary = (
 		}
 	}
 
+	const totalsByCurrency = rows.reduce((totals, row) => {
+		const currency = row.currency || "SAR";
+		totals[currency] = roundCurrency((totals[currency] || 0) + row.totalAmount);
+		return totals;
+	}, {});
+	const currencies = Object.keys(totalsByCurrency);
+	const primaryCurrency = currencies.length <= 1 ? currencies[0] || "SAR" : null;
+	const verifiedAmounts = rows.filter(
+		(row) => row.amountQuality?.status === "verified"
+	).length;
+	const amountsNeedingReview = rows.filter((row) =>
+		["invalid", "discrepancy"].includes(row.amountQuality?.status)
+	).length;
+
 	return {
 		filter: window.filter,
 		date: window.date,
 		dateLabel: window.label,
 		timezone: window.timezone,
+		timezoneLabel: EXECUTIVE_SUMMARY_TIMEZONE_LABEL,
+		timezoneOffset: "UTC+03:00",
 		generatedAt: new Date().toISOString(),
 		summary: {
 			checkins,
 			checkouts,
 			newReservations,
 			totalUniqueReservations: rows.length,
+			totalAmount: primaryCurrency ? totalsByCurrency[primaryCurrency] || 0 : null,
+			currency: primaryCurrency,
+			totalsByCurrency,
+			mixedCurrencies: currencies.length > 1,
+			verifiedAmounts,
+			amountsNeedingReview,
 		},
 		reservations: rows,
 	};
@@ -182,9 +313,11 @@ const buildExecutiveReservationSummary = (
 
 module.exports = {
 	EXECUTIVE_SUMMARY_TIMEZONE,
+	EXECUTIVE_SUMMARY_TIMEZONE_LABEL,
 	OPERATIONAL_EXCLUDED_STATUSES,
 	buildExecutiveDateWindow,
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,
+	reconcileReservationAmount,
 	normalizeExecutiveDayFilter,
 };
