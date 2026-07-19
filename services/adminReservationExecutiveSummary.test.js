@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+	buildExecutiveComparisonWindow,
 	buildExecutiveDateWindow,
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,
@@ -159,4 +160,80 @@ test("executive totals never add unlike currencies together", () => {
 	assert.equal(result.summary.mixedCurrencies, true);
 	assert.equal(result.summary.totalAmount, null);
 	assert.deepEqual(result.summary.totalsByCurrency, { SAR: 100, USD: 50 });
+});
+
+test("activity scorecards include SAR totals and prior Makkah-day count variance", () => {
+	const window = buildExecutiveDateWindow(
+		"today",
+		new Date("2026-07-19T02:00:00.000Z")
+	);
+	const comparisonWindow = buildExecutiveComparisonWindow(window);
+	assert.equal(comparisonWindow.date, "2026-07-18");
+	assert.equal(comparisonWindow.start.toISOString(), "2026-07-17T21:00:00.000Z");
+
+	const result = buildExecutiveReservationSummary(
+		[
+			{
+				_id: "current-1",
+				reservation_status: "confirmed",
+				checkin_date: "2026-07-19T02:00:00.000Z",
+				total_amount: 400,
+				currency: "SAR",
+			},
+			{
+				_id: "current-2",
+				reservation_status: "confirmed",
+				checkin_date: "2026-07-19T05:00:00.000Z",
+				total_amount: 200,
+				currency: "sar",
+			},
+			{
+				_id: "current-3",
+				reservation_status: "confirmed",
+				checkin_date: "2026-07-19T08:00:00.000Z",
+				total_amount: 75,
+				currency: "USD",
+			},
+			{
+				_id: "current-new",
+				createdAt: "2026-07-19T03:00:00.000Z",
+				total_amount: 50,
+				currency: "SAR",
+			},
+			{
+				_id: "previous-1",
+				reservation_status: "confirmed",
+				checkin_date: "2026-07-18T02:00:00.000Z",
+				total_amount: 100,
+				currency: "SAR",
+			},
+			{
+				_id: "previous-2",
+				reservation_status: "confirmed",
+				checkin_date: "2026-07-18T07:00:00.000Z",
+				total_amount: 50,
+				currency: "SAR",
+			},
+		],
+		window,
+		comparisonWindow
+	);
+
+	assert.equal(result.comparison.date, "2026-07-18");
+	assert.deepEqual(result.summary.metrics.checkins, {
+		count: 3,
+		sarAmount: 600,
+		excludedNonSarCount: 1,
+		invalidAmountCount: 0,
+		previousCount: 2,
+		previousSarAmount: 150,
+		variancePercent: 50,
+		amountVariancePercent: 300,
+		varianceState: "increase",
+	});
+	assert.equal(result.summary.metrics.newReservations.count, 1);
+	assert.equal(result.summary.metrics.newReservations.sarAmount, 50);
+	assert.equal(result.summary.metrics.newReservations.variancePercent, null);
+	assert.equal(result.summary.metrics.newReservations.varianceState, "new");
+	assert.equal(result.summary.metrics.checkouts.variancePercent, 0);
 });
