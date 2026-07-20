@@ -16,6 +16,9 @@ const {
 const {
 	createReservationWithAvailabilitySnapshot,
 } = require("../controllers/reservations");
+const {
+	enqueueOtaReservationWork,
+} = require("./otaReservationQueue");
 
 dayjs.extend(customParseFormat);
 
@@ -1277,20 +1280,27 @@ function extractAgodaRoomDetails(text = "") {
 	let roomName = "";
 	let roomCount = 0;
 	let occupancy = {};
+	let expectsRoomCount = false;
 	for (
 		let index = roomTypeIndex + 1;
 		index < Math.min(lines.length, roomTypeIndex + 12);
 		index += 1
 	) {
 		const line = lines[index];
-		if (!line || isAgodaRoomHeaderLine(line)) continue;
+		if (!line) continue;
+		if (/^(?:no\.?\s+of\s+rooms|number\s+of\s+rooms|room\s+count)$/i.test(line)) {
+			expectsRoomCount = true;
+			continue;
+		}
+		if (isAgodaRoomHeaderLine(line)) continue;
 		if (/^(benefits|cancellation policy|room only|rate plan)/i.test(line)) break;
 		if (!roomName && !/^\d+$/.test(line) && !/\badults?\b/i.test(line)) {
 			roomName = cleanAgodaValue(line);
 			continue;
 		}
-		if (!roomCount && /^\d+$/.test(line)) {
+		if (!roomCount && expectsRoomCount && /^\d+$/.test(line)) {
 			roomCount = Number(line);
+			expectsRoomCount = false;
 			continue;
 		}
 		if (!occupancy.adults && /\badults?\b/i.test(line)) {
@@ -2836,7 +2846,9 @@ function extractNormalizedReservation(email) {
 	const roomCountField = findField(text, [
 		"Room count",
 		"Number of rooms",
-		"Rooms",
+		"No. of rooms",
+		"No of rooms",
+		"Rooms booked",
 	]);
 	const adults =
 		airbnbFields.adults ||
@@ -3143,11 +3155,20 @@ function mapRoomType(roomNameRaw) {
 		s.split(" ").some(
 			(word) =>
 				word === keyword ||
-				word.includes(keyword) ||
-				(word.length >= 4 && keyword.includes(word)) ||
-				bigramSimilarity(word, keyword) >= 0.6
+				(!/^\d+$/.test(keyword) &&
+					(word.includes(keyword) ||
+						(word.length >= 4 && keyword.includes(word)) ||
+						bigramSimilarity(word, keyword) >= 0.6))
 		);
+	const explicitBedCapacity = Number(
+		s.match(/\b([1-9])\s+(?:beds?|persons?|guests?)\b/i)?.[1] || 0
+	);
 	if (hasKeyword("master") && hasKeyword("suite")) return "masterSuite";
+	if (explicitBedCapacity === 1) return "singleRooms";
+	if (explicitBedCapacity === 2) return "doubleRooms";
+	if (explicitBedCapacity === 3) return "tripleRooms";
+	if (explicitBedCapacity === 4) return "quadRooms";
+	if (explicitBedCapacity >= 5) return "familyRooms";
 	if (hasKeyword("quadruple") || hasKeyword("quad")) return "quadRooms";
 	if (hasKeyword("quintuple") || hasKeyword("five") || hasKeyword("5")) return "familyRooms";
 	if (hasKeyword("triple")) return "tripleRooms";
@@ -4836,6 +4857,7 @@ function buildOtaConfirmationLookup(confirmationNumber) {
 	);
 	return {
 		$or: [
+			{ otaIdentityKey: { $in: allValues } },
 			{ confirmation_number: { $in: allValues } },
 			{ reservation_id: { $in: allValues } },
 			{ "customer_details.confirmation_number2": { $in: allValues } },
@@ -4867,6 +4889,7 @@ function valuesMatchConfirmation(storedValue, incomingConfirmation) {
 function detectConfirmationMatchFields(reservation, confirmationNumber) {
 	if (!reservation || !confirmationNumber) return [];
 	const fields = [
+		["otaIdentityKey", reservation.otaIdentityKey],
 		["confirmation_number", reservation.confirmation_number],
 		["reservation_id", reservation.reservation_id],
 		[
@@ -4914,7 +4937,7 @@ async function createUnmappedOtaReviewReservation({
 } = {}) {
 	const existingBeforeCreate = await findReservationByOtaConfirmation(
 		confirmationNumber,
-		"_id hotelId confirmation_number reservation_id customer_details supplierData"
+		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
 	);
 	if (existingBeforeCreate) {
 		const matchedBy = detectConfirmationMatchFields(
@@ -4943,6 +4966,9 @@ async function createUnmappedOtaReviewReservation({
 		...normalized,
 		confirmationNumber,
 	});
+	// New OTA writes use this dedicated key so concurrent inserts are rejected
+	// atomically without forcing a risky backfill of legacy reservations.
+	document.otaIdentityKey = confirmationNumber;
 	document.reservationAuditLog = [
 		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
 	];
@@ -4979,7 +5005,7 @@ async function createUnmappedOtaReviewReservation({
 			if (error?.code === 11000) {
 				const duplicate = await findReservationByOtaConfirmation(
 					confirmationNumber,
-					"_id hotelId confirmation_number reservation_id customer_details supplierData"
+					"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
 				);
 				if (duplicate) {
 					return {
@@ -5028,7 +5054,7 @@ async function createUnmappedOtaReviewReservation({
 	};
 }
 
-async function reconcileOtaReservation(inputNormalized) {
+async function reconcileOtaReservationUnqueued(inputNormalized) {
 	const normalized = await applyLiveSarConversion(inputNormalized || {});
 	const warnings = [...(normalized.warnings || [])];
 	const errors = [...(normalized.errors || [])];
@@ -5489,7 +5515,7 @@ async function reconcileOtaReservation(inputNormalized) {
 
 	const existingBeforeCreate = await findReservationByOtaConfirmation(
 		confirmationNumber,
-		"_id hotelId confirmation_number reservation_id customer_details supplierData"
+		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
 	);
 	if (existingBeforeCreate) {
 		const lateMatchedBy = detectConfirmationMatchFields(
@@ -5524,6 +5550,8 @@ async function reconcileOtaReservation(inputNormalized) {
 			warnings
 		),
 	];
+	// The queue prevents local overlap; this key also protects across processes.
+	document.otaIdentityKey = confirmationNumber;
 	applyVccSafeFieldsToDocument(document, normalized);
 	document.confirmation_number = await generateUniquePmsConfirmationNumber();
 	document.customer_details = {
@@ -5570,7 +5598,7 @@ async function reconcileOtaReservation(inputNormalized) {
 				});
 				const duplicate = await findReservationByOtaConfirmation(
 					confirmationNumber,
-					"_id hotelId confirmation_number"
+					"_id hotelId confirmation_number otaIdentityKey"
 				);
 				if (duplicate) {
 					const duplicateMatchedBy = detectConfirmationMatchFields(
@@ -5615,6 +5643,21 @@ async function reconcileOtaReservation(inputNormalized) {
 		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
 		matchedReservationBy: [],
 	};
+}
+
+async function reconcileOtaReservation(inputNormalized) {
+	const input = inputNormalized || {};
+	const confirmationNumber = normalizeConfirmation(
+		input.confirmationNumber || input.reservationId
+	);
+	return enqueueOtaReservationWork(
+		() => reconcileOtaReservationUnqueued(input),
+		{
+			confirmationNumber,
+			provider: input.provider || "unknown",
+			source: input.source?.from || "ota",
+		}
+	);
 }
 
 function buildUnmappedOtaReviewReservationDocument(normalized = {}) {

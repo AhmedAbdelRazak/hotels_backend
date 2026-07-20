@@ -26,6 +26,12 @@ const reservationsSchema = new mongoose.Schema(
 			required: true,
 			unique: true,
 		},
+		otaIdentityKey: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
 		pms_number: {
 			type: String, //could be left blank
 			trim: true,
@@ -642,6 +648,16 @@ reservationsSchema.index(
 reservationsSchema.index(
 	{ "supplierData.platformConfirmationNumber": 1 },
 	{ sparse: true },
+);
+reservationsSchema.index(
+	{ otaIdentityKey: 1 },
+	{
+		unique: true,
+		partialFilterExpression: {
+			otaIdentityKey: { $type: "string", $gt: "" },
+		},
+		name: "uniq_ota_identity_key",
+	}
 );
 reservationsSchema.index(
 	{ aiSupportCaseId: 1 },
