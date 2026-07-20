@@ -57,6 +57,11 @@ const {
 	shouldMaskHotelManagementReservationSource,
 	withHotelManagementSourceViewContext,
 } = require("../services/reservationVisibility");
+const {
+	actorForAdminReservationCycleQuery,
+	buildAdminPendingConfirmationQuery,
+	buildAdminReservationCycleHotelFilter,
+} = require("../services/adminReservationCycleScope");
 
 const ObjectId = mongoose.Types.ObjectId;
 const SYSTEM_ADMIN_ROLE = 10000;
@@ -755,6 +760,13 @@ const getAccessibleOverallHotels = async (actor = {}, query = {}, section = "") 
 		);
 	});
 };
+
+const getAccessibleAdminReservationCycleHotels = async (actor = {}) =>
+	HotelDetails.find(buildAdminReservationCycleHotelFilter(actor))
+		.select(OVERALL_HOTEL_COMPACT_SELECT)
+		.populate("belongsTo", "_id name email phone")
+		.lean()
+		.exec();
 
 const canAccessOverallSection = (actor = {}, section = "summary") => {
 	if (isOwnerLike(actor)) return true;
@@ -5179,6 +5191,71 @@ exports.overallPendingReservations = async (req, res) => {
 	}
 };
 
+const loadAdminReservationCycleContext = async (req) => {
+	const actor = req.profile || null;
+	if (!actor || actor.activeUser === false) return null;
+	const hotels = await getAccessibleAdminReservationCycleHotels(actor);
+	return {
+		actor: actorForAdminReservationCycleQuery(actor),
+		hotels,
+	};
+};
+
+exports.adminPendingConfirmationReservations = async (req, res) => {
+	try {
+		const context = await loadAdminReservationCycleContext(req);
+		if (!context) {
+			return res.status(401).json({ error: "Valid active admin is required" });
+		}
+		const data = await listReservations({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: buildAdminPendingConfirmationQuery(req.query),
+			pendingOnly: true,
+		});
+		return res.json(data);
+	} catch (error) {
+		console.error("adminPendingConfirmationReservations error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not load admin pending confirmations" });
+	}
+};
+
+exports.exportAdminPendingConfirmationReservations = async (req, res) => {
+	try {
+		const context = await loadAdminReservationCycleContext(req);
+		if (!context) {
+			return res.status(401).json({ error: "Valid active admin is required" });
+		}
+		const data = await listReservations({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: {
+				...buildAdminPendingConfirmationQuery(req.query),
+				exportAll: "true",
+				page: 1,
+			},
+			pendingOnly: true,
+		});
+		await trackReservationExport({
+			req,
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+			dataset: "admin_pending_confirmation_reservations",
+			totalRows: data.total,
+			rows: data.reservations,
+		});
+		return res.json({ ...data, exportedAt: new Date(), exportTracked: true });
+	} catch (error) {
+		console.error("exportAdminPendingConfirmationReservations error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not export admin pending confirmations" });
+	}
+};
+
 exports.exportOverallPendingReservations = async (req, res) => {
 	try {
 		const context = await requireOverallSection(req, res, "pending");
@@ -5272,6 +5349,26 @@ exports.overallFinancialActions = async (req, res) => {
 		return res
 			.status(500)
 			.json({ error: "Could not load financial actions" });
+	}
+};
+
+exports.adminPendingFinanceReservations = async (req, res) => {
+	try {
+		const context = await loadAdminReservationCycleContext(req);
+		if (!context) {
+			return res.status(401).json({ error: "Valid active admin is required" });
+		}
+		const data = await listFinancialActions({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+		});
+		return res.json(data);
+	} catch (error) {
+		console.error("adminPendingFinanceReservations error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not load admin pending finance actions" });
 	}
 };
 

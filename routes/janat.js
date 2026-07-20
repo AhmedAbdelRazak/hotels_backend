@@ -61,6 +61,11 @@ const {
 	getAdminGuestCard,
 	emailAdminGuestCard,
 } = require("../controllers/guestCard");
+const {
+	adminPendingConfirmationReservations,
+	exportAdminPendingConfirmationReservations,
+	adminPendingFinanceReservations,
+} = require("../controllers/overall_dashboard");
 
 router.post("/janat-website/:documentId", createUpdateDocument);
 router.get("/janat-website-document", list);
@@ -89,6 +94,30 @@ router.get(
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
 	paginatedReservationList
+);
+
+router.get(
+	"/admin/reservation-cycle/pending-confirmations/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	adminPendingConfirmationReservations
+);
+
+router.get(
+	"/admin/reservation-cycle/pending-confirmations-export/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	exportAdminPendingConfirmationReservations
+);
+
+router.get(
+	"/admin/reservation-cycle/pending-finance/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	adminPendingFinanceReservations
 );
 
 router.get(
