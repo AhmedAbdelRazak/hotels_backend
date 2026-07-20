@@ -5,13 +5,29 @@ const INVENTORY_EXCLUDED_STATUS_REGEX = /cancel|reject|void|no[_\s-]?show/i;
 const INVENTORY_COMPLETED_STATUS_REGEX = /checked[_\s-]?out|checkedout/i;
 const INVENTORY_NON_BLOCKING_STATUS_REGEX =
 	/cancel|reject|void|no[_\s-]?show|checked[_\s-]?out|checkedout/i;
+const PENDING_QUEUE_TERMINAL_STATUS_REGEX =
+	/cancel(?:led|ed)?|void|no[_\s-]?show|in[_\s-]?house|checked[_\s-]?in|checked[_\s-]?out|checkedin|checkedout|early[_\s-]?checked[_\s-]?out|closed/i;
 
 const normalizeStatus = (value = "") =>
 	String(value || "")
 		.trim()
 		.toLowerCase();
 
+const isTerminalPendingQueueReservation = (reservation = {}) =>
+	[reservation.reservation_status, reservation.state].some((value) =>
+		PENDING_QUEUE_TERMINAL_STATUS_REGEX.test(normalizeStatus(value))
+	);
+
+const buildActivePendingQueueFilter = () => ({
+	$nor: [
+		{ reservation_status: PENDING_QUEUE_TERMINAL_STATUS_REGEX },
+		{ state: PENDING_QUEUE_TERMINAL_STATUS_REGEX },
+	],
+});
+
 const isPendingConfirmationReservation = (reservation = {}) => {
+	if (isTerminalPendingQueueReservation(reservation)) return false;
+
 	const reservationStatus = normalizeStatus(reservation.reservation_status);
 	const state = normalizeStatus(reservation.state);
 	const pendingStatus = normalizeStatus(reservation?.pendingConfirmation?.status);
@@ -66,7 +82,10 @@ const buildPendingConfirmationExclusionFilter = () => ({
 module.exports = {
 	PENDING_CONFIRMATION_STATUS_REGEX,
 	PENDING_DECISION_STATUS_REGEX,
+	PENDING_QUEUE_TERMINAL_STATUS_REGEX,
+	buildActivePendingQueueFilter,
 	isPendingConfirmationReservation,
+	isTerminalPendingQueueReservation,
 	shouldCountReservationForInventory,
 	buildPendingConfirmationExclusionFilter,
 };
