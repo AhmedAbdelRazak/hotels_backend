@@ -18,6 +18,7 @@ const {
 	buildHotelInventoryDayPayload,
 } = require("./hotel_inventory");
 const {
+	buildActivePendingQueueFilter,
 	buildPendingConfirmationExclusionFilter,
 	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
@@ -1138,20 +1139,25 @@ const pendingWorkflowFilterForActor = (actor = {}) => {
 	}
 
 	return {
-		$or: workflowFilters,
+		$and: [buildActivePendingQueueFilter(), { $or: workflowFilters }],
 	};
 };
 
 const rejectedWorkflowFilterForActor = () => ({
-	$or: [
-		{ reservation_status: REJECTED_STATUS },
-		{ state: REJECTED_STATUS },
-		{ reservation_status: FINANCE_REJECTED_STATUS },
-		{ state: FINANCE_REJECTED_STATUS },
-		{ "pendingConfirmation.status": "rejected" },
-		{ "agentDecisionSnapshot.status": "rejected" },
-		{ "financial_cycle.totalReviewStatus": "rejected" },
-		{ "commissionAgentApproval.status": "rejected" },
+	$and: [
+		buildActivePendingQueueFilter(),
+		{
+			$or: [
+				{ reservation_status: REJECTED_STATUS },
+				{ state: REJECTED_STATUS },
+				{ reservation_status: FINANCE_REJECTED_STATUS },
+				{ state: FINANCE_REJECTED_STATUS },
+				{ "pendingConfirmation.status": "rejected" },
+				{ "agentDecisionSnapshot.status": "rejected" },
+				{ "financial_cycle.totalReviewStatus": "rejected" },
+				{ "commissionAgentApproval.status": "rejected" },
+			],
+		},
 	],
 });
 
@@ -3570,6 +3576,7 @@ const buildFinancialActionsMatch = ({
 	applyDateFilter(match, query);
 
 	const clauses = [
+		buildActivePendingQueueFilter(),
 		financialActionFilter(query.actionType),
 		buildExcludePendingOtaReviewFilter(),
 	];

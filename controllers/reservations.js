@@ -27,6 +27,7 @@ const {
 	normalizeReservationStayPricing,
 } = require("../services/reservationPricing");
 const {
+	buildActivePendingQueueFilter,
 	isPendingConfirmationReservation,
 	shouldCountReservationForInventory,
 	buildPendingConfirmationExclusionFilter,
@@ -2207,6 +2208,7 @@ const buildPendingConfirmationFilter = (
 	return {
 		hotelId: ObjectId(hotelId),
 		$and: [
+			buildActivePendingQueueFilter(),
 			buildExcludePendingOtaReviewFilter(),
 			{ $or: workflowFilters },
 		],
