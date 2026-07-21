@@ -37,6 +37,13 @@ const DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE = clampDeductionRate(
 const MIN_REAL_CALENDAR_ROOT_PRICE = Number(
 	process.env.OTA_MIN_REAL_CALENDAR_ROOT_PRICE || 0.01
 );
+const configuredInboundTotalLimit = Number(
+	process.env.OTA_MAX_INBOUND_RESERVATION_TOTAL_SAR || 1000000
+);
+const MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR =
+	Number.isFinite(configuredInboundTotalLimit) && configuredInboundTotalLimit > 0
+		? configuredInboundTotalLimit
+		: 1000000;
 
 const DEFAULT_SAR_EXCHANGE_RATES = {
 	SAR: 1,
@@ -610,7 +617,8 @@ function countNumber(value) {
 function parseMoneyNumber(value) {
 	const raw = normalizeWhitespace(value);
 	if (!raw) return 0;
-	let cleaned = raw
+	const numericToken = raw.match(/-?\d+(?:[,.]\d+)*/)?.[0] || "";
+	let cleaned = numericToken
 		.replace(/[^\d,.-]/g, "")
 		.replace(/(?!^)-/g, "")
 		.trim();
@@ -669,6 +677,7 @@ function normalizeMoneyCurrency(value) {
 	const token = normalizeWhitespace(value).toUpperCase();
 	if (!token) return "";
 	if (token.includes("$") || token === "US$") return "USD";
+	if (token.includes("\uFDFC")) return "SAR";
 	if (token.includes("\u20ac")) return "EUR";
 	if (token.includes("\u00a3")) return "GBP";
 	if (/^(SR|SAUDI\s+RIYAL|RIYAL)$/.test(token)) return "SAR";
@@ -677,7 +686,7 @@ function normalizeMoneyCurrency(value) {
 }
 
 function moneyNumberPattern() {
-	return String.raw`-?\d{1,3}(?:[,.]\d{3})*(?:[,.]\d{1,2})?|-?\d+(?:[,.]\d{1,2})?`;
+	return String.raw`-?(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:[,.]\d{1,2})?)`;
 }
 
 function parseMoneyCandidates(value) {
@@ -691,6 +700,7 @@ function parseMoneyCandidates(value) {
 		"SR",
 		"SAUDI\\s+RIYAL",
 		"RIYAL",
+		"\uFDFC",
 		"\u20ac",
 		"\u00a3",
 	].join("|");
@@ -1900,6 +1910,15 @@ function isOtaInboundEmail(normalized = {}) {
 	);
 }
 
+function isOtaInboundTotalOutlier(normalized = {}) {
+	const totalAmountSar = Number(normalized.totalAmountSar || 0);
+	return (
+		isOtaInboundEmail(normalized) &&
+		Number.isFinite(totalAmountSar) &&
+		totalAmountSar > MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR
+	);
+}
+
 function otaProviderKey(normalized = {}) {
 	return normalizeComparable(
 		normalized.provider ||
@@ -2952,21 +2971,36 @@ function extractNormalizedReservation(email) {
 	const activationDateField = findField(text, [
 		"Activation date",
 		"Card activation date",
+		"Card Effective Date",
 	]);
 	const expirationDateField = findField(text, [
 		"Expiration date",
 		"Expiry date",
 		"Card expiration date",
 	]);
-	const amountToChargeField = findField(text, [
+	const explicitAmountToChargeField = findField(text, [
 		"Amount to charge",
 		"Charge amount",
 		"VCC amount",
 	]);
+	const currentCardBalanceField = findField(text, ["Card Current Balance"]);
+	const futureCardBalanceField = findField(text, ["Card Future Balance"]);
+	const cardBalanceFields = [
+		explicitAmountToChargeField,
+		currentCardBalanceField,
+		futureCardBalanceField,
+	].filter(Boolean);
+	const amountToChargeField =
+		cardBalanceFields.find((value) => parseMoney(value).amount > 0) ||
+		cardBalanceFields[0] ||
+		"";
 	const activationDate =
 		provider === "airbnb" && !hasExplicitCardContext
 			? null
-			: parseDate(activationDateField);
+			: parseDate(
+					activationDateField.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ||
+						activationDateField
+			  );
 	const expirationDate =
 		provider === "airbnb" && !hasExplicitCardContext
 			? null
@@ -2988,6 +3022,31 @@ function extractNormalizedReservation(email) {
 					cardLast4,
 			  });
 	const paidOnline = paymentCollectionModel === "ota_collect";
+	const vccPayoutSar =
+		paymentCollectionModel === "virtual_card"
+			? round2(vccAmountDetails.amountToChargeSar || 0)
+			: 0;
+	const providerTotalPayoutSar = round2(
+		agodaFields.totalPayoutSar || airbnbFields.totalPayoutSar || vccPayoutSar || 0
+	);
+	const providerPaymentSummary = Object.keys(agodaFields.paymentSummary || {}).length
+		? agodaFields.paymentSummary
+		: airbnbFields.paymentSummary || {};
+	const paymentSummary = Object.keys(providerPaymentSummary).length
+		? providerPaymentSummary
+		: vccPayoutSar > 0
+		? {
+				sourceCurrency: vccAmountDetails.amountToChargeCurrency || amountCurrency,
+				sourceTotalGuestPaymentAmount: parsedMoney.amount || 0,
+				sourceTotalPayoutAmount: vccAmountDetails.amountToCharge || 0,
+				totalGuestPaymentAmount: conversion.totalAmountSar || 0,
+				totalPayoutAmount: vccPayoutSar,
+				currency: "SAR",
+				exchangeRateToSar: conversion.exchangeRateToSar || 0,
+				exchangeRateSource: conversion.exchangeRateSource || "",
+				amountConvertedAt: conversion.convertedAt || "",
+		  }
+		: {};
 
 	const intent = detectReservationIntent({
 		subject: email.subject,
@@ -3040,12 +3099,14 @@ function extractNormalizedReservation(email) {
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
-		totalPayoutSar: agodaFields.totalPayoutSar || airbnbFields.totalPayoutSar || 0,
-		netAfterExpensesTotal:
-			agodaFields.netAfterExpensesTotal || airbnbFields.netAfterExpensesTotal || 0,
-		paymentSummary: Object.keys(agodaFields.paymentSummary || {}).length
-			? agodaFields.paymentSummary
-			: airbnbFields.paymentSummary || {},
+		totalPayoutSar: providerTotalPayoutSar,
+		netAfterExpensesTotal: round2(
+			agodaFields.netAfterExpensesTotal ||
+				airbnbFields.netAfterExpensesTotal ||
+				vccPayoutSar ||
+				0
+		),
+		paymentSummary,
 		adults,
 		children,
 		totalGuests,
@@ -5152,6 +5213,30 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		};
 	}
 
+	if (!isStatusIntent && isOtaInboundTotalOutlier(normalized)) {
+		const pricingError = `OTA inbound total ${round2(
+			normalized.totalAmountSar
+		)} SAR exceeds the ${MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR} SAR safety limit; manual review is required.`;
+		logReconcile("needs_review.total_outlier", {
+			confirmationNumber,
+			provider: normalized.provider || "unknown",
+			totalAmountSar: round2(normalized.totalAmountSar),
+			limitSar: MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR,
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "ota_inbound_total_outlier",
+			automationComment: pricingError,
+			warnings,
+			errors: [...errors, pricingError],
+			reservationId: existing?._id || null,
+			hotelId: existing?.hotelId || null,
+			pmsConfirmationNumber: existing?.confirmation_number || "",
+			matchedReservationBy,
+		};
+	}
+
 	const missingForCreate = requiredNewReservationMissing(normalized);
 	const hasCompleteCreatePayload =
 		!missingForCreate.length &&
@@ -5989,5 +6074,6 @@ module.exports = {
 	generateUniquePmsConfirmationNumber,
 	getOtaInboundAllowedHotelIds,
 	isHotelAllowedForOtaInbound,
+	isOtaInboundTotalOutlier,
 	getSarConversionMeta,
 };
