@@ -1,10 +1,14 @@
 /** @format */
 
+process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
+
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const Reservations = require("../models/reservations");
 const {
+	detectPaymentCollectionModel,
 	extractNormalizedReservation,
+	resolvePaymentMapping,
 	resolveRoomMatch,
 } = require("./otaReservationMapper");
 
@@ -95,6 +99,54 @@ test("explicit Agoda room-count labels remain supported", () => {
 	});
 
 	assert.equal(normalized.roomCount, 2);
+});
+
+test("ExpediaCollect with EVC is treated as a virtual card pending capture", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"Reservations" <notifications@example.com>',
+		to: "ota@inbound.jannatbooking.com",
+		subject: "Expedia reservation",
+		text: [
+			"Expedia (Expedia Affiliate Network)",
+			"Confirmation Number 9990001112",
+			"Guest Name Test Guest",
+			"Order Total $ 154.26",
+			"Note Payment Method:ExpediaCollect EVC Charge Status:READY TO CHARGE ON CHECK IN DATE",
+			"Room Type Comfort Family Room - 4 beds - AJYAD Hotel- 15 Mins from Haram",
+			"Check-in Date Aug 06, 2026",
+			"Check-out Date Aug 16, 2026",
+			"Guest Count 4 (2 children, 2 adults)",
+			"Status Reservation",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "expedia");
+	assert.equal(normalized.paymentCollectionModel, "virtual_card");
+	assert.equal(normalized.paidOnline, false);
+	assert.equal(normalized.sourcePresence.paymentCollectionModel, true);
+
+	const payment = resolvePaymentMapping(normalized, 578.47, 520.62, 57.85);
+	assert.equal(payment.payment, "credit/ debit");
+	assert.equal(payment.financeStatus, "not paid");
+	assert.equal(payment.paidAmount, 0);
+});
+
+test("compact ExpediaCollect remains OTA collect without virtual-card evidence", () => {
+	assert.equal(
+		detectPaymentCollectionModel("Payment Method:ExpediaCollect"),
+		"ota_collect"
+	);
+	assert.equal(
+		detectPaymentCollectionModel("Payment Method:Expedia Collect"),
+		"ota_collect"
+	);
+	assert.equal(
+		detectPaymentCollectionModel(
+			"Payment Method:ExpediaCollect EVC Charge Status:READY"
+		),
+		"virtual_card"
+	);
+	assert.equal(detectPaymentCollectionModel("Reference code EVC"), "unknown");
 });
 
 test("reservation schema declares an atomic partial unique OTA identity index", () => {
