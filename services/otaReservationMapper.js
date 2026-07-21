@@ -2480,10 +2480,15 @@ function extractCardLast4(text) {
 
 function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
 	const haystack = String(paymentText || "").toLowerCase();
+	const hasExpediaVirtualCard =
+		/\bevc\b/i.test(haystack) &&
+		/(\bexpedia\s*collect\b|\bevc\s+charge\s+status\b)/i.test(haystack);
 	const hasVirtualCard =
 		/(virtual\s+card|\bvcc\b|card\s+number|validation\s+code|hotel\s+charges?\s+(?:the\s+)?virtual\s+card|charges?\s+(?:a\s+)?virtual\s+card)/i.test(
 			haystack
-		) || !!vcc.cardLast4;
+		) ||
+		hasExpediaVirtualCard ||
+		!!vcc.cardLast4;
 	if (hasVirtualCard) return "virtual_card";
 	if (
 		/(hotel\s+collect|hotel\s+collects|pay\s+at\s+(?:the\s+)?property|pay\s+at\s+(?:the\s+)?hotel|pay\s+on\s+arrival|guest\s+pays|traveler\s+pays|collect\s+from\s+guest)/i.test(
@@ -2493,7 +2498,7 @@ function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
 		return "hotel_collect";
 	}
 	if (
-		/(expedia\s+collect|agoda\s+collect|booking\.com\s+collect|ota\s+collect|ota\s+collects|collected\s+by|platform\s+collect|prepaid|paid\s+online)/i.test(
+		/(\bexpedia\s*collect\b|agoda\s+collect|booking\.com\s+collect|ota\s+collect|ota\s+collects|collected\s+by|platform\s+collect|prepaid|paid\s+online)/i.test(
 			haystack
 		)
 	) {
