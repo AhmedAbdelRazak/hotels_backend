@@ -6,8 +6,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const Reservations = require("../models/reservations");
 const {
+	buildReservationDocument,
 	detectPaymentCollectionModel,
 	extractNormalizedReservation,
+	isOtaInboundTotalOutlier,
+	parseMoney,
 	resolvePaymentMapping,
 	resolveRoomMatch,
 } = require("./otaReservationMapper");
@@ -160,4 +163,99 @@ test("reservation schema declares an atomic partial unique OTA identity index", 
 	assert.deepEqual(index[1].partialFilterExpression, {
 		otaIdentityKey: { $type: "string", $gt: "" },
 	});
+});
+
+const hotelRunnerAgodaVccEmail = {
+	from: '"HotelRunner" <noreply@hotelrunner.com>',
+	to: "ota@example.com",
+	subject: "Zad AJYAD Hotel - New Reservation #RTEST",
+	text: [
+		"AGODA (RETAIL)",
+		"Confirmation Number 9990002223 Guest Name Test Guest Country Saudi Arabia Order Total \uFDFC 44 Booked Date Tuesday, July 21, 2026 23:56 Note Payment:",
+		"Merchance booking (Agoda Collect) Card Effective Date:2026-07-22 Card Current Balance:44.00 Card Future Balance:44.00 Card Currency Code:SAR Card Is VCC:true",
+		"Hotel Name Zad Ajyad",
+		"Room Type Double Room - Comfort & Relaxation",
+		"Check-in Date Jul 23, 2026",
+		"Check-out Date Jul 24, 2026",
+		"Guest Count 2",
+		"Adult Count:2",
+		"Children Count:0",
+		"Status Reservation",
+	].join("\n"),
+};
+
+test("HotelRunner Agoda total stops at the first money token", () => {
+	assert.deepEqual(
+		parseMoney("\uFDFC 44 Booked Date Tuesday, July 21, 2026 23:56"),
+		{ amount: 44, currency: "SAR" }
+	);
+	assert.deepEqual(parseMoney("SAR 1560.00"), {
+		amount: 1560,
+		currency: "SAR",
+	});
+	assert.equal(
+		parseMoney("44 Booked Date Tuesday, July 21, 2026 23:56").amount,
+		44
+	);
+});
+
+test("HotelRunner Agoda VCC pricing uses the order total and current card balance", () => {
+	const normalized = extractNormalizedReservation(hotelRunnerAgodaVccEmail);
+
+	assert.equal(normalized.provider, "agoda");
+	assert.equal(normalized.confirmationNumber, "9990002223");
+	assert.equal(normalized.amount, 44);
+	assert.equal(normalized.currency, "SAR");
+	assert.equal(normalized.totalAmountSar, 44);
+	assert.equal(normalized.paymentCollectionModel, "virtual_card");
+	assert.equal(normalized.vcc.amountToCharge, 44);
+	assert.equal(normalized.vcc.amountToChargeCurrency, "SAR");
+	assert.equal(normalized.vcc.amountToChargeSar, 44);
+	assert.equal(normalized.vcc.activationDate, "2026-07-22");
+	assert.equal(normalized.totalPayoutSar, 44);
+	assert.equal(normalized.netAfterExpensesTotal, 44);
+	assert.equal(normalized.paymentSummary.totalPayoutAmount, 44);
+
+	const built = buildReservationDocument(normalized, {
+		_id: "test-hotel-id",
+		belongsTo: "test-owner-id",
+		roomCountDetails: [
+			{
+				roomType: "doubleRooms",
+				displayName: "Double Room - Comfort & Relaxation",
+				activeRoom: true,
+				price: { basePrice: 75 },
+			},
+		],
+	});
+
+	assert.equal(built.ok, true);
+	assert.equal(built.document.total_amount, 44);
+	assert.equal(built.document.sub_total, 75);
+	assert.equal(built.document.adminPricing.clientTotal, 44);
+	assert.equal(built.document.adminPricing.rootTotal, 75);
+	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 44);
+	assert.equal(built.document.adminPricing.otaExpenseTotal, 0);
+	assert.equal(built.document.adminPricing.platformMarginTotal, -31);
+	assert.equal(built.document.adminPricing.defaultDeductionApplied, false);
+	assert.equal(built.document.payment, "credit/ debit");
+	assert.equal(built.document.financeStatus, "not paid");
+	assert.equal(built.document.paid_amount, 0);
+});
+
+test("OTA inbound totals above the safety limit require review", () => {
+	const normalized = extractNormalizedReservation(hotelRunnerAgodaVccEmail);
+	assert.equal(
+		isOtaInboundTotalOutlier({ ...normalized, totalAmountSar: 1000001 }),
+		true
+	);
+	assert.equal(
+		isOtaInboundTotalOutlier({
+			...normalized,
+			totalAmountSar: 1000001,
+			source: {},
+			inboundEmailId: "",
+		}),
+		false
+	);
 });
