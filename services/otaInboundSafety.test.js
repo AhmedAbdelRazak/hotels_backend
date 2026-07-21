@@ -171,7 +171,8 @@ const hotelRunnerAgodaVccEmail = {
 	subject: "Zad AJYAD Hotel - New Reservation #RTEST",
 	text: [
 		"AGODA (RETAIL)",
-		"Confirmation Number 9990002223 Guest Name Test Guest Country Saudi Arabia Order Total \uFDFC 44 Booked Date Tuesday, July 21, 2026 23:56 Note Payment:",
+		"Confirmation Number 9990002223 Guest Name Test Guest Country Saudi",
+		"Arabia Order Total \uFDFC 44 Booked Date Tuesday, July 21, 2026 23:56 Note Payment:",
 		"Merchance booking (Agoda Collect) Card Effective Date:2026-07-22 Card Current Balance:44.00 Card Future Balance:44.00 Card Currency Code:SAR Card Is VCC:true",
 		"Hotel Name Zad Ajyad",
 		"Room Type Double Room - Comfort & Relaxation",
@@ -204,6 +205,8 @@ test("HotelRunner Agoda VCC pricing uses the order total and current card balanc
 
 	assert.equal(normalized.provider, "agoda");
 	assert.equal(normalized.confirmationNumber, "9990002223");
+	assert.equal(normalized.guestName, "Test Guest");
+	assert.equal(normalized.nationality, "Saudi Arabia");
 	assert.equal(normalized.amount, 44);
 	assert.equal(normalized.currency, "SAR");
 	assert.equal(normalized.totalAmountSar, 44);

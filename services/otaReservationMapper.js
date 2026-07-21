@@ -1119,6 +1119,17 @@ function findField(text, labels) {
 	return "";
 }
 
+function extractHotelRunnerInlineGuestFields(text = "") {
+	const match = String(text || "").match(
+		/\bGuest\s+Name\s*[:#-]?\s*([\s\S]{1,160}?)\s+Country\s*[:#-]?\s*([\s\S]{1,100}?)\s+Order\s+Total\b/i
+	);
+	if (!match) return { guestName: "", nationality: "" };
+	return {
+		guestName: cleanFieldValue(match[1]),
+		nationality: cleanFieldValue(match[2]),
+	};
+}
+
 function findFirstPattern(text, patterns) {
 	for (const pattern of patterns) {
 		const match = String(text || "").match(pattern);
@@ -2924,14 +2935,17 @@ function extractNormalizedReservation(email) {
 	const guestNamePattern = findFirstPattern(text, [
 		/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i,
 	]);
+	const hotelRunnerInlineGuest = extractHotelRunnerInlineGuestFields(text);
 	const guestName = firstNonEmpty(
 		airbnbFields.guestName,
 		agodaFields.guestName,
+		hotelRunnerInlineGuest.guestName,
 		extractProviderGuestName(text),
 		guestNameField,
 		guestNamePattern
 	);
 	const nationality = firstNonEmpty(
+		hotelRunnerInlineGuest.nationality,
 		agodaFields.nationality,
 		findField(text, [
 			"Nationality",
