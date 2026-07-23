@@ -33,6 +33,10 @@ const {
 	buildMerchantTransactionId,
 	classifyTimeoutVoidResult,
 } = require("../services/bofaVccPolicy");
+const {
+	resolveVccProvider,
+	resolveServerBillingProfile,
+} = require("../services/bofaVccBilling");
 
 /* =========================================================
  * Constants
@@ -113,32 +117,6 @@ const SIGNATURE_STYLES = Object.freeze({
 		requestTargetHeader: "(request-target)",
 	},
 });
-
-/**
- * Provider cardholder defaults (used for billing info / metadata)
- */
-const PROVIDER_CARDS = {
-	expedia: {
-		cardholder: "Expedia Virtual Card",
-		firstName: "Expedia",
-		lastName: "VirtualCard",
-	},
-	agoda: {
-		cardholder: "Agoda Virtual Card",
-		firstName: "Agoda",
-		lastName: "VirtualCard",
-	},
-	booking: {
-		cardholder: "Booking.com Virtual Card",
-		firstName: "Booking.com",
-		lastName: "VirtualCard",
-	},
-	other: {
-		cardholder: "Virtual Card",
-		firstName: "Virtual",
-		lastName: "Card",
-	},
-};
 
 /* =========================================================
  * Logging helpers
@@ -260,53 +238,6 @@ const isCancelledOrNoShow = (status) => {
 const maxAttempts = () => {
 	const p = Number(process.env.BOFA_VCC_MAX_ATTEMPTS || DEFAULT_MAX_ATTEMPTS);
 	return Number.isFinite(p) && p > 0 ? Math.floor(p) : DEFAULT_MAX_ATTEMPTS;
-};
-
-const resolveProvider = (bookingSource) => {
-	const normalized = String(bookingSource || "").toLowerCase();
-	if (normalized.includes("expedia")) return "expedia";
-	if (normalized.includes("agoda")) return "agoda";
-	if (normalized.includes("booking")) return "booking";
-	return "other";
-};
-
-const resolveProviderCard = (provider) =>
-	PROVIDER_CARDS[provider] || PROVIDER_CARDS.other;
-
-const splitCardholderName = (fullName, fallback) => {
-	const raw = String(fullName || "")
-		.trim()
-		.replace(/\s+/g, " ");
-	const defaults = fallback || PROVIDER_CARDS.other;
-
-	const normalizedRaw = raw.toLowerCase();
-	const normalizedDefault = String(defaults.cardholder || "")
-		.trim()
-		.toLowerCase();
-
-	if (!raw) {
-		return {
-			full: defaults.cardholder,
-			firstName: defaults.firstName,
-			lastName: defaults.lastName,
-		};
-	}
-	if (normalizedRaw && normalizedRaw === normalizedDefault) {
-		return {
-			full: defaults.cardholder,
-			firstName: defaults.firstName,
-			lastName: defaults.lastName,
-		};
-	}
-	const parts = raw.split(" ");
-	if (parts.length === 1) {
-		return { full: raw, firstName: parts[0], lastName: defaults.lastName };
-	}
-	return {
-		full: raw,
-		firstName: parts.slice(0, -1).join(" "),
-		lastName: parts[parts.length - 1],
-	};
 };
 
 const inferCardTypeCode = (cardNumber) => {
@@ -1501,7 +1432,7 @@ exports.getReservationBofaVccStatus = async (req, res) => {
 				.status(404)
 				.json({ success: false, message: "Reservation not found." });
 
-		const provider = resolveProvider(reservation?.booking_source);
+		const provider = resolveVccProvider(reservation?.booking_source);
 
 		return res.status(200).json({
 			success: true,
@@ -1540,7 +1471,6 @@ exports.captureReservationVccSale = async (req, res) => {
 			reservationId,
 			userId: req?.auth?._id || "",
 			hasCardObject: !!req.body?.card,
-			hasBillingAddress: !!req.body?.billingAddress,
 			proceedWithoutRoom: !!req.body?.proceedWithoutRoom,
 			rawAmount: req.body?.usdAmount || req.body?.amount || null,
 		});
@@ -1604,7 +1534,6 @@ exports.captureReservationVccSale = async (req, res) => {
 			cardLast4: cardNumber ? cardNumber.slice(-4) : "",
 			cardLength: cardNumber.length,
 			cvvLength: cardCVV.length,
-			expiry: expiry?.display || "",
 			cardTypeCode,
 		});
 
@@ -1631,9 +1560,10 @@ exports.captureReservationVccSale = async (req, res) => {
 				? snapshot.vcc_payment.metadata
 				: {};
 
-		const provider = resolveProvider(snapshot?.booking_source);
+		const provider = resolveVccProvider(snapshot?.booking_source);
 		const status = vccStatusPayload(snapshot, provider);
 		const checkinEligibility = checkCheckinEligibility(snapshot?.checkin_date);
+		const billingProfile = resolveServerBillingProfile(provider);
 
 		bofaLog("reservation + status resolved", {
 			reservationId,
@@ -1648,6 +1578,14 @@ exports.captureReservationVccSale = async (req, res) => {
 			return res.status(409).json({
 				success: false,
 				...checkinEligibility,
+				bofaStatus: status,
+			});
+
+		if (!billingProfile.ok)
+			return res.status(422).json({
+				success: false,
+				issue: billingProfile.issue,
+				message: billingProfile.message,
 				bofaStatus: status,
 			});
 
@@ -1836,144 +1774,10 @@ exports.captureReservationVccSale = async (req, res) => {
 			throw lockError;
 		}
 
-		const billing = req.body?.billingAddress || {};
-		const providerCard = resolveProviderCard(provider);
-		const cardholder = splitCardholderName(
-			req.body?.cardholderName ||
-				billing.cardholderName ||
-				providerCard.cardholder,
-			providerCard,
-		);
-
-		const postalCode = truncate(
-			String(
-				billing.postalCode ||
-					billing.postal_code ||
-					req.body?.postalCode ||
-					"98119",
-			).toUpperCase(),
-			14,
-		);
-
-		const normalizedPostal = postalCode.replace(/[^A-Z0-9]/g, "");
-		const isIrishZip = normalizedPostal === "D02XF99";
-
-		const expediaDefaultAddress = isIrishZip
-			? {
-					address1: "25 St Stephen's Green",
-					locality: "Dublin 2",
-					administrativeArea: "Dublin",
-					postalCode: "D02 XF99",
-					country: "IE",
-			  }
-			: {
-					address1: "1111 Expedia Group Way W",
-					locality: "Seattle",
-					administrativeArea: "WA",
-					postalCode: "98119",
-					country: "US",
-			  };
-
-		const defaultAddress =
-			provider === "expedia"
-				? expediaDefaultAddress
-				: {
-						address1: String(process.env.BOFA_VCC_DEFAULT_ADDRESS1 || ""),
-						locality: String(process.env.BOFA_VCC_DEFAULT_LOCALITY || ""),
-						administrativeArea: String(
-							process.env.BOFA_VCC_DEFAULT_ADMIN_AREA || "",
-						),
-						postalCode: String(
-							process.env.BOFA_VCC_DEFAULT_POSTAL_CODE || postalCode || "98119",
-						),
-						country: String(process.env.BOFA_VCC_DEFAULT_COUNTRY || "US"),
-				  };
-
-		const billTo = {
-			firstName: truncate(String(cardholder.firstName), 60),
-			lastName: truncate(String(cardholder.lastName), 60),
-			address1: truncate(
-				String(
-					billing.address1 || billing.addressLine1 || defaultAddress.address1,
-				),
-				60,
-			),
-			locality: truncate(
-				String(
-					billing.locality ||
-						billing.city ||
-						billing.adminArea2 ||
-						defaultAddress.locality,
-				),
-				50,
-			),
-			administrativeArea: truncate(
-				String(
-					billing.administrativeArea ||
-						billing.state ||
-						billing.adminArea1 ||
-						defaultAddress.administrativeArea,
-				),
-				20,
-			),
-			postalCode: truncate(
-				String(
-					postalCode ||
-						billing.postalCode ||
-						billing.postal_code ||
-						defaultAddress.postalCode ||
-						"98119",
-				).toUpperCase(),
-				14,
-			),
-			country: truncate(
-				String(
-					billing.country ||
-						billing.countryCode ||
-						defaultAddress.country ||
-						"US",
-				).toUpperCase(),
-				2,
-			),
-			email: truncate(
-				String(
-					billing.email ||
-						process.env.BOFA_VCC_FALLBACK_EMAIL ||
-						"support@jannatbooking.com",
-				),
-				255,
-			),
-			phoneNumber: truncate(
-				String(
-					billing.phoneNumber || process.env.BOFA_VCC_FALLBACK_PHONE || "",
-				),
-				20,
-			),
-		};
-		const missingBillingFields = [
-			["cardholder first name", billTo.firstName],
-			["cardholder last name", billTo.lastName],
-			["address line 1", billTo.address1],
-			["city/locality", billTo.locality],
-			["state/administrative area", billTo.administrativeArea],
-			["postal code", billTo.postalCode],
-			["two-letter country code", billTo.country],
-			["email", billTo.email],
-		]
-			.filter(([, value]) => !String(value || "").trim())
-			.map(([label]) => label);
-		if (missingBillingFields.length > 0 || !/^[A-Z]{2}$/.test(billTo.country)) {
-			const billingError = new Error(
-				missingBillingFields.length > 0
-					? `Complete the required billing fields: ${missingBillingFields.join(
-							", ",
-						  )}.`
-					: "Enter a valid two-letter billing country code.",
-			);
-			billingError.statusCode = 400;
-			billingError.issue = "BOFA_VCC_BILLING_REQUIRED";
-			throw billingError;
-		}
+		// billTo is selected exclusively by the backend from the persisted OTA.
+		// Client-supplied address/cardholder fields are intentionally ignored.
+		const billTo = billingProfile.billTo;
+		const cardholderName = `${billTo.firstName} ${billTo.lastName}`.trim();
 
 		const bodyObj = {
 			processingInformation: {
@@ -2011,9 +1815,13 @@ exports.captureReservationVccSale = async (req, res) => {
 			amountUsd: toCCY(amountUsd),
 			amountSar: toCCY(amountSar),
 			cardLast4: cardNumber.slice(-4),
-			expiry: expiry.display,
 			cardTypeCode,
-			billTo: safeLogObject(billTo),
+			billingProfile: {
+				id: billingProfile.profileId,
+				source: billingProfile.source,
+				provider: billingProfile.provider,
+				country: billTo.country,
+			},
 			signatureStyle: cfg.signatureStyle,
 			signatureHeaders: SIGNATURE_STYLES[cfg.signatureStyle]?.headersList || "",
 		});
@@ -2181,9 +1989,7 @@ exports.captureReservationVccSale = async (req, res) => {
 				"",
 			confirmationNumber: snapshot?.confirmation_number || "",
 			confirmationNumber2:
-				req.body?.confirmationNumber2 ||
-				snapshot?.customer_details?.confirmation_number2 ||
-				"",
+				snapshot?.customer_details?.confirmation_number2 || "",
 			checkinDate: snapshot?.checkin_date
 				? new Date(snapshot.checkin_date).toISOString().slice(0, 10)
 				: "",
@@ -2196,9 +2002,11 @@ exports.captureReservationVccSale = async (req, res) => {
 			cancellationContext: isCancelledOrNoShow(snapshot?.reservation_status)
 				? "cancelled_or_no_show_with_valid_non_refundable_vcc"
 				: "active_or_completed_stay",
-			cardholderName: cardholder.full,
+			cardholderName,
 			postalCode: billTo.postalCode,
 			countryCode: billTo.country,
+			billingProfileId: billingProfile.profileId,
+			billingProfileSource: billingProfile.source,
 			chargeAmountUsd: amountUsd,
 			chargeAmountSar: amountSar,
 			chargeCurrency: "USD",
@@ -2246,7 +2054,6 @@ exports.captureReservationVccSale = async (req, res) => {
 				amount_usd: amountUsd,
 				amount_sar: amountSar,
 				card_last4: cardLast4,
-				card_expiry: expiry.display,
 				outcome_unknown: true,
 			};
 			v.attempts.push({
@@ -2317,8 +2124,7 @@ exports.captureReservationVccSale = async (req, res) => {
 				amount_usd: amountUsd,
 				amount_sar: amountSar,
 				card_last4: cardLast4,
-				card_expiry: expiry.display,
-				cardholder_name: cardholder.full,
+				cardholder_name: cardholderName,
 				postal_code: billTo.postalCode,
 				country_code: billTo.country,
 			};
@@ -2337,14 +2143,13 @@ exports.captureReservationVccSale = async (req, res) => {
 				amount_usd: amountUsd,
 				amount_sar: amountSar,
 				card_last4: cardLast4,
-				card_expiry: expiry.display,
 				processor_response_code: processorCode,
 				processor_response_details: processorDetails,
 				http_status: httpStatus,
 				http_status_text: httpStatusText,
 				status: txnStatus,
 				order_reference: providerReferenceCode,
-				cardholder_name: cardholder.full,
+				cardholder_name: cardholderName,
 				postal_code: billTo.postalCode,
 				country_code: billTo.country,
 				gateway_reason: gatewayReason,
@@ -2459,8 +2264,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			amount_usd: amountUsd,
 			amount_sar: amountSar,
 			card_last4: cardLast4,
-			card_expiry: expiry.display,
-			cardholder_name: cardholder.full,
+			cardholder_name: cardholderName,
 			postal_code: billTo.postalCode,
 			country_code: billTo.country,
 			configuration_error: isConfigNotFoundError,
@@ -2477,14 +2281,13 @@ exports.captureReservationVccSale = async (req, res) => {
 			amount_usd: amountUsd,
 			amount_sar: amountSar,
 			card_last4: cardLast4,
-			card_expiry: expiry.display,
 			processor_response_code: processorCode,
 			processor_response_details: processorDetails,
 			http_status: httpStatus,
 			http_status_text: httpStatusText,
 			status: txnStatus,
 			order_reference: providerReferenceCode,
-			cardholder_name: cardholder.full,
+			cardholder_name: cardholderName,
 			postal_code: billTo.postalCode,
 			country_code: billTo.country,
 			gateway_reason: gatewayReason,
