@@ -5327,6 +5327,57 @@ function normalizeStatusToApply(value) {
 	return "";
 }
 
+const OTA_GUEST_NAME_METADATA_PATTERN =
+	/\b(?:customer\s+(?:first|last)\s+name|country\s+of\s+residence|residence\s+country|guest\s+(?:e-?mail|phone)|children(?:'s)?\s+age|kids?\s+ages?|room\s+type|check[-\s]?in|check[-\s]?out|arrival\s+date|departure\s+date|booking\s+(?:id|number|details)|reservation\s+(?:id|number|details))\b/i;
+const OTA_ROOM_NAME_METADATA_PATTERN =
+	/\b(?:customer\s+(?:first|last)\s+name|country\s+of\s+residence|residence\s+country|guest\s+(?:name|e-?mail|phone)|children(?:'s)?\s+age|kids?\s+ages?|check[-\s]?in|check[-\s]?out|arrival\s+date|departure\s+date|booking\s+(?:id|number)|reservation\s+(?:id|number))\b/i;
+
+function unicodeLetterCount(value = "") {
+	return (String(value || "").match(/\p{L}/gu) || []).length;
+}
+
+function isPlausibleOtaGuestName(value = "") {
+	const candidate = normalizeWhitespace(value);
+	const comparable = normalizeComparable(candidate);
+	if (!candidate || candidate.length > 140 || unicodeLetterCount(candidate) < 2) {
+		return false;
+	}
+	if (/^(?:n\/?a|none|unknown|not provided|guest|customer|name)$/i.test(candidate)) {
+		return false;
+	}
+	if (
+		OTA_GUEST_NAME_METADATA_PATTERN.test(candidate) ||
+		/^(?:https?:\/\/|www\.)/i.test(candidate) ||
+		/@|\.(?:png|jpe?g|gif|webp|svg|ico|pdf)\b/i.test(candidate) ||
+		/\b(?:logo|header|footer|invoice|voucher)\b/i.test(comparable)
+	) {
+		return false;
+	}
+	return true;
+}
+
+function isPlausibleOtaRoomName(value = "") {
+	const candidate = normalizeWhitespace(value);
+	if (
+		!candidate ||
+		candidate.length > 180 ||
+		unicodeLetterCount(candidate) < 1
+	) {
+		return false;
+	}
+	if (/^(?:n\/?a|none|unknown|not provided|room|room type)$/i.test(candidate)) {
+		return false;
+	}
+	if (
+		OTA_ROOM_NAME_METADATA_PATTERN.test(candidate) ||
+		/^(?:https?:\/\/|www\.)/i.test(candidate) ||
+		/@|\.(?:png|jpe?g|gif|webp|svg|ico|pdf)\b/i.test(candidate)
+	) {
+		return false;
+	}
+	return true;
+}
+
 function requiredNewReservationMissing(normalized = {}) {
 	const missing = [];
 	const deterministicInbound = isOtaInboundEmail(normalized);
@@ -5335,13 +5386,19 @@ function requiredNewReservationMissing(normalized = {}) {
 	if (!requiredValue("confirmationNumber", normalized.confirmationNumber)) {
 		missing.push("source-backed confirmation number");
 	}
-	if (!requiredValue("guestName", normalized.guestName)) {
+	if (
+		!requiredValue("guestName", normalized.guestName) ||
+		!isPlausibleOtaGuestName(normalized.guestName)
+	) {
 		missing.push("source-backed guest name");
 	}
 	if (!requiredValue("hotelName", normalized.hotelName || normalized.hotelId)) {
 		missing.push("source-backed hotel/property");
 	}
-	if (!requiredValue("roomName", normalized.roomName)) {
+	if (
+		!requiredValue("roomName", normalized.roomName) ||
+		!isPlausibleOtaRoomName(normalized.roomName)
+	) {
 		missing.push("source-backed room type/name");
 	}
 	if (!requiredValue("checkinDate", normalized.checkinDate)) {
@@ -6857,5 +6914,7 @@ module.exports = {
 	getOtaInboundAllowedHotelIds,
 	isHotelAllowedForOtaInbound,
 	isOtaInboundTotalOutlier,
+	isPlausibleOtaGuestName,
+	isPlausibleOtaRoomName,
 	getSarConversionMeta,
 };

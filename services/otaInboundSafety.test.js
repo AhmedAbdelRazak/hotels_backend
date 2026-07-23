@@ -19,10 +19,13 @@ const {
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
 	isOtaInboundTotalOutlier,
+	isPlausibleOtaGuestName,
+	isPlausibleOtaRoomName,
 	otaSourceAuthority,
 	parseDate,
 	parseMoney,
 	requiredNewReservationMissing,
+	reconcileOtaReservation,
 	resolvePaymentMapping,
 	resolveRoomMatch,
 } = require("./otaReservationMapper");
@@ -673,6 +676,123 @@ test("AI-only critical facts do not satisfy automatic-create requirements", () =
 	assert.ok(missing.includes("source-backed guest name"));
 	assert.ok(missing.includes("source-backed room type/name"));
 	assert.ok(missing.includes("positive source-backed guest total"));
+});
+
+test("critical-field gate is provider-independent for every supported OTA source", () => {
+	for (const provider of ["hotelrunner", "agoda", "expedia", "airbnb"]) {
+		const normalized = {
+			inboundEmailId: `audit-${provider}`,
+			provider,
+			confirmationNumber: `${provider}-123456`,
+			guestName: "Khalil Badat",
+			hotelName: "Zad Ajyad",
+			roomName: "Spacious Six-Bed Room",
+			checkinDate: "2026-07-23",
+			checkoutDate: "2026-07-24",
+			amount: 93,
+			totalAmountSar: 93,
+			sourcePresence: {
+				confirmationNumber: true,
+				guestName: true,
+				hotelName: true,
+				roomName: true,
+				checkinDate: true,
+				checkoutDate: true,
+				amount: true,
+			},
+		};
+		assert.deepEqual(requiredNewReservationMissing(normalized), [], provider);
+		for (const field of [
+			"confirmationNumber",
+			"guestName",
+			"hotelName",
+			"roomName",
+			"checkinDate",
+			"checkoutDate",
+			"amount",
+		]) {
+			const unsafe = {
+				...normalized,
+				sourcePresence: { ...normalized.sourcePresence, [field]: false },
+			};
+			assert.notDeepEqual(requiredNewReservationMissing(unsafe), [], `${provider}:${field}`);
+		}
+	}
+});
+
+test("template labels, assets, and adjacent metadata cannot become guest or room facts", () => {
+	for (const value of [
+		"KHALIL Customer Last Name BADAT Country of Residence Saudi",
+		"Country of Residence Saudi Arabia",
+		"logo-header-agoda@2x.png",
+		"https://example.com/voucher",
+	]) {
+		assert.equal(isPlausibleOtaGuestName(value), false, value);
+	}
+	for (const value of [
+		"Children's Age 4",
+		"Guest Name Khalil Badat",
+		"Check-in Date 2026-07-23",
+		"logo-header-agoda@2x.png",
+	]) {
+		assert.equal(isPlausibleOtaRoomName(value), false, value);
+	}
+	assert.equal(isPlausibleOtaGuestName("KHALIL BADAT"), true);
+	assert.equal(isPlausibleOtaGuestName("خالد محمد"), true);
+	assert.equal(isPlausibleOtaRoomName("Family - 6 Persons"), true);
+	assert.equal(isPlausibleOtaRoomName("غرفة سداسية"), true);
+});
+
+test("room-name matching does not require occupancy and never guesses an ambiguous category", () => {
+	const hotel = {
+		roomCountDetails: [
+			{ roomType: "familyRooms", displayName: "Family Quintuple Room", activeRoom: true },
+			{ roomType: "familyRooms", displayName: "Spacious Six-Bed Room", activeRoom: true },
+		],
+	};
+	const close = resolveRoomMatch(hotel, "Spacious Six Bed Room", {
+		totalGuests: 0,
+	});
+	assert.equal(close.roomDetails?.displayName, "Spacious Six-Bed Room");
+	const ambiguous = resolveRoomMatch(hotel, "Family Room", { totalGuests: 0 });
+	assert.equal(ambiguous.roomDetails, null);
+	assert.equal(ambiguous.matchType, "ambiguous");
+});
+
+test("a complete generic email with an unknown provider still cannot mutate reservations", async () => {
+	const result = await reconcileOtaReservation({
+		inboundEmailId: "audit-generic-unknown",
+		provider: "unknown",
+		providerLabel: "unknown",
+		intent: "new_reservation",
+		eventType: "new",
+		confirmationNumber: "GEN-123456",
+		guestName: "Khalil Badat",
+		hotelName: "Zad Ajyad",
+		roomName: "Spacious Six-Bed Room",
+		checkinDate: "2026-07-23",
+		checkoutDate: "2026-07-24",
+		amount: 93,
+		currency: "SAR",
+		totalAmountSar: 93,
+		sourcePresence: {
+			confirmationNumber: true,
+			guestName: true,
+			hotelName: true,
+			roomName: true,
+			checkinDate: true,
+			checkoutDate: true,
+			amount: true,
+		},
+		source: {
+			from: "reservations@example.com",
+			subject: "New reservation GEN-123456",
+			messageId: "generic-unknown@example.com",
+		},
+	});
+	assert.equal(result.status, "needs_review");
+	assert.equal(result.skipReason, "unknown_ota_provider_no_mutation");
+	assert.equal(result.reservationId, undefined);
 });
 
 test("ordinary OTA modifications are staged without overwriting canonical guest or stay", () => {
