@@ -30,6 +30,15 @@ const {
 const app = express();
 const server = http.createServer(app);
 
+// The SendGrid destination uses a query credential because Inbound Parse cannot
+// attach a custom header. Never let that credential reach PM2 access logs.
+morgan.token("url", (req) =>
+	String(req.originalUrl || req.url || "").replace(
+		/([?&](?:token|secret)=)[^&\s]*/gi,
+		"$1[REDACTED]"
+	)
+);
+
 const splitEnvList = (value = "") =>
 	String(value || "")
 		.split(",")

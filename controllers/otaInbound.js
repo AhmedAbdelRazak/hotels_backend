@@ -157,18 +157,23 @@ exports.requireInboundEmailAdmin = async (req, res, next) => {
 };
 
 const inboundSecretIsValid = (req) => {
-	const expected = String(process.env.SENDGRID_INBOUND_SECRET || "").trim();
-	if (!expected) return false;
+	const expectedSecrets = String(process.env.SENDGRID_INBOUND_SECRET || "")
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean);
+	if (!expectedSecrets.length) return false;
 	const provided =
 		req.query.token ||
 		req.get("x-inbound-secret") ||
 		"";
-	const expectedBuffer = Buffer.from(expected);
 	const providedBuffer = Buffer.from(String(provided));
-	return (
-		expectedBuffer.length === providedBuffer.length &&
-		crypto.timingSafeEqual(expectedBuffer, providedBuffer)
-	);
+	return expectedSecrets.some((expected) => {
+		const expectedBuffer = Buffer.from(expected);
+		return (
+			expectedBuffer.length === providedBuffer.length &&
+			crypto.timingSafeEqual(expectedBuffer, providedBuffer)
+		);
+	});
 };
 
 exports.requireInboundSecret = (req, res, next) => {

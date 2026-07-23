@@ -73,3 +73,17 @@ test("inbound authentication accepts only the exact query or header secret", () 
 	else process.env.SENDGRID_INBOUND_SECRET = previous;
 });
 
+test("inbound authentication supports a zero-downtime two-secret rotation window", () => {
+	const previous = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "old-secret,new-secret";
+	for (const token of ["old-secret", "new-secret"]) {
+		const res = responseMock();
+		let called = false;
+		requireInboundSecret(requestMock({ token }), res, () => {
+			called = true;
+		});
+		assert.equal(called, true, token);
+	}
+	if (previous === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+	else process.env.SENDGRID_INBOUND_SECRET = previous;
+});
