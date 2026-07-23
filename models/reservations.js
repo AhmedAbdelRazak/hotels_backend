@@ -265,9 +265,15 @@ const reservationsSchema = new mongoose.Schema(
 			type: Object,
 			default: {
 				secure_acceptance: {
+					status: "not_started",
 					last_signed_at: null,
 					last_reference_number: "",
 					last_transaction_uuid: "",
+					amount_usd: 0,
+					currency: "USD",
+					transaction_type: "sale",
+					expires_at: null,
+					created_by: "",
 					last_callback_at: null,
 					last_callback_source: "",
 					last_response_signature_valid: null,

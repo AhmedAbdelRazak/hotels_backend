@@ -110,24 +110,22 @@ test("the generic server profile rejects an invalid configured country", () => {
 	assert.equal(profile.issue, "BOFA_VCC_SERVER_BILLING_PROFILE_INVALID");
 });
 
-test("the charge controller cannot consume browser billing overrides", () => {
+test("the hosted checkout controller cannot consume browser card or address fields", () => {
 	const controllerSource = fs.readFileSync(
-		path.join(__dirname, "..", "controllers", "bofaprocessing.js"),
+		path.join(__dirname, "..", "controllers", "bofaHostedCheckout.js"),
 		"utf8",
-	);
-	const captureControllerSource = controllerSource.slice(
-		controllerSource.indexOf("exports.captureReservationVccSale"),
 	);
 	assert.doesNotMatch(
 		controllerSource,
-		/req\.body\?\.(?:billingAddress|postalCode|cardholderName|confirmationNumber2)/,
+		/req\.body\?\.(?:card|cardNumber|cardCVV|cardExpiry|billingAddress|cardholderName)/,
 	);
 	assert.match(controllerSource, /req\.body\?\.billingPostalCode/);
-	assert.doesNotMatch(captureControllerSource, /card_expiry\s*:/);
-	assert.doesNotMatch(captureControllerSource, /postal_code\s*:/);
+	assert.doesNotMatch(controllerSource, /card_(?:number|cvn|expiry_date)\s*:/);
+	assert.match(controllerSource, /buildHostedCheckoutFields/);
+	assert.match(controllerSource, /verifySignature/);
 	assert.ok(
-		controllerSource.indexOf("if (!billingProfile.ok)") <
-			controllerSource.indexOf("Atomically reserve this reservation"),
-		"billing profile validation must occur before the payment lock and gateway path",
+		controllerSource.indexOf("if (!billing.ok)") <
+			controllerSource.indexOf("const lock = await Reservations.findOneAndUpdate"),
+		"billing profile validation must occur before the checkout lock",
 	);
 });

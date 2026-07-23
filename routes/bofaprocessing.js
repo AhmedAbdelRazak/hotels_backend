@@ -3,62 +3,49 @@
 
 const express = require("express");
 const router = express.Router();
-const Ctrl = require("../controllers/bofaprocessing");
+const Hosted = require("../controllers/bofaHostedCheckout");
 const { requireSignin } = require("../controllers/auth");
 
 const urlencodedParser = express.urlencoded({ extended: false });
 const jsonParser = express.json({ limit: "32kb", strict: true });
 
 /*
- * Secure Acceptance checkout flow (guest browser posts card directly to BoA).
+ * Secure Acceptance embedded Hosted Checkout. Card data posts directly from
+ * the browser to Bank of America and never enters this application server.
  */
 router.post(
 	"/bofa/checkout/session",
+	requireSignin,
 	jsonParser,
-	Ctrl.createGuestCheckoutSession,
+	Hosted.createSession,
 );
-router.get("/bofa/checkout/callback/customer", (_req, res) =>
-	res.status(200).json({ ok: true, source: "customer_response" }),
+router.get(
+	"/bofa/checkout/callback/customer",
+	Hosted.healthCallback("customer_response"),
 );
-router.get("/bofa/checkout/callback/merchant", (_req, res) =>
-	res.status(200).json({ ok: true, source: "merchant_post" }),
-);
-router.post(
-	"/bofa/checkout/response/verify",
-	urlencodedParser,
-	Ctrl.verifyCheckoutResponseSignature,
+router.get(
+	"/bofa/checkout/callback/merchant",
+	Hosted.healthCallback("merchant_post"),
 );
 router.post(
 	"/bofa/checkout/callback/customer",
 	urlencodedParser,
-	Ctrl.handleCustomerResponsePagePost,
+	Hosted.customerCallback,
 );
 router.post(
 	"/bofa/checkout/callback/merchant",
 	urlencodedParser,
-	Ctrl.handleMerchantPostNotification,
+	Hosted.merchantCallback,
 );
 
 /*
- * OTA VCC flow (server-to-server REST Payments API).
+ * OTA VCC readiness and durable payment status.
  */
-router.get("/bofa/health", requireSignin, Ctrl.getBofaVccHealth);
+router.get("/bofa/health", requireSignin, Hosted.getHealth);
 router.get(
 	"/reservations/bofa/vcc-status/:reservationId",
 	requireSignin,
-	Ctrl.getReservationBofaVccStatus,
-);
-router.post(
-	"/reservations/bofa/vcc-sale",
-	requireSignin,
-	jsonParser,
-	Ctrl.captureReservationVccSale,
-);
-router.post(
-	"/reservations/bofa/vcc-charge",
-	requireSignin,
-	jsonParser,
-	Ctrl.captureReservationVccSale,
+	Hosted.getStatus,
 );
 
 module.exports = router;
