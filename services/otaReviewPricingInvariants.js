@@ -154,6 +154,22 @@ const isOtaReviewReservation = (reservation = {}) =>
 	Boolean(reservation?.otaPlatformReview?.status) ||
 	/^ota[_-]/i.test(String(reservation?.otaPlatformReview?.source || ""));
 
+const validateGenericOtaPricingRoute = (
+	reservation = {},
+	{ hasExplicitPricingIntent = false } = {},
+) => {
+	if (!hasExplicitPricingIntent || !isOtaSourceReservation(reservation)) {
+		return { ready: true };
+	}
+	return {
+		ready: false,
+		status: 409,
+		code: "ota_pricing_dedicated_route_required",
+		message:
+			"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, PMS room mapping, nightly prices, and hotel base total remain validated together.",
+	};
+};
+
 const otaReleaseBlockingStatus = (reservation = {}) => {
 	if (!isTerminalPendingQueueReservation(reservation)) return "";
 	for (const value of [reservation.reservation_status, reservation.state]) {
@@ -577,5 +593,6 @@ module.exports = {
 	summarizeOtaReviewedClientPricing,
 	validateOtaStayDateCoverage,
 	validateOtaReleaseHotelBasePrice,
+	validateGenericOtaPricingRoute,
 	validateOtaSourceClientPricing,
 };

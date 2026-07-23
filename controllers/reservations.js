@@ -70,6 +70,9 @@ const {
 	withHotelManagementSourceViewContext,
 	withHotelManagementReservationVisibility,
 } = require("../services/reservationVisibility");
+const {
+	validateGenericOtaPricingRoute,
+} = require("../services/otaReviewPricingInvariants");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1460,6 +1463,17 @@ const protectAdminManagedPricingUpdate = ({
 		Object.prototype.hasOwnProperty.call(updates, "pickedRoomsPricing") &&
 		Array.isArray(updates.pickedRoomsPricing) &&
 		updates.pickedRoomsPricing.length > 0;
+	const otaPricingRouteValidation = validateGenericOtaPricingRoute(reservation, {
+		hasExplicitPricingIntent,
+	});
+	if (!otaPricingRouteValidation.ready) {
+		return {
+			allowed: false,
+			status: otaPricingRouteValidation.status,
+			error: otaPricingRouteValidation.message,
+			code: otaPricingRouteValidation.code,
+		};
+	}
 	if (
 		hasExplicitPricingIntent &&
 		isPlatformAdminPricingActor(actor || {}) &&

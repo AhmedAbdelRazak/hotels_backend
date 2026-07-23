@@ -68,6 +68,35 @@ test("source guest total is locked independently from the OTA payout", () => {
 	});
 });
 
+test("generic reservation edits cannot bypass the dedicated OTA pricing workflow", () => {
+	const otaReservation = otaEmailReservation(roomId());
+	assert.deepEqual(
+		otaPricing.validateGenericOtaPricingRoute(otaReservation, {
+			hasExplicitPricingIntent: true,
+		}),
+		{
+			ready: false,
+			status: 409,
+			code: "ota_pricing_dedicated_route_required",
+			message:
+				"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, PMS room mapping, nightly prices, and hotel base total remain validated together.",
+		}
+	);
+	assert.equal(
+		otaPricing.validateGenericOtaPricingRoute(otaReservation, {
+			hasExplicitPricingIntent: false,
+		}).ready,
+		true,
+	);
+	assert.equal(
+		otaPricing.validateGenericOtaPricingRoute(
+			{ booking_source: "manual" },
+			{ hasExplicitPricingIntent: true },
+		).ready,
+		true,
+	);
+});
+
 test("nightly client pricing must reconcile to the immutable OTA guest total", () => {
 	const configId = roomId();
 	const reservation = otaEmailReservation(configId);
