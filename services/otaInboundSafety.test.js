@@ -11,6 +11,8 @@ const {
 	buildOtaConfirmationLookup,
 	buildOtaIdentityKey,
 	buildReservationDocument,
+	buildUnmappedOtaReviewReservationDocument,
+	canCreateUnmappedOtaReviewReservation,
 	detectConfirmationMatchFields,
 	detectPaymentCollectionModel,
 	detectStatusToApply,
@@ -757,6 +759,110 @@ test("room-name matching does not require occupancy and never guesses an ambiguo
 	const ambiguous = resolveRoomMatch(hotel, "Family Room", { totalGuests: 0 });
 	assert.equal(ambiguous.roomDetails, null);
 	assert.equal(ambiguous.matchType, "ambiguous");
+});
+
+test("a resolved hotel stores the selected configured PMS room while retaining OTA wording only as provenance", () => {
+	const normalized = {
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+		confirmationNumber: "ROOM-AI-1001",
+		reservationId: "ROOM-AI-1001",
+		guestName: "Safe Guest",
+		hotelName: "Zad Ajyad",
+		roomName: "A roomy family accommodation with six separate beds",
+		checkinDate: "2026-08-01",
+		checkoutDate: "2026-08-02",
+		amount: 93,
+		totalAmountSar: 93,
+		currency: "SAR",
+		eventType: "confirmed",
+	};
+	const selectedRoom = {
+		_id: "room-six",
+		roomType: "familyRooms",
+		displayName: "Spacious Six-Bed Room",
+		activeRoom: true,
+		price: { basePrice: 75 },
+	};
+	const built = buildReservationDocument(
+		normalized,
+		{
+			_id: "hotel-zad",
+			belongsTo: "owner-zad",
+			roomCountDetails: [selectedRoom],
+		},
+		{
+			roomMatch: {
+				roomDetails: selectedRoom,
+				score: 0.96,
+				matchType: "ai_pms_room_match",
+				aiRoomMatch: {
+					model: "test-model",
+					reason: "Best semantic PMS match",
+				},
+			},
+		}
+	);
+
+	assert.equal(built.ok, true);
+	assert.equal(built.document.hotelId, "hotel-zad");
+	assert.equal(built.document.pickedRoomsType[0].displayName, "Spacious Six-Bed Room");
+	assert.equal(built.document.pickedRoomsType[0].hotelRoomConfigId, "room-six");
+	assert.equal(
+		built.document.pickedRoomsType[0].sourceRoomName,
+		"A roomy family accommodation with six separate beds"
+	);
+	assert.equal(built.document.supplierData.otaRoomMatchedByModel, "test-model");
+});
+
+test("the as-is OTA room fallback is unassigned and financially blocked pending hotel mapping", () => {
+	const normalized = {
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+		confirmationNumber: "NO-HOTEL-1001",
+		reservationId: "NO-HOTEL-1001",
+		guestName: "Safe Guest",
+		roomName: "Original OTA Room Wording",
+		checkinDate: "2026-08-01",
+		checkoutDate: "2026-08-02",
+		amount: 93,
+		totalAmountSar: 93,
+		currency: "SAR",
+		eventType: "confirmed",
+		inboundEmailId: "audit-no-hotel",
+		sourcePresence: {
+			confirmationNumber: true,
+			guestName: true,
+			hotelName: false,
+			roomName: true,
+			checkinDate: true,
+			checkoutDate: true,
+			amount: true,
+		},
+	};
+	const document = buildUnmappedOtaReviewReservationDocument(normalized);
+
+	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), true);
+	assert.equal(
+		canCreateUnmappedOtaReviewReservation(
+			{
+				...normalized,
+				sourcePresence: { ...normalized.sourcePresence, guestName: false },
+			},
+			true
+		),
+		false
+	);
+	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, false), false);
+	assert.equal(document.hotelId, undefined);
+	assert.equal(document.belongsTo, undefined);
+	assert.equal(document.pickedRoomsType[0].displayName, "Original OTA Room Wording");
+	assert.equal(document.pickedRoomsType[0].hotelRoomConfigId, undefined);
+	assert.equal(document.pickedRoomsType[0].pricingByDay[0].rootPrice, 0);
+	assert.equal(document.otaPlatformReview.hotelAssignmentRequired, true);
+	assert.equal(document.adminPricing.hotelAssignmentRequired, true);
 });
 
 test("a complete generic email with an unknown provider still cannot mutate reservations", async () => {

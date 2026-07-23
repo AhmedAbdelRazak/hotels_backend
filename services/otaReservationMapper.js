@@ -23,6 +23,7 @@ const {
 	addReservationVersionBump,
 	buildReservationSnapshotFilter,
 } = require("./otaReviewConcurrency");
+const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 
 dayjs.extend(customParseFormat);
 
@@ -3903,6 +3904,80 @@ function resolveRoomDetails(hotelDetails, roomName) {
 	return resolveRoomMatch(hotelDetails, roomName).roomDetails;
 }
 
+async function resolveRoomMatchWithAi(hotelDetails, normalized = {}) {
+	const deterministicMatch = resolveRoomMatch(
+		hotelDetails,
+		normalized.roomName,
+		{
+			totalGuests: normalized.totalGuests,
+			normalized,
+		}
+	);
+	const rooms = Array.isArray(hotelDetails?.roomCountDetails)
+		? hotelDetails.roomCountDetails
+		: [];
+	const candidateCapacities = Object.fromEntries(
+		rooms
+			.filter((room) => room?._id)
+			.map((room) => [String(room._id), roomCapacityFromLabels(room)])
+	);
+	const aiMatch = await matchOtaRoomWithOpenAi({
+		hotelDetails,
+		normalized,
+		deterministicMatch,
+		sourceCapacity: explicitRoomCapacity(normalized.roomName),
+		candidateCapacities,
+	});
+	if (!aiMatch.usedAI) {
+		if (["exact_display", "explicit_capacity"].includes(deterministicMatch.matchType)) {
+			return deterministicMatch;
+		}
+		return {
+			...deterministicMatch,
+			roomDetails: null,
+			matchType: "ai_room_match_unavailable",
+			aiRoomMatch: aiMatch,
+			warnings: [
+				"OpenAI room matching was unavailable, so no non-exact PMS room was selected.",
+			],
+		};
+	}
+	if (!aiMatch.matched) {
+		return {
+			...deterministicMatch,
+			roomDetails: null,
+			matchType: "ai_no_confident_match",
+			aiRoomMatch: aiMatch,
+			warnings: [
+				`OpenAI could not confidently map OTA room "${normalized.roomName || "unknown"}" to one configured PMS room for the resolved hotel.`,
+			],
+		};
+	}
+	const roomDetails = rooms.find(
+		(room) => String(room?._id || "") === aiMatch.selectedRoomId
+	);
+	if (!roomDetails) {
+		return {
+			...deterministicMatch,
+			roomDetails: null,
+			matchType: "ai_invalid_room_selection",
+			aiRoomMatch: aiMatch,
+			warnings: ["OpenAI returned a PMS room that is no longer configured."],
+		};
+	}
+	return {
+		roomDetails,
+		score: aiMatch.confidence,
+		displayScore: deterministicMatch.displayScore || 0,
+		matchType: "ai_pms_room_match",
+		threshold: aiMatch.threshold,
+		mappedRoomType: mapRoomType(normalized.roomName),
+		sourceCapacity: explicitRoomCapacity(normalized.roomName),
+		aiRoomMatch: aiMatch,
+		warnings: [],
+	};
+}
+
 function resolveRootPriceForDate(roomDetails, ymd) {
 	const pricingRate = (roomDetails.pricingRate || []).find(
 		(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
@@ -4071,12 +4146,14 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	};
 }
 
-function buildReservationDocument(normalized, hotelDetails) {
+function buildReservationDocument(normalized, hotelDetails, options = {}) {
 	if (!hotelDetails) return { ok: false, error: "Hotel could not be resolved." };
-	const roomMatch = resolveRoomMatch(hotelDetails, normalized.roomName, {
-		totalGuests: normalized.totalGuests,
-		normalized,
-	});
+	const roomMatch =
+		options.roomMatch ||
+		resolveRoomMatch(hotelDetails, normalized.roomName, {
+			totalGuests: normalized.totalGuests,
+			normalized,
+		});
 	const roomDetails = roomMatch.roomDetails;
 	if (!roomDetails) {
 		return {
@@ -4288,6 +4365,8 @@ function buildReservationDocument(normalized, hotelDetails) {
 				otaSourceRoomName: normalized.roomName || "",
 				otaRoomMatchScore: roomMatch.score || 0,
 				otaRoomMatchType: roomMatch.matchType || "",
+				otaRoomMatchReason: roomMatch.aiRoomMatch?.reason || "",
+				otaRoomMatchedByModel: roomMatch.aiRoomMatch?.model || "",
 				otaCurrency: normalized.currency || "",
 				otaAmount: normalized.amount || 0,
 				otaAmountSar: totalAmountSar,
@@ -5806,30 +5885,171 @@ async function generateUniquePmsConfirmationNumber(maxAttempts = 25) {
 	throw new Error("Could not generate a unique PMS confirmation number.");
 }
 
+function canCreateUnmappedOtaReviewReservation(
+	normalized = {},
+	allowCreate = false
+) {
+	if (!allowCreate || normalized.requiresManualReview === true) return false;
+	return requiredNewReservationMissing(normalized).every(
+		(item) => item === "source-backed hotel/property"
+	);
+}
+
 async function createUnmappedOtaReviewReservation({
+	normalized = {},
+	confirmationNumber = "",
 	warnings = [],
 	errors = [],
+	allowCreate = false,
 } = {}) {
-	// A weak/incomplete email must never claim the booking identity by creating
-	// a placeholder reservation. The inbound-email audit is the review record;
-	// a later authoritative confirmation remains free to create the real stay.
-	const reviewText = [...errors, ...warnings].join(" ");
-	const needsMapping = /\b(hotel|property|room|mapping|assignment)\b/i.test(
-		reviewText
+	const nonHotelMissing = requiredNewReservationMissing(normalized).filter(
+		(item) => item !== "source-backed hotel/property"
 	);
+	if (!canCreateUnmappedOtaReviewReservation(normalized, allowCreate)) {
+		// Weak or ambiguous facts stay in the inbound audit. The only permitted
+		// as-is reservation is a complete booking whose hotel cannot be mapped.
+		const reviewText = [...errors, ...warnings, ...nonHotelMissing].join(" ");
+		const needsMapping = /\b(hotel|property|room|mapping|assignment)\b/i.test(
+			reviewText
+		);
+		return {
+			status: needsMapping ? "needs_mapping" : "needs_review",
+			actionTaken: "skipped",
+			skipReason: needsMapping
+				? "ota_mapping_required_no_reservation_created"
+				: "ota_manual_review_no_reservation_created",
+			automationComment:
+				"No reservation was created from incomplete or ambiguous OTA data; the inbound audit remains available for manual review.",
+			warnings,
+			errors,
+			reservationId: null,
+			hotelId: null,
+			pmsConfirmationNumber: "",
+			matchedReservationBy: [],
+		};
+	}
+
+	const existingBeforeCreate = await findReservationByOtaConfirmation(
+		confirmationNumber,
+		normalized.provider,
+		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+	);
+	if (existingBeforeCreate) {
+		return {
+			status: "duplicate_reservation",
+			warnings,
+			errors: [
+				...errors,
+				"Existing reservation matched before as-is OTA review creation; no duplicate was created.",
+			],
+			reservationId: existingBeforeCreate._id,
+			hotelId: existingBeforeCreate.hotelId,
+			pmsConfirmationNumber: existingBeforeCreate.confirmation_number,
+			matchedReservationBy: detectConfirmationMatchFields(
+				existingBeforeCreate,
+				confirmationNumber,
+				normalized.provider
+			),
+		};
+	}
+
+	const missingHotelWarning =
+		"Hotel was not confidently resolved from the OTA email; the OTA room name was saved as-is in platform review pending hotel assignment.";
+	if (!warnings.includes(missingHotelWarning)) warnings.push(missingHotelWarning);
+	const document = buildUnmappedOtaReviewReservationDocument({
+		...normalized,
+		confirmationNumber,
+	});
+	document.otaIdentityKey = buildOtaIdentityKey(
+		normalized.provider,
+		confirmationNumber
+	);
+	document.reservationAuditLog = [
+		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
+	];
+	applyVccSafeFieldsToDocument(document, normalized);
+	document.confirmation_number = await generateUniquePmsConfirmationNumber();
+	document.customer_details = {
+		...(document.customer_details || {}),
+		confirmation_number2: confirmationNumber,
+	};
+	document.supplierData = {
+		...(document.supplierData || {}),
+		suppliedBookingNo: confirmationNumber,
+		otaConfirmationNumber: confirmationNumber,
+		platformConfirmationNumber: confirmationNumber,
+		pmsConfirmationNumber: document.confirmation_number,
+		otaCreatedFromEmail: normalized.source?.from !== "expedia-sync",
+		otaCreatedFromSync: normalized.source?.from === "expedia-sync",
+		otaInboundEmailId: normalized.inboundEmailId || "",
+		otaCreatedAt: new Date(),
+	};
+
+	let created;
+	for (let createAttempt = 0; createAttempt < 2; createAttempt += 1) {
+		try {
+			logReconcile("create_unmapped.start", {
+				platformConfirmationNumber: confirmationNumber,
+				pmsConfirmationNumber: document.confirmation_number,
+				provider: normalized.provider || "",
+				hotelName: normalized.hotelName || "",
+			});
+			created = await Reservations.create(document);
+			break;
+		} catch (error) {
+			if (error?.code === 11000) {
+				const duplicate = await findReservationByOtaConfirmation(
+					confirmationNumber,
+					normalized.provider,
+					"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+				);
+				if (duplicate) {
+					return {
+						status: "duplicate_reservation",
+						warnings,
+						errors: [
+							...errors,
+							"Existing reservation matched during as-is duplicate-key recovery; no duplicate was created.",
+						],
+						reservationId: duplicate._id,
+						hotelId: duplicate.hotelId,
+						pmsConfirmationNumber: duplicate.confirmation_number,
+						matchedReservationBy: detectConfirmationMatchFields(
+							duplicate,
+							confirmationNumber,
+							normalized.provider
+						),
+					};
+				}
+				if (createAttempt === 0) {
+					document.confirmation_number =
+						await generateUniquePmsConfirmationNumber();
+					document.supplierData.pmsConfirmationNumber =
+						document.confirmation_number;
+					continue;
+				}
+			}
+			throw error;
+		}
+	}
+
+	logReconcile("create_unmapped.done", {
+		platformConfirmationNumber: confirmationNumber,
+		pmsConfirmationNumber: created.confirmation_number,
+		reservationId: String(created._id),
+	});
 	return {
-		status: needsMapping ? "needs_mapping" : "needs_review",
-		actionTaken: "skipped",
-		skipReason: needsMapping
-			? "ota_mapping_required_no_reservation_created"
-			: "ota_manual_review_no_reservation_created",
+		status: "created",
+		actionTaken: "created_unmapped_ota_review",
+		skipReason: "",
 		automationComment:
-			"No reservation was created from incomplete or ambiguous OTA data; the inbound audit remains available for manual review.",
+			"OTA reservation was saved with its OTA room name as-is because no hotel could be confidently mapped; assign a hotel and PMS room before release.",
 		warnings,
 		errors,
-		reservationId: null,
+		reservationId: created._id,
 		hotelId: null,
-		pmsConfirmationNumber: "",
+		pmsConfirmationNumber: created.confirmation_number,
+		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
 		matchedReservationBy: [],
 	};
 }
@@ -6152,6 +6372,9 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 
 	const missing = missingForCreate;
 	if (!existing && !isUpdateIntent && missing.length) {
+		const hotelOnlyMissing =
+			missing.length === 1 &&
+			missing[0] === "source-backed hotel/property";
 		logReconcile("create_unmapped.missing_non_identity_fields", {
 			confirmationNumber,
 			missing,
@@ -6161,9 +6384,14 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: [
 				...warnings,
-				`Missing reservation field(s): ${missing.join(", ")}. Saved to OTA review for manual completion.`,
+				`Missing reservation field(s): ${missing.join(", ")}. ${
+					hotelOnlyMissing
+						? "Saved as an unassigned OTA platform review pending hotel mapping."
+						: "Held in the inbound audit; no reservation was created."
+				}`,
 			],
 			errors,
+			allowCreate: hotelOnlyMissing,
 		});
 	}
 
@@ -6237,6 +6465,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings,
 			errors,
+			allowCreate: true,
 		});
 	}
 	const manualHotelAssignmentReason = getManualOtaHotelAssignmentReason(
@@ -6273,7 +6502,13 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		});
 	}
 
-	const built = buildReservationDocument(normalized, hotelDetails);
+	const resolvedRoomMatch = await resolveRoomMatchWithAi(
+		hotelDetails,
+		normalized
+	);
+	const built = buildReservationDocument(normalized, hotelDetails, {
+		roomMatch: resolvedRoomMatch,
+	});
 	if (!built.ok) {
 		logReconcile("needs_mapping.room_or_pricing", {
 			confirmationNumber,
@@ -6319,7 +6554,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: [
 				...warnings,
-				`${built.error} Saved to OTA review without a hotel assignment for manual completion.`,
+				`${built.error} Held in the inbound audit; no reservation was created from an unresolved room or price.`,
 			],
 			errors,
 		});
@@ -6375,7 +6610,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: [
 				...warnings,
-				`${error.message || "Could not calculate reservation pricing."} Saved to OTA review without a hotel assignment for manual completion.`,
+				`${error.message || "Could not calculate reservation pricing."} Held in the inbound audit; no reservation was created from unresolved pricing.`,
 			],
 			errors,
 		});
@@ -6898,8 +7133,11 @@ module.exports = {
 	resolvePaymentMapping,
 	resolveHotel,
 	resolveRoomMatch,
+	resolveRoomMatchWithAi,
 	resolveRoomDetails,
 	requiredNewReservationMissing,
+	canCreateUnmappedOtaReviewReservation,
+	buildUnmappedOtaReviewReservationDocument,
 	buildExistingReservationUpdateSet,
 	explicitRoomCapacity,
 	findConfidentFuzzyHotelMatch,

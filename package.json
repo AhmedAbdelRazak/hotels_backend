@@ -16,7 +16,7 @@
 		"test:guest-card": "node --test scripts/guestCardRegressionChecks.test.js",
 		"test:admin-room-details": "node --test scripts/adminReservationRoomDetails.test.js scripts/roomListScopeRegression.test.js",
 		"test:paid-report-dates": "node --test scripts/paidBreakdownDateFilter.test.js",
-		"test:ota-inbound": "node --test services/otaReservationQueue.test.js services/otaInboundSafety.test.js services/otaInboundCommunicationClassifier.test.js services/otaInboundControllerSafety.test.js services/otaInboundDedupe.test.js services/otaReservationVisibility.test.js scripts/otaReviewPricingInvariants.test.js scripts/otaReviewConcurrency.test.js",
+		"test:ota-inbound": "node --test services/otaReservationQueue.test.js services/otaInboundSafety.test.js services/otaAiRoomMatcher.test.js services/otaInboundCommunicationClassifier.test.js services/otaInboundControllerSafety.test.js services/otaInboundDedupe.test.js services/otaReservationVisibility.test.js scripts/otaReviewPricingInvariants.test.js scripts/otaReviewConcurrency.test.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
 	},
