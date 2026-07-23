@@ -71,6 +71,10 @@ const {
 	validateFixedPackageReservationPayload,
 } = require("../services/fixedPackagePolicy");
 const {
+	configuredSuperAdminIds,
+	isConfiguredSuperAdminId,
+} = require("../services/bofaVccPolicy");
+const {
 	scheduleReservationConfirmedConversion,
 	schedulePaymentCapturedConversion,
 } = require("../services/conversionTracking");
@@ -3950,6 +3954,16 @@ exports.createReservationAndProcess = async (req, res) => {
 exports.mitChargeReservation = async (req, res) => {
 	const analyticsContext = analyticsContextFromRequest(req, "post_stay_capture");
 	try {
+		const actorId = String(req?.auth?._id || "").trim();
+		if (
+			configuredSuperAdminIds().length === 0 ||
+			!isConfiguredSuperAdminId(actorId)
+		) {
+			return res.status(403).json({
+				code: "CAPTURE_SUPER_ADMIN_REQUIRED",
+				message: "Only a configured super admin can capture a payment.",
+			});
+		}
 		const { reservationId, usdAmount, cmid, sarAmount } = req.body || {};
 		const amt = Math.round(Number(usdAmount || 0) * 100) / 100;
 		if (!reservationId || !amt || amt <= 0) {

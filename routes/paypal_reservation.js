@@ -4,6 +4,9 @@ const express = require("express");
 const router = express.Router();
 const Ctrl = require("../controllers/paypal_reservation");
 const { requireSignin } = require("../controllers/auth");
+const {
+	requireConfiguredSuperAdmin,
+} = require("../controllers/configuredSuperAdmin");
 
 /* Route 1: JS SDK client token for Card Fields (3‑DS) */
 router.get("/paypal/token-generated", Ctrl.generateClientToken);
@@ -26,7 +29,12 @@ router.post("/reservations/paypal/pending-cancel", Ctrl.cancelPendingReservation
 router.post("/reservations/paypal/create", Ctrl.createReservationAndProcess);
 
 /* Route 3: Post‑stay charge (MIT with vault token) — with hard cap guard */
-router.post("/reservations/paypal/mit-charge", Ctrl.mitChargeReservation);
+router.post(
+	"/reservations/paypal/mit-charge",
+	requireSignin,
+	requireConfiguredSuperAdmin,
+	Ctrl.mitChargeReservation,
+);
 
 /* Route 4: Standalone credit precheck (auth+void on exact amount) */
 router.post("/paypal/credit-precheck", Ctrl.creditPrecheck);
@@ -42,22 +50,26 @@ router.get("/reservations/paypal/ledger/:reservationId", Ctrl.getLedger);
 router.get(
 	"/reservations/paypal/vcc-status/:reservationId",
 	requireSignin,
-	Ctrl.getReservationVccStatus
+	requireConfiguredSuperAdmin,
+	Ctrl.getReservationVccStatus,
 );
 router.post(
 	"/reservations/paypal/vcc-order/create",
 	requireSignin,
-	Ctrl.createReservationVccOrder
+	requireConfiguredSuperAdmin,
+	Ctrl.createReservationVccOrder,
 );
 router.post(
 	"/reservations/paypal/vcc-order/capture",
 	requireSignin,
-	Ctrl.chargeReservationViaVcc
+	requireConfiguredSuperAdmin,
+	Ctrl.chargeReservationViaVcc,
 );
 router.post(
 	"/reservations/paypal/vcc-charge",
 	requireSignin,
-	Ctrl.chargeReservationViaVcc
+	requireConfiguredSuperAdmin,
+	Ctrl.chargeReservationViaVcc,
 );
 
 /* Route 8: Webhook endpoint (optional) */

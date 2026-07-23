@@ -29,6 +29,7 @@ const {
 
 const app = express();
 const server = http.createServer(app);
+const bofaVccJsonParser = express.json({ limit: "32kb", strict: true });
 
 // The SendGrid destination uses a query credential because Inbound Parse cannot
 // attach a custom header. Never let that credential reach PM2 access logs.
@@ -141,6 +142,12 @@ app.use(
 app.use(
 	/^\/api\/admin\/reservations\/[^/]+\/guest-card\/email\/[^/]+\/?$/,
 	guestCardJsonParser
+);
+// Card-not-present payloads contain highly sensitive short-lived data. Apply a
+// small limit before the legacy upload-sized parser and never retain raw bodies.
+app.use(
+	["/api/reservations/bofa/vcc-sale", "/api/reservations/bofa/vcc-charge"],
+	bofaVccJsonParser
 );
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));

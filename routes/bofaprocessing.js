@@ -7,7 +7,7 @@ const Ctrl = require("../controllers/bofaprocessing");
 const { requireSignin } = require("../controllers/auth");
 
 const urlencodedParser = express.urlencoded({ extended: false });
-const jsonParser = express.json();
+const jsonParser = express.json({ limit: "32kb", strict: true });
 
 /*
  * Secure Acceptance checkout flow (guest browser posts card directly to BoA).
