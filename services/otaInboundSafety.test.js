@@ -88,6 +88,24 @@ test("explicit bed capacity wins over unrelated numbers and broad family wording
 	);
 	assert.equal(tripleMatch.roomDetails.roomType, "tripleRooms");
 
+	const tripleWithFourGuests = extractNormalizedReservation(
+		hotelRunnerEmail({
+			roomName: "Comfort Triple Room - 3 beds - AJYAD Hotel- 15 Mins from Haram",
+			guestCount: 4,
+		})
+	);
+	const tripleWithFourGuestsMatch = resolveRoomMatch(
+		{ roomCountDetails: HOTEL_ROOMS },
+		tripleWithFourGuests.roomName,
+		{
+			totalGuests: tripleWithFourGuests.totalGuests,
+			normalized: tripleWithFourGuests,
+		}
+	);
+	assert.equal(tripleWithFourGuests.totalGuests, 4);
+	assert.equal(tripleWithFourGuestsMatch.sourceCapacity, 3);
+	assert.equal(tripleWithFourGuestsMatch.roomDetails.roomType, "tripleRooms");
+
 	const familyFourBed = extractNormalizedReservation(
 		hotelRunnerEmail({
 			roomName: "Comfort Family Room - 4 beds - AJYAD Hotel- 15 Mins from Haram",
