@@ -3,6 +3,9 @@
 const OpenAI = require("openai");
 const { pickOpenAIModel } = require("./openaiModelConfig");
 const {
+	classifyOtaGuestCommunication,
+} = require("./otaInboundCommunicationClassifier");
+const {
 	PROVIDER_LABELS,
 	extractNormalizedReservation,
 	htmlToText,
@@ -587,24 +590,21 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	const merged = {
 		...heuristic,
 		sourcePresence: { ...(heuristic.sourcePresence || {}) },
+		aiFieldPresence: {},
 		warnings: [...(heuristic.warnings || [])],
 		errors: [...(heuristic.errors || [])],
 	};
 	const markPresent = (field) => {
-		merged.sourcePresence[field] = true;
+		merged.aiFieldPresence[field] = true;
 	};
 
 	const aiIntent = normalizeIntent(decision.intent);
 	const aiConfidence = Number(decision.confidence || 0);
-	if (
-		aiIntent &&
-		aiConfidence >= 0.55 &&
-		["unknown", "not_reservation"].includes(merged.intent)
-	) {
-		merged.intent = aiIntent;
-	}
 	if (aiIntent === "not_reservation" && aiConfidence >= 0.85) {
 		merged.intent = "not_reservation";
+	}
+	if (aiIntent && aiIntent !== merged.intent) {
+		merged.aiSuggestedIntent = aiIntent;
 	}
 
 	const provider = normalizeProvider(pickAiString(decision, "provider"));
@@ -615,17 +615,12 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 
 	const eventType = normalizeWhitespace(decision.eventType || "").toLowerCase();
 	if ((!merged.eventType || merged.eventType === "unknown") && eventType) {
-		merged.eventType = eventType;
+		merged.aiSuggestedEventType = eventType;
 	}
 
 	const statusToApply = normalizeStatus(decision.statusToApply);
-	if (
-		!merged.statusToApply &&
-		statusToApply &&
-		(aiIntent === "reservation_status" ||
-			["cancelled", "no_show", "status"].includes(merged.eventType))
-	) {
-		merged.statusToApply = statusToApply;
+	if (!merged.statusToApply && statusToApply) {
+		merged.aiSuggestedStatusToApply = statusToApply;
 	}
 
 	const confirmationNumber = normalizeConfirmation(
@@ -826,6 +821,62 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 
 	const emailText = buildRedactedEmailText(email);
 	const emailContext = buildEmailContext(email);
+	const communicationClassification = classifyOtaGuestCommunication(email, {
+		...emailContext,
+		emailText,
+	});
+	if (communicationClassification.terminalNonReservation) {
+		const provider = communicationClassification.provider || "unknown";
+		const normalized = {
+			provider,
+			providerLabel: PROVIDER_LABELS[provider] || provider,
+			bookingSource: PROVIDER_LABELS[provider] || provider,
+			intent: "not_reservation",
+			eventType: "unknown",
+			statusToApply: "",
+			confirmationNumber: "",
+			reservationId: "",
+			hotelName: "",
+			roomName: "",
+			amount: 0,
+			currency: "",
+			totalAmountSar: 0,
+			sourcePresence: {},
+			warnings: [],
+			errors: [],
+			terminalNonReservation: true,
+			suppressForwarding: true,
+			skipReason: communicationClassification.reason,
+			communicationClassification,
+			source: {
+				from: email.from || "",
+				to: email.to || "",
+				subject: email.subject || "",
+				messageId: email.messageId || "",
+			},
+		};
+		logOrchestrator("communication.skipped", {
+			provider,
+			reason: communicationClassification.reason,
+			evidence: communicationClassification.evidence || [],
+		});
+		return {
+			normalized,
+			decision: {
+				usedAI: false,
+				skipped: true,
+				skipReason: communicationClassification.reason,
+				reason:
+					"Deterministic OTA guest communication; AI and reservation reconciliation are not required.",
+			},
+			emailContext: {
+				...emailContext,
+				communicationClassification,
+			},
+			emailText,
+			safeSnippet: safeSnippet(emailText, 800),
+		};
+	}
 	logOrchestrator("context.built", {
 		forwarded: emailContext.forwarded,
 		originalFrom: emailContext.originalFrom,

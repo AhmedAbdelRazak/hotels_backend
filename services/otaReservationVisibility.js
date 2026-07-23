@@ -85,25 +85,41 @@ const assignedHotelIdsFromUser = (user = {}) =>
 		.map(normalizeId)
 		.filter((id, index, arr) => id && arr.indexOf(id) === index);
 
+const isScopedPlatformOtaActor = (actor = {}) =>
+	Boolean(actor) &&
+	!isConfiguredSuperAdmin(actor) &&
+	accountRoleNumbers(actor).includes(1000);
+
+const assignedHotelObjectIdsForOtaActor = (actor = {}) =>
+	assignedHotelIdsFromUser(actor)
+		.filter((id) => mongoose.Types.ObjectId.isValid(id))
+		.map((id) => mongoose.Types.ObjectId(id));
+
 const platformOtaScopeFilter = (actor = {}) => {
-	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+	if (!isScopedPlatformOtaActor(actor)) {
 		return null;
 	}
-	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
-		mongoose.Types.ObjectId.isValid(id)
-	);
-	if (!hotelIds.length) return null;
+	const hotelIds = assignedHotelObjectIdsForOtaActor(actor);
+	if (!hotelIds.length) return { _id: { $exists: false } };
 	return {
 		$or: [
 			{
 				hotelId: {
-					$in: hotelIds.map((id) => mongoose.Types.ObjectId(id)),
+					$in: hotelIds,
 				},
 			},
 			{ hotelId: { $exists: false } },
 			{ hotelId: null },
 		],
 	};
+};
+
+const strictPlatformOtaHotelScopeFilter = (actor = {}) => {
+	if (!isScopedPlatformOtaActor(actor)) return null;
+	const hotelIds = assignedHotelObjectIdsForOtaActor(actor);
+	return hotelIds.length
+		? { hotelId: { $in: hotelIds } }
+		: { _id: { $exists: false } };
 };
 
 const applyPlatformOtaScope = (actor = {}, filter = {}) => {
@@ -143,11 +159,15 @@ module.exports = {
 	appendExcludePendingOtaReviewFilter,
 	addExcludePendingOtaReviewToMutableFilter,
 	applyPlatformOtaScope,
+	assignedHotelIdsFromUser,
 	buildExcludePendingOtaReviewFilter,
 	buildOtaReviewSnapshot,
 	buildPendingOtaReviewFilter,
 	canManageOtaReservations,
 	isConfiguredSuperAdmin,
 	isOtaPlatformReviewPending,
+	isScopedPlatformOtaActor,
 	normalizeId,
+	platformOtaScopeFilter,
+	strictPlatformOtaHotelScopeFilter,
 };

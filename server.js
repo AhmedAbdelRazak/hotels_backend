@@ -23,6 +23,9 @@ const {
 const {
 	guestCardJsonParser,
 } = require("./services/guestCardJsonParser");
+const {
+	ensureInboundDedupeIndex,
+} = require("./services/otaInboundDedupeIndex");
 
 const app = express();
 const server = http.createServer(app);
@@ -96,8 +99,14 @@ mongoose
 		useNewUrlParser: true,
 		useUnifiedTopology: true,
 	})
-	.then(() => {
+	.then(async () => {
 		console.log("MongoDB Atlas is connected");
+		try {
+			await ensureInboundDedupeIndex();
+			console.log("Inbound email dedupe index is ready");
+		} catch (error) {
+			console.error("Inbound email dedupe index setup failed:", error.cause || error);
+		}
 		startHousekeepingMaintenanceJob();
 		startB2BChatMaintenanceJob();
 		startSupportCaseMaintenanceJob({

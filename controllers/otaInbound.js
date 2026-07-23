@@ -1,5 +1,6 @@
 /** @format */
 
+const crypto = require("crypto");
 const multer = require("multer");
 const mongoose = require("mongoose");
 const InboundEmail = require("../models/inbound_email");
@@ -25,7 +26,18 @@ const {
 const {
 	OTA_PLATFORM_REVIEW_PENDING,
 	canManageOtaReservations,
+	strictPlatformOtaHotelScopeFilter,
 } = require("../services/otaReservationVisibility");
+const {
+	INBOUND_CLAIM_LEASE_MS,
+	buildInboundDedupeKey,
+	isReclaimableInboundClaim,
+	shouldRetryInboundCollision,
+} = require("../services/otaInboundDedupe");
+const {
+	INBOUND_DEDUPE_INDEX_UNAVAILABLE,
+	ensureInboundDedupeIndex,
+} = require("../services/otaInboundDedupeIndex");
 
 let simpleParser = null;
 try {
@@ -82,12 +94,22 @@ const sanitizeStoredBody = (value = "", max = 100000) =>
 const escapeRegExp = (value = "") =>
 	String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const fileMetadata = (file = {}) => ({
-	filename: file.originalname || file.filename || file.name || "",
-	contentType: file.mimetype || file.contentType || "",
-	size: Number(file.size || file.content?.length || 0) || 0,
-	contentId: file.contentId || "",
-});
+const fileMetadata = (file = {}) => {
+	const content = file.buffer || file.content;
+	const contentHash = content
+		? crypto
+				.createHash("sha256")
+				.update(Buffer.isBuffer(content) ? content : String(content))
+				.digest("hex")
+		: "";
+	return {
+		filename: file.originalname || file.filename || file.name || "",
+		contentType: file.mimetype || file.contentType || "",
+		size: Number(file.size || file.content?.length || file.buffer?.length || 0) || 0,
+		contentId: file.contentId || "",
+		contentHash,
+	};
+};
 
 exports.parseInboundForm = (req, res, next) => {
 	upload.any()(req, res, (err) => {
@@ -100,7 +122,8 @@ exports.parseInboundForm = (req, res, next) => {
 				receivedAt: new Date(),
 				processedAt: new Date(),
 			}).catch(() => {});
-			return res.status(200).send("OK");
+			res.set("Retry-After", "60");
+			return res.status(503).send("Inbound multipart parsing failed; retry later");
 		}
 		return next();
 	});
@@ -117,7 +140,9 @@ exports.requireInboundEmailAdmin = async (req, res, next) => {
 			return res.status(403).json({ error: "Admin resource! access denied" });
 		}
 		const user = await User.findById(userId)
-			.select("_id role roles roleDescription roleDescriptions accessTo activeUser")
+			.select(
+				"_id role roles roleDescription roleDescriptions accessTo activeUser hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
+			)
 			.lean()
 			.exec();
 		if (!user || !canViewInboundEmails(user)) {
@@ -132,14 +157,33 @@ exports.requireInboundEmailAdmin = async (req, res, next) => {
 };
 
 const inboundSecretIsValid = (req) => {
-	const expected = process.env.SENDGRID_INBOUND_SECRET;
-	if (!expected) return true;
+	const expected = String(process.env.SENDGRID_INBOUND_SECRET || "").trim();
+	if (!expected) return false;
 	const provided =
 		req.query.token ||
 		req.get("x-inbound-secret") ||
-		req.body?.token ||
-		req.body?.secret;
-	return provided === expected;
+		"";
+	const expectedBuffer = Buffer.from(expected);
+	const providedBuffer = Buffer.from(String(provided));
+	return (
+		expectedBuffer.length === providedBuffer.length &&
+		crypto.timingSafeEqual(expectedBuffer, providedBuffer)
+	);
+};
+
+exports.requireInboundSecret = (req, res, next) => {
+	if (!String(process.env.SENDGRID_INBOUND_SECRET || "").trim()) {
+		console.error(
+			"[SendGrid Inbound] SENDGRID_INBOUND_SECRET is missing; request rejected before multipart parsing."
+		);
+		res.set("Retry-After", "300");
+		return res.status(503).send("Inbound authentication is not configured");
+	}
+	if (!inboundSecretIsValid(req)) {
+		console.warn("[SendGrid Inbound] rejected invalid secret before multipart parsing");
+		return res.status(401).send("Unauthorized");
+	}
+	return next();
 };
 
 const getHeaderMessageId = (headers = "") => {
@@ -180,6 +224,7 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 				messageId:
 					parsed.messageId || body.messageId || getHeaderMessageId(body.headers),
 				rawHash: hashText(rawMime),
+				hasRawMime: true,
 				attachments,
 			};
 		}
@@ -201,6 +246,7 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 				getMimeHeader(rawMime, "message-id") ||
 				getHeaderMessageId(body.headers),
 			rawHash: hashText(rawMime),
+			hasRawMime: true,
 			attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
 		};
 	}
@@ -215,14 +261,14 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 		html: body.html || "",
 		messageId:
 			body.messageId || body["message-id"] || getHeaderMessageId(body.headers),
-		rawHash: hashText(
-			`${body.from || ""}|${body.to || ""}|${body.subject || ""}|${
-				body.text || ""
-			}|${body.html || ""}`
-		),
+		rawHash: "",
+		hasRawMime: false,
 		attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
 	};
 };
+
+const duplicateRecordSelection =
+	"_id processingStatus receivedAt dedupeKey reservationMongoId hotelId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel";
 
 const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (!emailHash && !messageId) return null;
@@ -235,12 +281,75 @@ const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (messageId) query.$or.push({ messageId });
 	if (!query.$or.length) return null;
 	return InboundEmail.findOne(query)
-		.select(
-			"_id processingStatus reservationMongoId hotelId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel"
-		)
+		.select(duplicateRecordSelection)
 		.sort({ receivedAt: 1 })
 		.lean()
 		.exec();
+};
+
+const findClaimedDuplicate = async (dedupeKey = "") => {
+	if (!dedupeKey) return null;
+	return InboundEmail.findOne({ dedupeKey })
+		.select(duplicateRecordSelection)
+		.sort({ receivedAt: 1 })
+		.lean()
+		.exec();
+};
+
+const isDedupeKeyCollision = (error) => Number(error?.code) === 11000;
+
+const releaseReclaimableClaim = async (record = {}, dedupeKey = "") => {
+	if (!dedupeKey || !isReclaimableInboundClaim(record)) return false;
+	const staleBefore = new Date(Date.now() - INBOUND_CLAIM_LEASE_MS);
+	const result = await InboundEmail.updateOne(
+		{
+			_id: record._id,
+			dedupeKey,
+			$or: [
+				{ processingStatus: "failed" },
+				{ processingStatus: "received", receivedAt: { $lte: staleBefore } },
+			],
+		},
+		{ $unset: { dedupeKey: "" } },
+	);
+	return Number(result?.matchedCount ?? result?.n ?? 0) > 0;
+};
+
+const createWithDedupeClaim = async (email, dedupeKey) => {
+	try {
+		return {
+			inboundRecord: await createInboundEmailRecord(email, { dedupeKey }),
+			duplicate: null,
+			duplicateSource: "",
+			reclaimedFrom: null,
+		};
+	} catch (error) {
+		if (!dedupeKey || !isDedupeKeyCollision(error)) throw error;
+		let claimed = await findClaimedDuplicate(dedupeKey);
+		if (!claimed) throw error;
+		if (await releaseReclaimableClaim(claimed, dedupeKey)) {
+			try {
+				return {
+					inboundRecord: await createInboundEmailRecord(email, { dedupeKey }),
+					duplicate: null,
+					duplicateSource: "",
+					reclaimedFrom: claimed,
+				};
+			} catch (retryError) {
+				if (!isDedupeKeyCollision(retryError)) throw retryError;
+				claimed = await findClaimedDuplicate(dedupeKey);
+				if (!claimed) throw retryError;
+			}
+		}
+		return {
+			inboundRecord: await createInboundEmailRecord(email, {
+				duplicate: claimed,
+			}),
+			duplicate: claimed,
+			duplicateSource: "atomic_claim",
+			reclaimedFrom: null,
+		};
+	}
 };
 
 const buildNormalizedFromDuplicateRecord = (duplicate = {}) => ({
@@ -285,10 +394,13 @@ const emitInboundEmailUpdated = (req, record, extra = {}) => {
 	});
 };
 
-const createInboundEmailRecord = async (email, duplicate) => {
+const createInboundEmailRecord = async (
+	email,
+	{ duplicate = null, dedupeKey = "" } = {}
+) => {
 	const redactedText = buildRedactedEmailText(email);
 	const emailHash = email.rawHash || hashText(redactedText);
-	return InboundEmail.create({
+	const record = {
 		source: "sendgrid",
 		processingStatus: "received",
 		from: email.from || "",
@@ -305,7 +417,9 @@ const createInboundEmailRecord = async (email, duplicate) => {
 		safeSnippet: safeSnippet(redactedText, 800),
 		attachments: email.attachments || [],
 		receivedAt: new Date(),
-	});
+	};
+	if (dedupeKey) record.dedupeKey = dedupeKey;
+	return InboundEmail.create(record);
 };
 
 const buildInboundExtractionFields = (normalized = {}, reconciliation = {}) => ({
@@ -388,15 +502,21 @@ const buildAutomationAuditFields = (reconciliation = {}) => {
 	};
 };
 
-const finalizeRecord = async (recordId, update) => {
+const finalizeRecord = async (
+	recordId,
+	update,
+	{ releaseDedupeClaim = false } = {},
+) => {
+	const mongoUpdate = {
+		$set: {
+			...update,
+			processedAt: new Date(),
+		},
+	};
+	if (releaseDedupeClaim) mongoUpdate.$unset = { dedupeKey: "" };
 	return InboundEmail.findByIdAndUpdate(
 		recordId,
-		{
-			$set: {
-				...update,
-				processedAt: new Date(),
-			},
-		},
+		mongoUpdate,
 		{ new: true }
 	)
 		.lean()
@@ -517,12 +637,13 @@ exports.handleSendGridInbound = async (req, res) => {
 			})),
 		});
 
-		const preliminaryHash =
-			email.rawHash || hashText(`${email.subject || ""}|${email.text || ""}`);
-		const duplicate = await findProcessedDuplicate(
+		const preliminaryHash = email.hasRawMime ? email.rawHash : "";
+		const dedupeKey = buildInboundDedupeKey(email);
+		let duplicate = await findProcessedDuplicate(
 			preliminaryHash,
 			email.messageId
 		);
+		let duplicateSource = duplicate ? "processed_precheck" : "";
 		logInbound("duplicate.checked", {
 			emailHash: shortHash(preliminaryHash),
 			messageId: email.messageId,
@@ -531,10 +652,33 @@ exports.handleSendGridInbound = async (req, res) => {
 			duplicateId: duplicate?._id ? String(duplicate._id) : "",
 		});
 
-		inboundRecord = await createInboundEmailRecord(email, duplicate);
+		if (duplicate) {
+			inboundRecord = await createInboundEmailRecord(email, { duplicate });
+		} else {
+			if (dedupeKey) await ensureInboundDedupeIndex();
+			const claim = await createWithDedupeClaim(email, dedupeKey);
+			inboundRecord = claim.inboundRecord;
+			duplicate = claim.duplicate;
+			duplicateSource = claim.duplicateSource;
+			if (claim.reclaimedFrom) {
+				logInbound("dedupe.claim_reclaimed", {
+					inboundEmailId: String(inboundRecord._id),
+					reclaimedFrom: String(claim.reclaimedFrom._id),
+					previousStatus: claim.reclaimedFrom.processingStatus || "",
+				});
+			}
+			if (duplicate) {
+				logInbound("duplicate.claim_collision", {
+					inboundEmailId: String(inboundRecord._id),
+					duplicateId: String(duplicate._id),
+					duplicateStatus: duplicate.processingStatus || "",
+				});
+			}
+		}
 		logInbound("audit.saved", {
 			inboundEmailId: String(inboundRecord._id),
 			duplicateOf: duplicate?._id ? String(duplicate._id) : "",
+			claimStatus: duplicateSource || (dedupeKey ? "claimed" : "unavailable"),
 		});
 
 		if (duplicate) {
@@ -550,7 +694,11 @@ exports.handleSendGridInbound = async (req, res) => {
 				skipReason: "duplicate_email",
 				automationComment:
 					"Duplicate inbound email payload; email was saved for audit only.",
-				matchedReservationBy: ["email_hash_or_message_id"],
+				matchedReservationBy: [
+					duplicateSource === "atomic_claim"
+						? "dedupe_key"
+						: "email_hash_or_message_id",
+				],
 			};
 			const updated = await finalizeRecord(inboundRecord._id, {
 				processingStatus: "duplicate_email",
@@ -567,12 +715,16 @@ exports.handleSendGridInbound = async (req, res) => {
 				normalizedReservation: normalized,
 				emailContext: {
 					duplicateOf: String(duplicate._id),
-					duplicatePrecheck: true,
+					duplicatePrecheck: duplicateSource === "processed_precheck",
+					duplicateAtomicClaim: duplicateSource === "atomic_claim",
 				},
 				orchestratorDecision: {
 					usedAI: false,
 					skipped: true,
-					skipReason: "duplicate_email_precheck",
+					skipReason:
+						duplicateSource === "atomic_claim"
+							? "duplicate_email_atomic_claim"
+							: "duplicate_email_precheck",
 				},
 				reconciliation: duplicateReconciliation,
 				parseWarnings: [],
@@ -588,6 +740,10 @@ exports.handleSendGridInbound = async (req, res) => {
 				orchestrationSkipped: true,
 			});
 			emitInboundEmailUpdated(req, updated || inboundRecord);
+			if (shouldRetryInboundCollision(duplicate, duplicateSource)) {
+				res.set("Retry-After", "30");
+				return res.status(503).send("Inbound delivery is still processing");
+			}
 			return res.status(200).send("OK");
 		}
 
@@ -705,11 +861,19 @@ exports.handleSendGridInbound = async (req, res) => {
 		return res.status(200).send("OK");
 	} catch (err) {
 		console.error("[SendGrid Inbound] error:", err.message);
+		if (err?.code === INBOUND_DEDUPE_INDEX_UNAVAILABLE && !inboundRecord) {
+			res.set("Retry-After", "60");
+			return res.status(503).send("Inbound delivery safety is unavailable");
+		}
 		if (inboundRecord?._id) {
-			const updated = await finalizeRecord(inboundRecord._id, {
-				processingStatus: "failed",
-				reconcileErrors: [err.message],
-			}).catch(() => null);
+			const updated = await finalizeRecord(
+				inboundRecord._id,
+				{
+					processingStatus: "failed",
+					reconcileErrors: [err.message],
+				},
+				{ releaseDedupeClaim: true },
+			).catch(() => null);
 			await handleImportantInboundForwarding({
 				req,
 				record: updated || inboundRecord,
@@ -737,7 +901,8 @@ exports.handleSendGridInbound = async (req, res) => {
 				processedAt: new Date(),
 			}).catch(() => null);
 		}
-		return res.status(200).send("OK");
+		res.set("Retry-After", "60");
+		return res.status(503).send("Inbound delivery processing failed; retry later");
 	}
 };
 
@@ -792,16 +957,20 @@ exports.listInboundEmails = async (req, res) => {
 				{ hotelName: new RegExp(search, "i") },
 			];
 		}
+		const hotelScope = strictPlatformOtaHotelScopeFilter(
+			req.inboundEmailViewer || {}
+		);
+		const scopedQuery = hotelScope ? { $and: [query, hotelScope] } : query;
 
 		const [data, total] = await Promise.all([
-			InboundEmail.find(query)
+			InboundEmail.find(scopedQuery)
 				.select("-bodyText -bodyHtml -normalizedReservation")
 				.sort({ receivedAt: -1 })
 				.skip(skip)
 				.limit(records)
 				.lean()
 				.exec(),
-			InboundEmail.countDocuments(query),
+			InboundEmail.countDocuments(scopedQuery),
 		]);
 
 		res.json({ data, total, page, records });
@@ -817,7 +986,13 @@ exports.singleInboundEmail = async (req, res) => {
 		if (!ObjectId.isValid(inboundEmailId)) {
 			return res.status(400).json({ error: "Invalid inbound email ID." });
 		}
-		const email = await InboundEmail.findById(inboundEmailId)
+		const hotelScope = strictPlatformOtaHotelScopeFilter(
+			req.inboundEmailViewer || {}
+		);
+		const emailFilter = hotelScope
+			? { $and: [{ _id: inboundEmailId }, hotelScope] }
+			: { _id: inboundEmailId };
+		const email = await InboundEmail.findOne(emailFilter)
 			.populate("hotelId", "hotelName hotelName_OtherLanguage")
 			.populate(
 				"reservationMongoId",
@@ -830,5 +1005,59 @@ exports.singleInboundEmail = async (req, res) => {
 	} catch (error) {
 		console.error("[inbound-emails] single failed:", error);
 		res.status(500).json({ error: "Could not load inbound email." });
+	}
+};
+
+exports.releaseInboundEmailRetryClaim = async (req, res) => {
+	try {
+		const viewer = req.inboundEmailViewer || {};
+		if (
+			!configuredSuperAdminIds().includes(
+				String(viewer._id || viewer.id || "").trim()
+			)
+		) {
+			return res.status(403).json({ error: "SUPER ADMIN access required." });
+		}
+		const { inboundEmailId } = req.params;
+		if (!ObjectId.isValid(inboundEmailId)) {
+			return res.status(400).json({ error: "Invalid inbound email ID." });
+		}
+		const released = await InboundEmail.findOneAndUpdate(
+			{
+				_id: inboundEmailId,
+				processingStatus: { $in: ["needs_review", "needs_mapping", "failed"] },
+				dedupeKey: { $type: "string", $gt: "" },
+			},
+			{
+				$unset: { dedupeKey: "" },
+				$set: {
+					processingStatus: "retry_ready",
+					automationAction: "skipped",
+					skipReason: "manual_retry_claim_released",
+					automationComment:
+						"SUPER ADMIN released the delivery claim for a controlled re-delivery after parser or mapping review.",
+					processedAt: new Date(),
+				},
+			},
+			{ new: true }
+		)
+			.select("_id processingStatus confirmationNumber subject receivedAt")
+			.lean()
+			.exec();
+		if (!released) {
+			return res.status(409).json({
+				error:
+					"Only failed or manual-review deliveries with an active claim can be prepared for retry.",
+			});
+		}
+		return res.json({
+			success: true,
+			data: released,
+			message:
+				"The dedupe claim was released. Re-deliver the original email to process it again.",
+		});
+	} catch (error) {
+		console.error("[inbound-emails] retry claim release failed:", error);
+		return res.status(500).json({ error: "Could not release the retry claim." });
 	}
 };

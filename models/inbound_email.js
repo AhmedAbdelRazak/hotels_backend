@@ -35,6 +35,7 @@ const inboundEmailSchema = new mongoose.Schema(
 		messageId: { type: String, trim: true, default: "" },
 		emailHash: { type: String, trim: true, default: "" },
 		textHash: { type: String, trim: true, default: "" },
+		dedupeKey: { type: String, trim: true },
 		duplicateOf: { type: ObjectId, ref: "InboundEmail", default: null },
 
 		bodyText: { type: String, default: "" },
@@ -47,6 +48,7 @@ const inboundEmailSchema = new mongoose.Schema(
 					contentType: { type: String, default: "" },
 					size: { type: Number, default: 0 },
 					contentId: { type: String, default: "" },
+					contentHash: { type: String, default: "" },
 				},
 			],
 			default: [],
@@ -99,6 +101,16 @@ const inboundEmailSchema = new mongoose.Schema(
 
 inboundEmailSchema.index({ emailHash: 1 });
 inboundEmailSchema.index({ messageId: 1 });
+inboundEmailSchema.index(
+	{ dedupeKey: 1 },
+	{
+		unique: true,
+		name: "uniq_inbound_email_dedupe_key",
+		partialFilterExpression: {
+			dedupeKey: { $type: "string", $gt: "" },
+		},
+	}
+);
 inboundEmailSchema.index({ provider: 1, confirmationNumber: 1 });
 inboundEmailSchema.index({ paymentCollectionModel: 1, receivedAt: -1 });
 inboundEmailSchema.index({ processingStatus: 1, receivedAt: -1 });

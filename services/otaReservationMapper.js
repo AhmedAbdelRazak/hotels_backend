@@ -19,6 +19,10 @@ const {
 const {
 	enqueueOtaReservationWork,
 } = require("./otaReservationQueue");
+const {
+	addReservationVersionBump,
+	buildReservationSnapshotFilter,
+} = require("./otaReviewConcurrency");
 
 dayjs.extend(customParseFormat);
 
@@ -1009,6 +1013,16 @@ function parseDate(value) {
 		.replace(/\s+\d{1,2}:\d{2}.*$/i, "")
 		.trim();
 
+	// A value such as 08/09/2026 can mean either 8 September or August 9.
+	// Provider templates are not consistent enough to choose safely, so only
+	// accept slash dates when the ordering is unambiguous (or both parts match).
+	const numericSlashDate = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+	if (numericSlashDate) {
+		const first = Number(numericSlashDate[1]);
+		const second = Number(numericSlashDate[2]);
+		if (first <= 12 && second <= 12 && first !== second) return null;
+	}
+
 	const formats = [
 		"YYYY-MM-DD",
 		"MM/DD/YYYY",
@@ -1170,6 +1184,10 @@ const GENERIC_CONFIRMATION_VALUES = new Set([
 function isWeakConfirmationCandidate(value = "") {
 	const normalized = normalizeComparable(value);
 	if (!normalized) return true;
+	// All supported OTA booking identifiers contain at least one digit. This
+	// blocks flattened labels such as "cancelation", "extra", and "receive"
+	// from ever becoming a reservation identity.
+	if (!/\d/.test(normalized)) return true;
 	if (GENERIC_CONFIRMATION_VALUES.has(normalized)) return true;
 	if (/\d{5,}/.test(normalized)) return false;
 	const tokens = normalized.split(" ").filter(Boolean);
@@ -1235,6 +1253,49 @@ function cleanAgodaValue(value = "") {
 	return cleanFieldValue(stripOtaMarkdownValue(value));
 }
 
+function extractAgodaValueBetweenLabels(
+	text = "",
+	startLabel = "",
+	endLabels = []
+) {
+	const start = escapeRegExp(startLabel).replace(/\\ /g, "\\s+");
+	const ends = (Array.isArray(endLabels) ? endLabels : [endLabels])
+		.filter(Boolean)
+		.map((label) => escapeRegExp(label).replace(/\\ /g, "\\s+"));
+	if (!start || !ends.length) return "";
+	const match = String(text || "").match(
+		new RegExp(
+			`\\b${start}\\b\\s*[:#-]?\\s*([\\s\\S]{1,120}?)\\s+(?=${ends.join(
+				"|"
+			)})\\b`,
+			"i"
+		)
+	);
+	return cleanAgodaValue(match?.[1] || "");
+}
+
+function extractCompactAgodaRoomDetails(text = "") {
+	const header =
+		/\bRoom\s+Type\s+No\.?\s+of\s+Rooms\s+Occupancy(?:\s+Children(?:'|’)?s\s+age)?\s+No\.?\s+of\s+Extra\s+Bed\s+/i;
+	const headerMatch = header.exec(String(text || ""));
+	if (!headerMatch) return {};
+	const rowStart = headerMatch.index + headerMatch[0].length;
+	const tail = String(text || "").slice(rowStart, rowStart + 420);
+	const row = tail.match(
+		/^([\s\S]{2,180}?)\s+(\d+)\s+(\d+)\s+Adults?(?:\s*,?\s*(\d+)\s+(?:Children|Child|Kids?))?(?:\s+[\d,\s-]+)?\s+\d+\b/i
+	);
+	if (!row) return {};
+	const adults = Number(row[3] || 0);
+	const children = Number(row[4] || 0);
+	return {
+		roomName: cleanAgodaValue(row[1]),
+		roomCount: Math.max(1, Number(row[2] || 1)),
+		adults,
+		children,
+		totalGuests: adults + children,
+	};
+}
+
 function parseAgodaOccupancy(value = "") {
 	const source = stripOtaMarkdownValue(value);
 	const adults = Number(source.match(/\b(\d+)\s+adults?\b/i)?.[1] || 0);
@@ -1271,10 +1332,12 @@ function parseAgodaRoomLine(value = "") {
 }
 
 function isAgodaRoomHeaderLine(value = "") {
-	return /(room\s+type|no\.?\s+of\s+rooms|occupancy|extra\s+bed)/i.test(value);
+	return /(room\s+type|no\.?\s+of\s+rooms|occupancy|children(?:'|’)?s\s+age|extra\s+bed)/i.test(value);
 }
 
 function extractAgodaRoomDetails(text = "") {
+	const compact = extractCompactAgodaRoomDetails(text);
+	if (compact.roomName) return compact;
 	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
 	const headerIndex = lines.findIndex(
 		(line) =>
@@ -1338,6 +1401,17 @@ function extractAgodaRoomDetails(text = "") {
 }
 
 function extractAgodaMoneyByLabel(text = "", label = "") {
+	const escapedLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
+	const inline = String(text || "").match(
+		new RegExp(
+			`${escapedLabel}\\s*[:#-]?\\s*((?:(?:${MONEY_CURRENCY_CODES.join(
+				"|"
+			)}|US\\$|\\$|﷼)\\s*)?[+-]?[0-9][0-9,.]*)`,
+			"i"
+		)
+	);
+	const inlineMoney = parseMoney(inline?.[1] || "");
+	if (inlineMoney.amount) return inlineMoney;
 	const labelComparable = normalizeComparable(label);
 	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
 	for (let index = 0; index < lines.length; index += 1) {
@@ -1420,8 +1494,49 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 	const payoutCurrency = netRate.currency || amountCurrency;
 	const amountConversion = getSarConversionMeta(referenceSellRate.amount, amountCurrency);
 	const payoutConversion = getSarConversionMeta(netRate.amount, payoutCurrency);
-	const firstName = findField(text, ["Customer First Name"]);
-	const lastName = findField(text, ["Customer Last Name"]);
+	const firstName = firstNonEmpty(
+		extractAgodaValueBetweenLabels(text, "Customer First Name", [
+			"Customer Last Name",
+		]),
+		findField(text, ["Customer First Name"])
+	);
+	const textReferenceSellRateOccurrences = (
+		String(email.text || "").match(
+			/Reference sell rate \(incl\. taxes & fees\)/gi
+		) || []
+	).length;
+	const htmlReferenceSellRateOccurrences = (
+		htmlToText(email.html || "").match(
+			/Reference sell rate \(incl\. taxes & fees\)/gi
+		) || []
+	).length;
+	const referenceSellRateOccurrences =
+		textReferenceSellRateOccurrences || htmlReferenceSellRateOccurrences
+			? Math.max(
+					textReferenceSellRateOccurrences,
+					htmlReferenceSellRateOccurrences
+			  )
+			: (
+					String(text || "").match(
+						/Reference sell rate \(incl\. taxes & fees\)/gi
+					) || []
+			  ).length;
+	const agodaRoomReferences = Array.from(
+		new Set(
+			Array.from(String(text || "").matchAll(/\[?Rm\s*No\.?\s*(\d+)\]?/gi))
+				.map((match) => Number(match[1] || 0))
+				.filter((value) => value > 0)
+		)
+	);
+	const multiRoomEvidence =
+		Number(room.roomCount || 0) > 1 || agodaRoomReferences.length > 1;
+	const lastName = firstNonEmpty(
+		extractAgodaValueBetweenLabels(text, "Customer Last Name", [
+			"Country of Residence",
+			"Check-in",
+		]),
+		findField(text, ["Customer Last Name"])
+	);
 	const customerInfoName = findFirstPattern(text, [
 		/Customer\s+Info\s*-\s*Name\s*:\s*([^,\n]{2,120})/i,
 	]);
@@ -1434,7 +1549,13 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		])
 	);
 	const nationality = cleanAgodaValue(
-		firstNonEmpty(findField(text, ["Country of Residence"]), findField(text, ["Country"]))
+		firstNonEmpty(
+			extractAgodaValueBetweenLabels(text, "Country of Residence", [
+				"Check-in",
+			]),
+			findField(text, ["Country of Residence"]),
+			findField(text, ["Country"])
+		)
 	);
 	const aliases = Array.from(
 		new Set(
@@ -1490,6 +1611,8 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 			paymentCollectionModel === "ota_collect"
 				? "Agoda prepaid reservation; net rate is provided by Agoda."
 				: "",
+		referenceSellRateOccurrences,
+		multiRoomEvidence,
 		sourcePresence: {
 			confirmationNumber: !!confirmationNumber,
 			reservationId: !!confirmationNumber,
@@ -1630,7 +1753,13 @@ function extractAirbnbStayDates(email = {}, text = "") {
 			checkinDay = checkinDay.add(1, "year");
 		}
 		if (checkinDay && checkoutDay && !checkoutDay.isAfter(checkinDay, "day")) {
-			checkoutDay = checkoutDay.add(1, "year");
+			// Only roll over a year for an actual Dec/Jan-style boundary. Equal
+			// month/day values are ambiguous template output, not a 365-day stay.
+			if (checkoutDay.month() < checkinDay.month()) {
+				checkoutDay = checkoutDay.add(1, "year");
+			} else {
+				checkoutDay = null;
+			}
 		}
 		checkin = checkinDay?.isValid() ? checkinDay.format("YYYY-MM-DD") : checkin;
 		checkout = checkoutDay?.isValid() ? checkoutDay.format("YYYY-MM-DD") : checkout;
@@ -2415,11 +2544,21 @@ function hasStrongNewReservationSignal(value = "") {
 function hasActionableCancellationSignal(subject = "", text = "") {
 	const subjectOnly = String(subject || "").toLowerCase();
 	const body = String(text || "").toLowerCase();
-	if (/(cancelled|canceled|cancelation|no[- ]?show)/i.test(subjectOnly)) {
+	const isRequestOrPolicy =
+		/\b(waiver|request|inquiry|question|message|refund|policy|fee)\b/i.test(
+			subjectOnly
+		);
+	if (
+		!isRequestOrPolicy &&
+		/(?:\b(?:reservation|booking)\b[^\n]{0,50}\b(?:cancelled|canceled|cancellation|cancelation)\b)|(?:^|[-:])\s*(?:cancelled|canceled|cancellation|cancelation)\b/i.test(
+			subjectOnly
+		)
+	) {
 		return true;
 	}
+	if (isRequestOrPolicy) return false;
 	if (
-		/(reservation|booking)[^\n.]{0,90}(cancelled|canceled|cancelled by|canceled by)|(?:cancelled|canceled)[^\n.]{0,90}(reservation|booking)|(?:has been|was|is)\s+(?:cancelled|canceled)|guest\s+(?:cancelled|canceled)/i.test(
+		/(?:reservation|booking)[^\n.]{0,90}(?:has been|was|is|status\s*[:#-]?)\s*(?:cancelled|canceled)|(?:cancelled|canceled)[^\n.]{0,40}(?:reservation|booking)|guest\s+(?:has\s+)?(?:cancelled|canceled)\s+(?:the|this|their)\s+(?:reservation|booking)/i.test(
 			body
 		)
 	) {
@@ -2435,7 +2574,7 @@ function detectEventType({ subject = "", text = "" } = {}) {
 		return "new";
 	}
 	if (hasActionableCancellationSignal(subject, text)) return "cancelled";
-	if (/(no[- ]?show)/i.test(subjectOnly)) return "no_show";
+	if (hasActionableNoShowSignal(subject, text)) return "no_show";
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(haystack)) {
 		return "modified";
 	}
@@ -2451,19 +2590,104 @@ function detectEventType({ subject = "", text = "" } = {}) {
 	return "unknown";
 }
 
+function hasActionableConfirmedStatusSignal(subject = "", text = "") {
+	const subjectOnly = String(subject || "").trim().toLowerCase();
+	const haystack = `${subject || ""}\n${text || ""}`.toLowerCase();
+	if (/\b(question|policy|fee|request|inquiry|instructions?|how\s+to)\b/i.test(subjectOnly)) {
+		return false;
+	}
+	if (hasStrongNewReservationSignal(subjectOnly)) return true;
+	return (
+		/^(?:(?:reservation|booking)\s+)?(?:status\s*[:#-]\s*)?(?:confirmed|active)\b/i.test(
+			subjectOnly,
+		) ||
+		/\b(?:reservation|booking)\s+status\s*[:#-]\s*(?:confirmed|active)\b/i.test(
+			haystack,
+		) ||
+		/(?:^|\n)\s*status\s*[:#-]\s*(?:confirmed|active)\b/i.test(haystack) ||
+		/(?:^|\n)\s*(?:the\s+)?(?:reservation|booking)\b[^\n.]{0,80}\b(?:has\s+been|was|is|remains)\s+(?:confirmed|active)\b/i.test(
+			haystack,
+		) ||
+		/\b(?:confirmed|active)\s+(?:reservation|booking)\b/i.test(
+			subjectOnly,
+		)
+	);
+}
+
+function hasActionableNoShowSignal(subject = "", text = "") {
+	const subjectOnly = String(subject || "").trim().toLowerCase();
+	const haystack = `${subject || ""}\n${text || ""}`.toLowerCase();
+	if (/\b(question|policy|fee|request|inquiry|waiver|instructions?|how\s+to)\b/i.test(subjectOnly)) {
+		return false;
+	}
+	return (
+		/^(?:(?:reservation|booking|guest)\s+)?(?:status\s*[:#-]\s*)?no[-\s]?show\b/i.test(
+			subjectOnly,
+		) ||
+		/\b(?:reservation|booking)\s+status\s*[:#-]\s*no[-\s]?show\b/i.test(
+			haystack,
+		) ||
+		/(?:^|\n)\s*status\s*[:#-]\s*no[-\s]?show\b/i.test(haystack) ||
+		/(?:^|\n)\s*(?:the\s+)?(?:guest|reservation|booking)\s+(?:was\s+|is\s+|was\s+marked\s+)?(?:a\s+)?no[-\s]?show\b/i.test(
+			haystack,
+		) ||
+		/(?:^|\n)\s*(?:the\s+)?guest\s+did\s+not\s+(?:arrive|show\s+up)\b/i.test(
+			haystack,
+		)
+	);
+}
+
+function hasActionableOperationalStatusSignal(status, subject = "", text = "") {
+	const subjectOnly = String(subject || "").trim().toLowerCase();
+	const haystack = `${subject || ""}\n${text || ""}`.toLowerCase();
+	if (/\b(question|policy|request|inquiry|instructions?|how\s+to)\b/i.test(subjectOnly)) {
+		return false;
+	}
+	if (status === "checked_out") {
+		return (
+			/^(?:(?:reservation|booking|guest)\s+)?(?:status\s*[:#-]\s*)?checked\s*out\b/i.test(
+				subjectOnly,
+			) ||
+			/\b(?:reservation|booking)\s+status\s*[:#-]\s*checked\s*out\b/i.test(
+				haystack,
+			) ||
+			/(?:^|\n)\s*status\s*[:#-]\s*checked\s*out\b/i.test(haystack) ||
+			/(?:^|\n)\s*(?:the\s+)?(?:guest|reservation|booking)\s+(?:has\s+been\s+|was\s+|is\s+)?checked\s*out\s*(?:[.!]|$)/i.test(
+				haystack,
+			)
+		);
+	}
+	if (status === "inhouse") {
+		return (
+			/^(?:(?:reservation|booking|guest)\s+)?(?:status\s*[:#-]\s*)?(?:in[\s-]?house|checked\s*in|check[\s-]?in\s+completed)\b/i.test(
+				subjectOnly,
+			) ||
+			/\b(?:reservation|booking)\s+status\s*[:#-]\s*(?:in[\s-]?house|checked\s*in)\b/i.test(
+				haystack,
+			) ||
+			/(?:^|\n)\s*status\s*[:#-]\s*(?:in[\s-]?house|checked\s*in)\b/i.test(
+				haystack,
+			) ||
+			/(?:^|\n)\s*(?:the\s+)?(?:guest|reservation|booking)\s+(?:has\s+been\s+|was\s+|is\s+)?checked\s*in\s*(?:[.!]|$)/i.test(
+				haystack,
+			)
+		);
+	}
+	return false;
+}
+
 function detectStatusToApply({ subject = "", text = "" } = {}) {
-	const haystack = `${subject} ${text}`.toLowerCase();
 	const subjectOnly = String(subject || "").toLowerCase();
 	if (hasStrongNewReservationSignal(subjectOnly)) return "confirmed";
 	if (hasActionableCancellationSignal(subject, text)) return "cancelled";
-	if (/(no[- ]?show)/i.test(subjectOnly)) return "no_show";
-	if (/(checked\s*out|checkedout|early\s*checked\s*out)/i.test(haystack)) {
+	if (hasActionableNoShowSignal(subject, text)) return "no_show";
+	if (hasActionableOperationalStatusSignal("checked_out", subject, text)) {
 		return "checked_out";
 	}
-	if (/(in[\s-]?house|checked\s*in|check[\s-]?in\s+completed)/i.test(haystack)) {
+	if (hasActionableOperationalStatusSignal("inhouse", subject, text)) {
 		return "inhouse";
 	}
-	if (/(confirmed|confirmation|active)/i.test(haystack)) return "confirmed";
+	if (hasActionableConfirmedStatusSignal(subject, text)) return "confirmed";
 	return "";
 }
 
@@ -2666,6 +2890,33 @@ function normalizeConfirmation(value) {
 	return normalizeWhitespace(value).toLowerCase();
 }
 
+function trimFlattenedFieldTail(value = "", stopLabels = []) {
+	let cleaned = cleanFieldValue(value);
+	for (const label of stopLabels) {
+		const pattern = new RegExp(`\\s+${label}[\\s:?#-].*$`, "i");
+		cleaned = cleaned.replace(pattern, "").trim();
+	}
+	return cleaned;
+}
+
+function extractHotelRunnerRoomBlocks(text = "") {
+	const blocks = [];
+	const pattern =
+		/\bRoom\s+Type\s+([\s\S]{2,220}?)\s+Check-in\s+Date\s+([\s\S]{2,60}?)\s+Check-out\s+Date\s+([\s\S]{2,60}?)(?=\s+Guest\s+Count\b)([\s\S]{0,420}?)(?=\bRoom\s+Type\b|\bGo\s+to\s+reservation\b|\bThis\s+e-mail\b|$)/gi;
+	for (const match of String(text || "").matchAll(pattern)) {
+		const room = normalizeComparable(cleanFieldValue(match[1] || ""));
+		const checkin = parseDate(match[2] || "") || normalizeComparable(match[2] || "");
+		const checkout = parseDate(match[3] || "") || normalizeComparable(match[3] || "");
+		const total = parseMoney(
+			findFirstPattern(match[4] || "", [
+				/\bTotal\s*[:#-]?\s*((?:[A-Z]{3}|US\$|\$|﷼)?\s*[0-9][0-9,.]*)/i,
+			])
+		).amount;
+		if (room) blocks.push(`${room}|${checkin}|${checkout}|${total || 0}`);
+	}
+	return blocks;
+}
+
 function extractNormalizedReservation(email) {
 	const text = normalizeWhitespace(
 		`${email.subject || ""}\n${email.text || ""}\n${htmlToText(email.html || "")}`
@@ -2680,6 +2931,19 @@ function extractNormalizedReservation(email) {
 	const agodaFields = extractAgodaFields(email, text, provider);
 	const tableStayDates = extractTableStayDates(text);
 	const tableOccupancy = extractTableOccupancy(text);
+	const isHotelRunnerSender = /@(?:[a-z0-9.-]+\.)?hotelrunner\.com\b/i.test(
+		String(email.from || "")
+	);
+	const hotelRunnerRoomBlocks = isHotelRunnerSender
+		? [
+				extractHotelRunnerRoomBlocks(email.text || ""),
+				extractHotelRunnerRoomBlocks(htmlToText(email.html || "")),
+		  ].reduce(
+				(longest, blocks) =>
+					blocks.length > longest.length ? blocks : longest,
+				[]
+		  )
+		: [];
 	const providerLabel = PROVIDER_LABELS[provider] || provider;
 	const eventType = detectEventType({ subject: email.subject, text });
 	const rawStatusToApply = detectStatusToApply({ subject: email.subject, text });
@@ -2775,11 +3039,17 @@ function extractNormalizedReservation(email) {
 		"Room",
 		"Unit type",
 	]));
-	const roomName = firstNonEmpty(
+	const roomName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.roomName,
 		agodaFields.roomName,
 		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
-	);
+	), [
+		"Check[-\\s]?in(?:\\s+date)?",
+		"Check[-\\s]?out(?:\\s+date)?",
+		"Guest\\s+count",
+		"Daily\\s+average\\s+rate",
+		"Total",
+	]);
 	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
@@ -2826,22 +3096,22 @@ function extractNormalizedReservation(email) {
 	]);
 	const bookedAt = parseDate(bookedAtField) || dayjs().format("YYYY-MM-DD");
 
-	const amountText = firstNonEmpty(
-		findField(text, [
-			"Booking amount",
-			"Total booking amount",
-			"Total amount",
-			"Total",
-		]),
-		findFirstMoneyPatternOutsideVccLines(text, [
-			new RegExp(
-				`\\b((?:${MONEY_CURRENCY_CODES.join("|")})\\s*[0-9][0-9,.]*)`,
-				"i"
-			),
-			/(\$\s*[0-9][0-9,.]*)/,
-		])
-	);
-	const parsedMoney = agodaFields.amount
+	const amountText = findField(text, [
+		"Total booking amount",
+		"Booking amount",
+		"Total guest payment",
+		"Reservation total",
+		"Total amount",
+		"Grand total",
+		"Guest total",
+		"Order total",
+		"Amount paid",
+	]);
+	const explicitAggregateMoney = parseMoney(amountText);
+	const hasExplicitAggregateMoney = explicitAggregateMoney.amount > 0;
+	const parsedMoney = hasExplicitAggregateMoney
+		? explicitAggregateMoney
+		: agodaFields.amount
 		? { amount: agodaFields.amount, currency: agodaFields.currency || "SAR" }
 		: airbnbFields.amount
 		? { amount: airbnbFields.amount, currency: airbnbFields.currency || "SAR" }
@@ -2849,7 +3119,9 @@ function extractNormalizedReservation(email) {
 	const amountCurrency =
 		parsedMoney.currency ||
 		(/\$\s*\d/.test(amountText) ? "USD" : process.env.OTA_DEFAULT_CURRENCY || "SAR");
-	const conversion = agodaFields.amount
+	const conversion = hasExplicitAggregateMoney
+		? getSarConversionMeta(parsedMoney.amount, amountCurrency)
+		: agodaFields.amount
 		? {
 				totalAmountSar: agodaFields.totalAmountSar || 0,
 				exchangeRateToSar: agodaFields.exchangeRateToSar || 0,
@@ -2915,8 +3187,13 @@ function extractNormalizedReservation(email) {
 		guestEmailField,
 		guestEmailPattern
 	));
+	const detectedEmailIsAsset = /\.(?:png|jpe?g|gif|webp|svg|ico)$/i.test(
+		detectedGuestEmail
+	);
 	const guestEmail =
-		provider === "airbnb" && /@(?:[\w.-]+\.)?airbnb\.com$/i.test(detectedGuestEmail)
+		detectedEmailIsAsset
+			? ""
+			: provider === "airbnb" && /@(?:[\w.-]+\.)?airbnb\.com$/i.test(detectedGuestEmail)
 			? ""
 			: /^(?:no[-_.]?reply|noreply|do[-_.]?not[-_.]?reply)@/i.test(
 					detectedGuestEmail
@@ -2936,15 +3213,22 @@ function extractNormalizedReservation(email) {
 		/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i,
 	]);
 	const hotelRunnerInlineGuest = extractHotelRunnerInlineGuestFields(text);
-	const guestName = firstNonEmpty(
+	const guestName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.guestName,
 		agodaFields.guestName,
 		hotelRunnerInlineGuest.guestName,
 		extractProviderGuestName(text),
 		guestNameField,
 		guestNamePattern
-	);
-	const nationality = firstNonEmpty(
+	), [
+		"Country(?:\\s+of\\s+Residence)?",
+		"Order\\s+Total",
+		"Check[-\\s]?in",
+		"Check[-\\s]?out",
+		"Room\\s+Type",
+		"Booked\\s+Date",
+	]);
+	const nationality = trimFlattenedFieldTail(firstNonEmpty(
 		hotelRunnerInlineGuest.nationality,
 		agodaFields.nationality,
 		findField(text, [
@@ -2954,7 +3238,13 @@ function extractNormalizedReservation(email) {
 			"Guest country",
 			"Residence country",
 		])
-	);
+	), [
+		"Order\\s+Total",
+		"Check[-\\s]?in",
+		"Check[-\\s]?out",
+		"Room\\s+Type",
+		"Booked\\s+Date",
+	]);
 	const guestNotes = firstNonEmpty(airbnbFields.guestNotes, findGuestNoteField(text));
 	const guestPhone = firstNonEmpty(
 		agodaFields.guestPhone,
@@ -3043,10 +3333,22 @@ function extractNormalizedReservation(email) {
 	const providerTotalPayoutSar = round2(
 		agodaFields.totalPayoutSar || airbnbFields.totalPayoutSar || vccPayoutSar || 0
 	);
-	const providerPaymentSummary = Object.keys(agodaFields.paymentSummary || {}).length
+	const providerPaymentSummaryRaw = Object.keys(agodaFields.paymentSummary || {}).length
 		? agodaFields.paymentSummary
 		: airbnbFields.paymentSummary || {};
-	const paymentSummary = Object.keys(providerPaymentSummary).length
+	const providerPaymentSummary = hasExplicitAggregateMoney
+		? {
+				...providerPaymentSummaryRaw,
+				sourceCurrency: amountCurrency,
+				sourceTotalGuestPaymentAmount: parsedMoney.amount || 0,
+				totalGuestPaymentAmount: conversion.totalAmountSar || 0,
+				currency: "SAR",
+				exchangeRateToSar: conversion.exchangeRateToSar || 0,
+				exchangeRateSource: conversion.exchangeRateSource || "",
+				amountConvertedAt: conversion.convertedAt || "",
+		  }
+		: providerPaymentSummaryRaw;
+	const basePaymentSummary = Object.keys(providerPaymentSummary).length
 		? providerPaymentSummary
 		: vccPayoutSar > 0
 		? {
@@ -3061,6 +3363,22 @@ function extractNormalizedReservation(email) {
 				amountConvertedAt: conversion.convertedAt || "",
 		  }
 		: {};
+	const paymentSummary =
+		paymentCollectionModel === "virtual_card"
+			? {
+					...basePaymentSummary,
+					sourceTotalPayoutAmount:
+						vccAmountDetails.amountToCharge ||
+						basePaymentSummary.sourceTotalPayoutAmount ||
+						0,
+					totalPayoutAmount:
+						vccPayoutSar || basePaymentSummary.totalPayoutAmount || 0,
+					virtualCardCurrentBalance:
+						parseMoney(currentCardBalanceField).amount || 0,
+					virtualCardFutureBalance:
+						parseMoney(futureCardBalanceField).amount || 0,
+			  }
+			: basePaymentSummary;
 
 	const intent = detectReservationIntent({
 		subject: email.subject,
@@ -3108,8 +3426,14 @@ function extractNormalizedReservation(email) {
 		amount: parsedMoney.amount,
 		currency: amountCurrency,
 		totalAmountSar: conversion.totalAmountSar,
-		sourceAmount: agodaFields.sourceAmount || 0,
-		sourceCurrency: agodaFields.sourceCurrency || "",
+		sourceAmount:
+			hasExplicitAggregateMoney
+				? parsedMoney.amount
+				: agodaFields.sourceAmount || airbnbFields.sourceAmount || 0,
+		sourceCurrency:
+			hasExplicitAggregateMoney
+				? amountCurrency
+				: agodaFields.sourceCurrency || airbnbFields.sourceCurrency || "",
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
@@ -3137,6 +3461,28 @@ function extractNormalizedReservation(email) {
 			paymentInstructionField || paymentCollectionModel,
 			500
 		),
+		requiresManualReview:
+			hotelRunnerRoomBlocks.length > 1 ||
+			Number(agodaFields.referenceSellRateOccurrences || 0) > 1 ||
+			agodaFields.multiRoomEvidence === true,
+		manualReviewReasons:
+			[
+				...(hotelRunnerRoomBlocks.length > 1
+					? [
+						`HotelRunner email contains ${hotelRunnerRoomBlocks.length} room blocks in one message representation; automatic partial-room creation is disabled.`,
+					  ]
+					: []),
+				...(Number(agodaFields.referenceSellRateOccurrences || 0) > 1
+					? [
+							"Agoda email contains multiple reference sell-rate rows; automatic aggregation is disabled and the booking requires pricing review.",
+					  ]
+					: []),
+				...(agodaFields.multiRoomEvidence === true
+					? [
+							"Agoda email contains multiple rooms; automatic partial-room creation is disabled and the booking requires room review.",
+					  ]
+					: []),
+			],
 		sourcePresence: {
 			reservationId: !!reservationId,
 			confirmationNumber: !!reservationId,
@@ -3265,6 +3611,25 @@ function mapRoomType(roomNameRaw) {
 	return null;
 }
 
+function explicitRoomCapacity(value = "") {
+	const s = normalizeIntlComparable(value);
+	if (!s) return 0;
+	const numeric = s.match(
+		/(?:^|\s)([1-9]\d?)\s*(?:beds?|persons?|people|guests?|occupancy|افراد|أفراد|اشخاص|أشخاص|اسرة|أسرة)(?=$|\s)/i
+	);
+	if (numeric) return Number(numeric[1]);
+	const capacityPatterns = [
+		[1, /\b(single|one[ -]?bed)\b|فردي|فردية|شخص واحد/i],
+		[2, /\b(double|twin|two[ -]?bed)\b|ثنائي|ثنائية|شخصين|فردين/i],
+		[3, /\b(triple|three[ -]?bed)\b|ثلاثي|ثلاثية|ثلاثة افراد/i],
+		[4, /\b(quad(?:ruple)?|four[ -]?bed)\b|رباعي|رباعية|اربعة افراد|أربعة أفراد/i],
+		[5, /\b(quint(?:uple)?|five[ -]?bed)\b|خماسي|خماسية|خمسة افراد|خمسة أفراد/i],
+		[6, /\b(sextuple|six[ -]?bed)\b|سداسي|سداسية|ستة افراد|ستة أفراد/i],
+		[7, /\b(septuple|seven[ -]?bed)\b|سباعي|سباعية|سبعة افراد|سبعة أفراد/i],
+	];
+	return capacityPatterns.find(([, pattern]) => pattern.test(s))?.[0] || 0;
+}
+
 function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 	const activePenalty = room.activeRoom === false ? 0.08 : 0;
 	const labels = [
@@ -3319,7 +3684,7 @@ function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 }
 
 function roomCapacityFromLabels(room = {}) {
-	const label = normalizeComparable(
+	const rawLabel =
 		[
 			room.displayName,
 			room.displayName_OtherLanguage,
@@ -3327,14 +3692,15 @@ function roomCapacityFromLabels(room = {}) {
 			room.roomType,
 		]
 			.filter(Boolean)
-			.join(" ")
-	);
+			.join(" ");
+	const explicitCapacity = explicitRoomCapacity(rawLabel);
+	if (explicitCapacity) return explicitCapacity;
+	const label = normalizeComparable(rawLabel);
 	if (/\b(single|individual)\b/.test(label)) return 1;
 	if (/\b(double|twin|king|queen)\b/.test(label)) return 2;
 	if (/\btriple\b/.test(label)) return 3;
 	if (/\bquad(?:ruple)?\b/.test(label)) return 4;
 	if (/\bquint(?:uple)?\b|\bfive\b|\b5\b/.test(label)) return 5;
-	if (/\bfamily\b/.test(label)) return 5;
 	return 0;
 }
 
@@ -3404,9 +3770,10 @@ function buildSemanticOtaRoomFallback(normalized = {}, mappedRoomType = "") {
 
 function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 	const rooms = (hotelDetails?.roomCountDetails || []).filter(
-		(room) => room && room.roomType
+		(room) => room && room.roomType && room.activeRoom !== false
 	);
 	const mappedRoomType = mapRoomType(roomName);
+	const sourceCapacity = explicitRoomCapacity(roomName);
 	if (!rooms.length || !normalizeWhitespace(roomName)) {
 		return {
 			roomDetails: null,
@@ -3415,7 +3782,39 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		};
 	}
 
-	const candidates = rooms
+	const capacityMatchedRooms = sourceCapacity
+		? rooms.filter((room) => roomCapacityFromLabels(room) === sourceCapacity)
+		: rooms;
+	if (sourceCapacity && !capacityMatchedRooms.length) {
+		return {
+			roomDetails: null,
+			score: 0,
+			mappedRoomType,
+			sourceCapacity,
+			warnings: [
+				`Room "${roomName}" requires capacity ${sourceCapacity}, but no active PMS room has that configured capacity.`,
+			],
+		};
+	}
+
+	if (sourceCapacity && capacityMatchedRooms.length === 1) {
+		return {
+			roomDetails: capacityMatchedRooms[0],
+			score: 0.98,
+			displayScore: scoreRoomCandidate(
+				capacityMatchedRooms[0],
+				roomName,
+				mappedRoomType
+			).displayScore,
+			matchType: "explicit_capacity",
+			threshold: 0.75,
+			mappedRoomType,
+			sourceCapacity,
+			warnings: [],
+		};
+	}
+
+	const candidates = capacityMatchedRooms
 		.map((room, index) => ({
 			room,
 			index,
@@ -3437,20 +3836,6 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		});
 
 	if (!candidates.length) {
-		const occupancyMatch = resolveRoomByOccupancy(rooms, options.totalGuests);
-		if (occupancyMatch) {
-			return {
-				roomDetails: occupancyMatch.room,
-				score: 0.7,
-				displayScore: 0,
-				matchType: "guest_count_fallback",
-				threshold: 0.75,
-				mappedRoomType,
-				warnings: [
-					`Room "${roomName}" was matched by OTA guest count (${options.totalGuests}) to "${occupancyMatch.room.displayName || occupancyMatch.room.roomType}".`,
-				],
-			};
-		}
 		const semanticFallback = buildSemanticOtaRoomFallback(
 			options.normalized,
 			mappedRoomType
@@ -3467,19 +3852,39 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 
 	const [best, second] = candidates;
 	const warnings = [];
-	if (best.matchType === "room_type" && best.displayScore < 0.35) {
-		warnings.push(
-			`Room "${roomName}" was matched by room type to "${best.room.displayName || best.room.roomType}".`
-		);
-	}
 	if (
 		second &&
-		best.room.roomType === second.room.roomType &&
-		Math.abs(best.score - second.score) <= 0.03
+		Math.abs(best.score - second.score) <= 0.05
 	) {
-		warnings.push(
-			`Multiple ${best.room.roomType} room displays were close matches; selected "${best.room.displayName || best.room.roomType}".`
-		);
+		return {
+			roomDetails: null,
+			score: best.score,
+			displayScore: best.displayScore,
+			matchType: "ambiguous",
+			threshold: 0.75,
+			mappedRoomType,
+			sourceCapacity,
+			warnings: [
+				`Multiple active PMS rooms are equally plausible for "${roomName}"; manual room mapping is required.`,
+			],
+		};
+	}
+	if (
+		best.matchType === "room_type" ||
+		(best.matchType !== "exact_display" && best.displayScore < 0.62)
+	) {
+		return {
+			roomDetails: null,
+			score: best.score,
+			displayScore: best.displayScore,
+			matchType: "insufficient_display_evidence",
+			threshold: 0.75,
+			mappedRoomType,
+			sourceCapacity,
+			warnings: [
+				`Room "${roomName}" only matched a broad PMS room category; manual room mapping is required.`,
+			],
+		};
 	}
 
 	return {
@@ -3489,6 +3894,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		matchType: best.matchType,
 		threshold: 0.75,
 		mappedRoomType,
+		sourceCapacity,
 		warnings,
 	};
 }
@@ -3512,7 +3918,7 @@ function resolveRootPriceForDate(roomDetails, ymd) {
 	return 0;
 }
 
-function buildPickedRoomsType({ roomDetails, normalized }) {
+function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	const dateRange = generateDateRange(normalized.checkinDate, normalized.checkoutDate);
 	const daysOfResidence = dateRange.length;
 	if (daysOfResidence <= 0) {
@@ -3621,6 +4027,10 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 		return {
 			room_type: roomDetails.roomType,
 			displayName: roomDetails.displayName,
+			hotelRoomConfigId: roomDetails._id || null,
+			sourceRoomName: normalized.roomName || "",
+			otaRoomMatchType: roomMatch.matchType || "",
+			otaRoomMatchScore: Number(roomMatch.score || 0),
 			chosenPrice: round2(roomTotal / daysOfResidence),
 			count: 1,
 			pricingByDay,
@@ -3682,7 +4092,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 		);
 	}
 
-	const pricing = buildPickedRoomsType({ roomDetails, normalized });
+	const pricing = buildPickedRoomsType({ roomDetails, normalized, roomMatch });
 	if (!pricing.ok) return pricing;
 
 	const isCancelled = normalized.eventType === "cancelled";
@@ -3868,11 +4278,14 @@ function buildReservationDocument(normalized, hotelDetails) {
 				platformConfirmationNumber: normalized.confirmationNumber,
 				otaAutomationPipeline: automationPipeline,
 				otaProvider: normalized.provider,
+				otaSourceAuthority: otaSourceAuthority(normalized),
 				otaHotelName: normalized.hotelName || "",
 				otaRoomName: normalized.roomName || "",
 				otaGuestNotes: guestComment,
 				otaNationality: normalized.nationality || "",
 				otaMatchedRoomName: roomDetails.displayName || "",
+				otaHotelRoomConfigId: roomDetails._id || null,
+				otaSourceRoomName: normalized.roomName || "",
 				otaRoomMatchScore: roomMatch.score || 0,
 				otaRoomMatchType: roomMatch.matchType || "",
 				otaCurrency: normalized.currency || "",
@@ -3994,7 +4407,50 @@ function hasSourceField(normalized = {}, field) {
 }
 
 function hasKnownProvider(normalized = {}) {
-	return !!normalized.provider && normalized.provider !== "unknown";
+	const provider = normalizeComparable(normalized.provider || "").replace(/\s+/g, "");
+	return (
+		provider !== "" &&
+		provider !== "unknown" &&
+		provider !== "ota" &&
+		Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider)
+	);
+}
+
+function otaSourceAuthority(normalized = {}) {
+	const rawFrom = normalizeWhitespace(normalized.source?.from || "").toLowerCase();
+	const comparableFrom = normalizeComparable(rawFrom);
+	const provider = normalizeComparable(normalized.provider || "");
+	if (comparableFrom === "expedia sync") return 4;
+	const isSenderDomain = (domain) => {
+		const domainPattern = escapeRegExp(domain).replace(/\\\./g, "\\.");
+		return new RegExp(
+			`@(?:[a-z0-9-]+\\.)*${domainPattern}(?:[>\\s]|$)`,
+			"i"
+		).test(rawFrom);
+	};
+	if (isSenderDomain("hotelrunner.com")) return 1;
+	const directProviderDomains = {
+		agoda: ["agoda.com"],
+		airbnb: ["airbnb.com"],
+		expedia: ["expedia.com", "expediagroup.com"],
+		booking: ["booking.com"],
+		hotels: ["hotels.com"],
+		trip: ["trip.com"],
+	};
+	if (
+		(directProviderDomains[provider] || []).some((domain) =>
+			isSenderDomain(domain)
+		)
+	) {
+		return 3;
+	}
+	return hasKnownProvider(normalized) ? 2 : 0;
+}
+
+function isAuthoritativeSourceUpgrade(incomingAuthority, existingAuthority) {
+	const incoming = Number(incomingAuthority || 0);
+	const existing = Number(existingAuthority || 0);
+	return incoming >= 3 && incoming > existing;
 }
 
 function hasIncomingAmount(normalized = {}) {
@@ -4047,20 +4503,42 @@ function buildExistingReservationUpdateSet({
 	const statusOnlyUpdate =
 		normalized.intent === "reservation_status" ||
 		["cancelled", "no_show", "status"].includes(normalized.eventType);
+	const appliesAuthoritativeRefresh =
+		normalized.authoritativeExistingRefresh === true && !!document;
 	const normalizedGuestComment = cleanOtaGuestNote(
 		normalized.comment || normalized.guestNotes || ""
 	);
 
 	if (document) {
 		const docSet = compactUpdate(document);
-		if (incomingAmount) {
+		if (appliesAuthoritativeRefresh) {
+			Object.keys(docSet)
+				.filter((path) => path.startsWith("customer_details."))
+				.forEach((path) => delete docSet[path]);
+			if (!hasSourceField(normalized, "bookedAt")) delete docSet.booked_at;
+			if (!hasSourceField(normalized, "adults")) delete docSet.adults;
+			if (!hasSourceField(normalized, "children")) delete docSet.children;
+			if (!hasSourceField(normalized, "totalGuests")) {
+				delete docSet.total_guests;
+			}
+			Object.assign(set, docSet);
+			set.adminPricing = document.adminPricing;
+			set.ota_financial_summary = document.ota_financial_summary;
+			set.adminPricingVisibility = document.adminPricingVisibility;
+			set["otaPlatformReview.proposedInbound"] = null;
+			set["supplierData.otaSourceAuthority"] = otaSourceAuthority(normalized);
 			addExistingUpdatePreservedWarning(
 				warnings,
-				"Existing reservation pricing and finance fields were preserved; OTA amount was stored in supplier audit metadata only."
+				"Pending reservation facts and pricing were refreshed from a higher-authority direct OTA confirmation."
+			);
+		} else if (incomingAmount) {
+			addExistingUpdatePreservedWarning(
+				warnings,
+				"Existing reservation pricing and finance fields were preserved; incoming OTA pricing was staged for review only."
 			);
 		}
 
-		if (hasSourceField(normalized, "roomName")) {
+		if (appliesAuthoritativeRefresh && hasSourceField(normalized, "roomName")) {
 			setIfOtaValue(
 				set,
 				"supplierData.otaMatchedRoomName",
@@ -4077,7 +4555,10 @@ function buildExistingReservationUpdateSet({
 				document.supplierData?.otaRoomMatchType
 			);
 		}
-		if (docSet.hotelId || docSet.belongsTo) {
+		if (
+			!appliesAuthoritativeRefresh &&
+			(docSet.hotelId || docSet.belongsTo)
+		) {
 			addExistingUpdatePreservedWarning(
 				warnings,
 				"Existing reservation hotel assignment was preserved; OTA hotel resolution was kept for audit only."
@@ -4096,11 +4577,23 @@ function buildExistingReservationUpdateSet({
 			setIfOtaValue(set, "customer_details.booking_source", providerLabel);
 		}
 	}
-	if (!statusOnlyUpdate) {
-		setIfOtaValue(set, "customer_details.name", normalized.guestName);
-		setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
-		setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
-		setIfOtaValue(set, "customer_details.nationality", normalized.nationality);
+	if (!statusOnlyUpdate && appliesAuthoritativeRefresh) {
+		if (hasSourceField(normalized, "guestName")) {
+			setIfOtaValue(set, "customer_details.name", normalized.guestName);
+		}
+		if (hasSourceField(normalized, "guestEmail")) {
+			setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
+		}
+		if (hasSourceField(normalized, "guestPhone")) {
+			setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
+		}
+		if (hasSourceField(normalized, "nationality")) {
+			setIfOtaValue(
+				set,
+				"customer_details.nationality",
+				normalized.nationality
+			);
+		}
 		if (normalizedGuestComment) {
 			if (!normalizeWhitespace(existing?.comment || "")) {
 				setIfOtaValue(set, "comment", normalizedGuestComment);
@@ -4116,6 +4609,75 @@ function buildExistingReservationUpdateSet({
 		if (hasSourceField(normalized, "bookedAt")) {
 			setIfOtaValue(set, "booked_at", normalized.bookedAt);
 		}
+	} else if (!statusOnlyUpdate) {
+		set["otaPlatformReview.proposedInbound"] = {
+			guest: {
+				name: hasSourceField(normalized, "guestName")
+					? normalized.guestName || ""
+					: "",
+				email: hasSourceField(normalized, "guestEmail")
+					? normalized.guestEmail || ""
+					: "",
+				phone: hasSourceField(normalized, "guestPhone")
+					? normalized.guestPhone || ""
+					: "",
+				nationality: hasSourceField(normalized, "nationality")
+					? normalized.nationality || ""
+					: "",
+			},
+			stay: {
+				checkinDate: hasSourceField(normalized, "checkinDate")
+					? normalized.checkinDate || ""
+					: "",
+				checkoutDate: hasSourceField(normalized, "checkoutDate")
+					? normalized.checkoutDate || ""
+					: "",
+				adults: hasSourceField(normalized, "adults")
+					? Number(normalized.adults || 0)
+					: null,
+				children: hasSourceField(normalized, "children")
+					? Number(normalized.children || 0)
+					: null,
+				totalGuests: hasSourceField(normalized, "totalGuests")
+					? Number(normalized.totalGuests || 0)
+					: null,
+			},
+			room: {
+				sourceName: hasSourceField(normalized, "roomName")
+					? normalized.roomName || ""
+					: "",
+				roomCount: hasSourceField(normalized, "roomCount")
+					? Number(normalized.roomCount || 0)
+					: null,
+			},
+			pricing: incomingAmount
+				? {
+						guestTotalSar: Number(normalized.totalAmountSar || 0),
+						sourceAmount: Number(
+							normalized.sourceAmount || normalized.amount || 0
+						),
+						sourceCurrency:
+							normalized.sourceCurrency || normalized.currency || "",
+						totalPayoutSar: Number(
+							normalized.totalPayoutSar ||
+								normalized.netAfterExpensesTotal ||
+								0
+						),
+						exchangeRateToSar: Number(normalized.exchangeRateToSar || 0),
+						exchangeRateSource: normalized.exchangeRateSource || "",
+						paymentCollectionModel:
+							normalized.paymentCollectionModel || "",
+						paymentSummary: safeOtaPaymentSummary(normalized.paymentSummary),
+				  }
+				: null,
+			inboundEmailId: normalized.inboundEmailId || "",
+			provider: normalized.provider || "",
+			receivedAt: new Date(),
+		};
+		addExistingUpdatePreservedWarning(
+			warnings,
+			"Incoming OTA changes were staged for review; canonical guest, stay, room, and pricing fields were not overwritten automatically."
+		);
 	}
 
 	const checkinForDays = normalized.checkinDate || existing.checkin_date;
@@ -4123,6 +4685,7 @@ function buildExistingReservationUpdateSet({
 	const daysOfResidence = calculateDaysOfResidence(checkinForDays, checkoutForDays);
 	if (
 		!statusOnlyUpdate &&
+		appliesAuthoritativeRefresh &&
 		daysOfResidence > 0 &&
 		(hasSourceField(normalized, "checkinDate") ||
 			hasSourceField(normalized, "checkoutDate"))
@@ -4132,6 +4695,7 @@ function buildExistingReservationUpdateSet({
 
 	if (
 		!statusOnlyUpdate &&
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "adults") &&
 		Number(normalized.adults || 0) > 0
 	) {
@@ -4139,6 +4703,7 @@ function buildExistingReservationUpdateSet({
 	}
 	if (
 		!statusOnlyUpdate &&
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "children") &&
 		Number(normalized.children || 0) >= 0
 	) {
@@ -4146,19 +4711,21 @@ function buildExistingReservationUpdateSet({
 	}
 	if (
 		!statusOnlyUpdate &&
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "totalGuests") &&
 		Number(normalized.totalGuests || 0) > 0
 	) {
 		set.total_guests = Number(normalized.totalGuests);
 	}
 	if (
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "roomCount") &&
 		Number(normalized.roomCount || 0) > 0
 	) {
 		set["supplierData.otaRoomCount"] = Number(normalized.roomCount);
 	}
 
-	if (incomingAmount) {
+	if (incomingAmount && !appliesAuthoritativeRefresh) {
 		addExistingUpdatePreservedWarning(
 			warnings,
 			"Existing reservation total, room pricing, commission, payment, and financial cycle were not overwritten by OTA automation."
@@ -4167,13 +4734,30 @@ function buildExistingReservationUpdateSet({
 
 	if (incomingStatus) {
 		set.reservation_status = incomingStatus;
-		if (incomingStatus === "cancelled") set.state = "cancelled";
+		if (statusOnlyUpdate) set.state = incomingStatus;
 		if (["cancelled", "no_show"].includes(incomingStatus)) {
 			set.cancel_reason = `${normalized.providerLabel || "OTA"} status email`;
+		}
+		if (["cancelled", "no_show", "inhouse", "checked_out"].includes(incomingStatus)) {
+			set["otaPlatformReview.status"] = "closed";
+			set["otaPlatformReview.closedAt"] = new Date();
+			set["otaPlatformReview.closedReason"] = `ota_status_${incomingStatus}`;
+			set["otaPlatformReview.lastUpdatedAt"] = new Date();
 		}
 	}
 
 	if (confirmationNumber) {
+		const incomingOtaIdentityKey = buildOtaIdentityKey(
+			normalized.provider,
+			confirmationNumber
+		);
+		const existingOtaIdentityKey = normalizeWhitespace(existing?.otaIdentityKey || "");
+		if (
+			incomingOtaIdentityKey &&
+			(!existingOtaIdentityKey || !existingOtaIdentityKey.includes(":"))
+		) {
+			set.otaIdentityKey = incomingOtaIdentityKey;
+		}
 		setIfMissingOrSameConfirmation(
 			set,
 			"customer_details.confirmation_number2",
@@ -4205,34 +4789,40 @@ function buildExistingReservationUpdateSet({
 	if (hasKnownProvider(normalized)) {
 		setIfOtaValue(set, "supplierData.otaProvider", normalized.provider);
 	}
-	if (hasSourceField(normalized, "hotelName")) {
+	if (appliesAuthoritativeRefresh && hasSourceField(normalized, "hotelName")) {
 		setIfOtaValue(set, "supplierData.otaHotelName", normalized.hotelName);
 	}
-	if (hasSourceField(normalized, "roomName")) {
+	if (appliesAuthoritativeRefresh && hasSourceField(normalized, "roomName")) {
 		setIfOtaValue(set, "supplierData.otaRoomName", normalized.roomName);
 	}
-	if (hasSourceField(normalized, "checkinDate")) {
+	if (appliesAuthoritativeRefresh && hasSourceField(normalized, "checkinDate")) {
 		setIfOtaValue(set, "supplierData.otaCheckinDate", normalized.checkinDate);
 	}
-	if (hasSourceField(normalized, "checkoutDate")) {
+	if (appliesAuthoritativeRefresh && hasSourceField(normalized, "checkoutDate")) {
 		setIfOtaValue(set, "supplierData.otaCheckoutDate", normalized.checkoutDate);
 	}
-	if (hasSourceField(normalized, "adults") && Number(normalized.adults || 0) > 0) {
+	if (
+		appliesAuthoritativeRefresh &&
+		hasSourceField(normalized, "adults") &&
+		Number(normalized.adults || 0) > 0
+	) {
 		set["supplierData.otaAdults"] = Number(normalized.adults);
 	}
 	if (
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "children") &&
 		Number(normalized.children || 0) >= 0
 	) {
 		set["supplierData.otaChildren"] = Number(normalized.children);
 	}
 	if (
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "totalGuests") &&
 		Number(normalized.totalGuests || 0) > 0
 	) {
 		set["supplierData.otaTotalGuests"] = Number(normalized.totalGuests);
 	}
-	if (incomingAmount) {
+	if (incomingAmount && appliesAuthoritativeRefresh) {
 		const safePaymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
 		const sourceCurrency =
 			normalized.sourceCurrency ||
@@ -4309,6 +4899,7 @@ function buildExistingReservationUpdateSet({
 		);
 	}
 	if (
+		appliesAuthoritativeRefresh &&
 		hasSourceField(normalized, "paymentCollectionModel") &&
 		normalized.paymentCollectionModel !== "unknown"
 	) {
@@ -4318,7 +4909,10 @@ function buildExistingReservationUpdateSet({
 			normalized.paymentCollectionModel
 		);
 	}
-	if (hasSourceField(normalized, "paymentInstructions")) {
+	if (
+		appliesAuthoritativeRefresh &&
+		hasSourceField(normalized, "paymentInstructions")
+	) {
 		setIfOtaValue(
 			set,
 			"supplierData.otaPaymentInstructions",
@@ -4335,12 +4929,7 @@ function buildExistingReservationUpdateSet({
 		setIfOtaValue(set, "supplierData.otaLastEventType", normalized.eventType);
 	}
 
-	const normalizedIncomingStatus = String(
-		incomingStatus || statusToApply || normalized.statusToApply || ""
-	).toLowerCase();
-	const routesThroughPlatformReview =
-		normalized.eventType !== "cancelled" &&
-		!["cancelled", "canceled", "no_show"].includes(normalizedIncomingStatus);
+	const routesThroughPlatformReview = !statusOnlyUpdate;
 	if (routesThroughPlatformReview) {
 		set.state = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
 		set.reservation_status = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
@@ -4372,7 +4961,7 @@ function buildExistingReservationUpdateSet({
 		set["adminPricingVisibility.appliedBy"] = null;
 	}
 
-	applyVccSafeFields(set, normalized);
+	if (appliesAuthoritativeRefresh) applyVccSafeFields(set, normalized);
 	return set;
 }
 
@@ -4391,15 +4980,25 @@ async function applyExistingReservationEmailUpdate({
 		statusToApply,
 		warnings,
 	});
-	await Reservations.updateOne(
-		{ _id: existing._id },
-		{
+	const updateResult = await Reservations.updateOne(
+		buildReservationSnapshotFilter(existing),
+		addReservationVersionBump({
 			$set: set,
 			$push: {
 				reservationAuditLog: buildAuditEntry(normalized, action, warnings),
 			},
-		}
+		}),
 	);
+	const matchedCount = Number(
+		updateResult?.matchedCount ?? updateResult?.n ?? 0,
+	);
+	if (!matchedCount) {
+		const error = new Error(
+			"The reservation changed while the OTA email was being processed. No inbound update was applied; review the latest reservation state.",
+		);
+		error.code = "OTA_RESERVATION_CONCURRENT_CHANGE";
+		throw error;
+	}
 	return set;
 }
 
@@ -4480,6 +5079,35 @@ function findExactHotelNameMatch(hotels = [], hotelNameCandidates = []) {
 	return matched && ties === 1 ? matched : null;
 }
 
+function findConfidentFuzzyHotelMatch(
+	hotels = [],
+	hotelNameCandidates = [],
+	{ minimumScore = 84, minimumMargin = 10 } = {}
+) {
+	const ranked = (hotels || [])
+		.map((hotel, index) => {
+			const score = [hotel.hotelName, hotel.hotelName_OtherLanguage]
+				.filter(Boolean)
+				.reduce(
+					(best, name) =>
+						Math.max(
+							best,
+							...(hotelNameCandidates || []).map((candidateName) =>
+								Math.round(hotelNameSimilarity(candidateName, name) * 100)
+							)
+						),
+					0
+				);
+			return { hotel, index, score };
+		})
+		.sort((left, right) => right.score - left.score || left.index - right.index);
+	const best = ranked[0];
+	const runnerUp = ranked[1];
+	if (!best || best.score < minimumScore) return null;
+	if (runnerUp && best.score - runnerUp.score < minimumMargin) return null;
+	return best.hotel;
+}
+
 async function loadConfiguredAjyadHotel() {
 	return HotelDetails.findById(configuredAjyadHotelId())
 		.select(OTA_HOTEL_RESOLUTION_SELECT)
@@ -4538,32 +5166,14 @@ async function resolveHotel(normalized, existingReservation = null) {
 		if (ajyadHotel) return ajyadHotel;
 	}
 
-	const scoreHotels = (hotels = []) => {
-		let best = null;
-		let bestScore = 0;
-		for (const hotel of hotels) {
-			const names = [hotel.hotelName, hotel.hotelName_OtherLanguage].filter(Boolean);
-			for (const name of names) {
-				const score = hotelNameCandidates.reduce(
-					(max, candidateName) =>
-						Math.max(max, Math.round(hotelNameSimilarity(candidateName, name) * 100)),
-					0
-				);
-				if (score > bestScore) {
-					best = hotel;
-					bestScore = score;
-				}
-			}
-		}
-		return { best, bestScore };
-	};
-
 	const hotels = await HotelDetails.find({})
 		.select(OTA_HOTEL_RESOLUTION_SELECT)
 		.lean();
-	const { best, bestScore } = scoreHotels(hotels);
-
-	if (bestScore >= 72) return best;
+	const confidentFuzzyHotel = findConfidentFuzzyHotelMatch(
+		hotels,
+		hotelNameCandidates
+	);
+	if (confidentFuzzyHotel) return confidentFuzzyHotel;
 	return findHotelMentionedInSourceText(hotels, normalized);
 }
 
@@ -4719,10 +5329,44 @@ function normalizeStatusToApply(value) {
 
 function requiredNewReservationMissing(normalized = {}) {
 	const missing = [];
-	if (!normalized.confirmationNumber) missing.push("confirmation number");
-	if (!normalized.guestName) missing.push("guest name");
-	if (!normalized.checkinDate) missing.push("check-in date");
-	if (!normalized.checkoutDate) missing.push("check-out date");
+	const deterministicInbound = isOtaInboundEmail(normalized);
+	const requiredValue = (field, value) =>
+		!!value && (!deterministicInbound || hasSourceField(normalized, field));
+	if (!requiredValue("confirmationNumber", normalized.confirmationNumber)) {
+		missing.push("source-backed confirmation number");
+	}
+	if (!requiredValue("guestName", normalized.guestName)) {
+		missing.push("source-backed guest name");
+	}
+	if (!requiredValue("hotelName", normalized.hotelName || normalized.hotelId)) {
+		missing.push("source-backed hotel/property");
+	}
+	if (!requiredValue("roomName", normalized.roomName)) {
+		missing.push("source-backed room type/name");
+	}
+	if (!requiredValue("checkinDate", normalized.checkinDate)) {
+		missing.push("source-backed check-in date");
+	}
+	if (!requiredValue("checkoutDate", normalized.checkoutDate)) {
+		missing.push("source-backed check-out date");
+	}
+	if (!hasIncomingAmount(normalized)) {
+		missing.push("positive source-backed guest total");
+	}
+	const stayNights = calculateDaysOfResidence(
+		normalized.checkinDate,
+		normalized.checkoutDate
+	);
+	if (
+		normalized.checkinDate &&
+		normalized.checkoutDate &&
+		(stayNights <= 0 || stayNights > 366)
+	) {
+		missing.push("plausible stay-date range");
+	}
+	if (normalized.requiresManualReview === true) {
+		missing.push("single unambiguous room block");
+	}
 	return missing;
 }
 
@@ -4925,9 +5569,58 @@ function confirmationLookupValues(value) {
 	return Array.from(new Set([raw, normalized, raw.toUpperCase()].filter(Boolean)));
 }
 
-function buildOtaConfirmationLookup(confirmationNumber) {
+function normalizeOtaIdentityProvider(provider = "") {
+	const normalized = normalizeComparable(provider).replace(/\s+/g, "");
+	return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, normalized) &&
+		normalized !== "ota"
+		? normalized
+		: "";
+}
+
+function buildOtaIdentityKey(provider, confirmationNumber) {
+	const normalizedProvider = normalizeOtaIdentityProvider(provider);
+	const normalizedConfirmation = normalizeConfirmation(confirmationNumber);
+	if (!normalizedProvider || !normalizedConfirmation) return "";
+	return `${normalizedProvider}:${normalizedConfirmation}`;
+}
+
+function otaProviderLookupValues(provider = "") {
+	const normalizedProvider = normalizeOtaIdentityProvider(provider);
+	if (!normalizedProvider) return [];
+	const providerLabel = PROVIDER_LABELS[normalizedProvider] || normalizedProvider;
+	return Array.from(
+		new Set(
+			[
+				normalizedProvider,
+				providerLabel,
+				String(providerLabel).toLowerCase(),
+				String(providerLabel).toUpperCase(),
+			].filter(Boolean)
+		)
+	);
+}
+
+function reservationMatchesOtaProvider(reservation = {}, provider = "") {
+	const expected = new Set(
+		otaProviderLookupValues(provider).map((value) => normalizeComparable(value))
+	);
+	if (!expected.size) return false;
+	return [
+		reservation?.supplierData?.otaProvider,
+		reservation?.otaPlatformReview?.provider,
+		reservation?.supplierData?.supplierName,
+		reservation?.booking_source,
+		reservation?.customer_details?.booking_source,
+	]
+		.filter(Boolean)
+		.some((value) => expected.has(normalizeComparable(value)));
+}
+
+function buildOtaConfirmationLookup(confirmationNumber, provider) {
 	const values = confirmationLookupValues(confirmationNumber);
-	if (!values.length) return null;
+	const providerValues = otaProviderLookupValues(provider);
+	const otaIdentityKey = buildOtaIdentityKey(provider, confirmationNumber);
+	if (!values.length || !providerValues.length || !otaIdentityKey) return null;
 	const allValues = Array.from(
 		new Set(
 			values
@@ -4937,19 +5630,52 @@ function buildOtaConfirmationLookup(confirmationNumber) {
 	);
 	return {
 		$or: [
-			{ otaIdentityKey: { $in: allValues } },
-			{ confirmation_number: { $in: allValues } },
-			{ reservation_id: { $in: allValues } },
-			{ "customer_details.confirmation_number2": { $in: allValues } },
-			{ "supplierData.suppliedBookingNo": { $in: allValues } },
-			{ "supplierData.otaConfirmationNumber": { $in: allValues } },
-			{ "supplierData.platformConfirmationNumber": { $in: allValues } },
+			{ otaIdentityKey },
+			{
+				$and: [
+					{
+						$or: [
+							{ "supplierData.otaProvider": { $in: providerValues } },
+							{ "otaPlatformReview.provider": { $in: providerValues } },
+							{ "supplierData.supplierName": { $in: providerValues } },
+							{ booking_source: { $in: providerValues } },
+							{ "customer_details.booking_source": { $in: providerValues } },
+						],
+					},
+					{
+						$or: [
+							{ otaIdentityKey: { $in: allValues } },
+							{ reservation_id: { $in: allValues } },
+							{
+								"customer_details.confirmation_number2": {
+									$in: allValues,
+								},
+							},
+							{ "supplierData.suppliedBookingNo": { $in: allValues } },
+							{
+								"supplierData.otaConfirmationNumber": {
+									$in: allValues,
+								},
+							},
+							{
+								"supplierData.platformConfirmationNumber": {
+									$in: allValues,
+								},
+							},
+						],
+					},
+				],
+			},
 		],
 	};
 }
 
-async function findReservationByOtaConfirmation(confirmationNumber, projection = "") {
-	const query = buildOtaConfirmationLookup(confirmationNumber);
+async function findReservationByOtaConfirmation(
+	confirmationNumber,
+	provider,
+	projection = ""
+) {
+	const query = buildOtaConfirmationLookup(confirmationNumber, provider);
 	if (!query) return null;
 	let finder = Reservations.findOne(query);
 	if (projection) finder = finder.select(projection);
@@ -4966,11 +5692,25 @@ function valuesMatchConfirmation(storedValue, incomingConfirmation) {
 	return storedValues.some((value) => incomingValues.includes(value));
 }
 
-function detectConfirmationMatchFields(reservation, confirmationNumber) {
-	if (!reservation || !confirmationNumber) return [];
+function detectConfirmationMatchFields(reservation, confirmationNumber, provider) {
+	if (
+		!reservation ||
+		!confirmationNumber ||
+		!normalizeOtaIdentityProvider(provider) ||
+		!reservationMatchesOtaProvider(reservation, provider)
+	) {
+		return [];
+	}
+	const otaIdentityKey = buildOtaIdentityKey(provider, confirmationNumber);
 	const fields = [
-		["otaIdentityKey", reservation.otaIdentityKey],
-		["confirmation_number", reservation.confirmation_number],
+		[
+			"otaIdentityKey",
+			String(reservation.otaIdentityKey || "").includes(":")
+				? String(reservation.otaIdentityKey).toLowerCase() === otaIdentityKey
+					? confirmationNumber
+					: ""
+				: reservation.otaIdentityKey,
+		],
 		["reservation_id", reservation.reservation_id],
 		[
 			"customer_details.confirmation_number2",
@@ -5010,126 +5750,29 @@ async function generateUniquePmsConfirmationNumber(maxAttempts = 25) {
 }
 
 async function createUnmappedOtaReviewReservation({
-	normalized,
-	confirmationNumber,
 	warnings = [],
 	errors = [],
 } = {}) {
-	const existingBeforeCreate = await findReservationByOtaConfirmation(
-		confirmationNumber,
-		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+	// A weak/incomplete email must never claim the booking identity by creating
+	// a placeholder reservation. The inbound-email audit is the review record;
+	// a later authoritative confirmation remains free to create the real stay.
+	const reviewText = [...errors, ...warnings].join(" ");
+	const needsMapping = /\b(hotel|property|room|mapping|assignment)\b/i.test(
+		reviewText
 	);
-	if (existingBeforeCreate) {
-		const matchedBy = detectConfirmationMatchFields(
-			existingBeforeCreate,
-			confirmationNumber
-		);
-		return {
-			status: "duplicate_reservation",
-			warnings,
-			errors: [
-				...errors,
-				"Existing reservation matched during pre-create duplicate check; no unmapped OTA reservation was created.",
-			],
-			reservationId: existingBeforeCreate._id,
-			hotelId: existingBeforeCreate.hotelId,
-			pmsConfirmationNumber: existingBeforeCreate.confirmation_number,
-			matchedReservationBy: matchedBy,
-		};
-	}
-
-	const missingHotelWarning =
-		"Hotel was not resolved from inbound OTA email; saved to OTA review queue for manual hotel assignment.";
-	if (!warnings.includes(missingHotelWarning)) warnings.push(missingHotelWarning);
-
-	const document = buildUnmappedOtaReviewReservationDocument({
-		...normalized,
-		confirmationNumber,
-	});
-	// New OTA writes use this dedicated key so concurrent inserts are rejected
-	// atomically without forcing a risky backfill of legacy reservations.
-	document.otaIdentityKey = confirmationNumber;
-	document.reservationAuditLog = [
-		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
-	];
-	applyVccSafeFieldsToDocument(document, normalized);
-	document.confirmation_number = await generateUniquePmsConfirmationNumber();
-	document.customer_details = {
-		...(document.customer_details || {}),
-		confirmation_number2: confirmationNumber,
-	};
-	document.supplierData = {
-		...(document.supplierData || {}),
-		suppliedBookingNo: confirmationNumber,
-		otaConfirmationNumber: confirmationNumber,
-		platformConfirmationNumber: confirmationNumber,
-		pmsConfirmationNumber: document.confirmation_number,
-		otaCreatedFromEmail: normalized.source?.from !== "expedia-sync",
-		otaCreatedFromSync: normalized.source?.from === "expedia-sync",
-		otaInboundEmailId: normalized.inboundEmailId || "",
-		otaCreatedAt: new Date(),
-	};
-
-	let created;
-	for (let createAttempt = 0; createAttempt < 2; createAttempt += 1) {
-		try {
-			logReconcile("create_unmapped.start", {
-				platformConfirmationNumber: confirmationNumber,
-				pmsConfirmationNumber: document.confirmation_number,
-				provider: normalized.provider || "",
-				hotelName: normalized.hotelName || "",
-			});
-			created = await Reservations.create(document);
-			break;
-		} catch (error) {
-			if (error?.code === 11000) {
-				const duplicate = await findReservationByOtaConfirmation(
-					confirmationNumber,
-					"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
-				);
-				if (duplicate) {
-					return {
-						status: "duplicate_reservation",
-						warnings,
-						errors: [
-							...errors,
-							"Existing reservation matched during duplicate-key recovery; no unmapped OTA reservation was created.",
-						],
-						reservationId: duplicate._id,
-						hotelId: duplicate.hotelId,
-						pmsConfirmationNumber: duplicate.confirmation_number,
-						matchedReservationBy: detectConfirmationMatchFields(
-							duplicate,
-							confirmationNumber
-						),
-					};
-				}
-				if (createAttempt === 0) {
-					document.confirmation_number = await generateUniquePmsConfirmationNumber();
-					document.supplierData.pmsConfirmationNumber = document.confirmation_number;
-					continue;
-				}
-			}
-			throw error;
-		}
-	}
-
-	logReconcile("create_unmapped.done", {
-		platformConfirmationNumber: confirmationNumber,
-		pmsConfirmationNumber: created.confirmation_number,
-		reservationId: String(created._id),
-	});
 	return {
-		status: "created",
-		actionTaken: "created_unmapped_ota_review",
+		status: needsMapping ? "needs_mapping" : "needs_review",
+		actionTaken: "skipped",
+		skipReason: needsMapping
+			? "ota_mapping_required_no_reservation_created"
+			: "ota_manual_review_no_reservation_created",
 		automationComment:
-			"OTA reservation was saved to the review queue without a hotel assignment; assign a hotel before release.",
+			"No reservation was created from incomplete or ambiguous OTA data; the inbound audit remains available for manual review.",
 		warnings,
 		errors,
-		reservationId: created._id,
+		reservationId: null,
 		hotelId: null,
-		pmsConfirmationNumber: created.confirmation_number,
-		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
+		pmsConfirmationNumber: "",
 		matchedReservationBy: [],
 	};
 }
@@ -5168,6 +5811,58 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		logReconcile("not_reservation", { confirmationNumber });
 		return { status: "not_reservation", warnings, errors };
 	}
+	if (intent === "unknown") {
+		logReconcile("needs_review.unknown_intent", { confirmationNumber });
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "unknown_ota_intent_no_mutation",
+			automationComment:
+				"The email intent was not deterministically established; no reservation fields were changed.",
+			warnings,
+			errors: [...errors, "Could not safely determine the OTA reservation intent."],
+		};
+	}
+	if (normalized.requiresManualReview === true) {
+		const manualReasons = Array.isArray(normalized.manualReviewReasons)
+			? normalized.manualReviewReasons
+			: [];
+		logReconcile("needs_review.explicit_parser_guard", {
+			confirmationNumber,
+			reasons: manualReasons,
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "ota_parser_requires_manual_review",
+			automationComment:
+				manualReasons[0] || "The OTA payload is not safe for automatic mutation.",
+			warnings: [...warnings, ...manualReasons],
+			errors,
+		};
+	}
+	if (
+		isOtaInboundEmail(normalized) &&
+		confirmationNumber &&
+		!hasSourceField(normalized, "confirmationNumber")
+	) {
+		logReconcile("needs_review.ai_only_confirmation", {
+			intent,
+			eventType: normalized.eventType,
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "confirmation_not_source_backed",
+			automationComment:
+				"The confirmation number was not deterministically extracted from the email; no reservation lookup or mutation was attempted.",
+			warnings,
+			errors: [
+				...errors,
+				"Reservation confirmation number is not source-backed.",
+			],
+		};
+	}
 
 	if (!confirmationNumber) {
 		logReconcile("needs_review.missing_confirmation", {
@@ -5191,9 +5886,32 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		});
 	}
 
-	const existing = await findReservationByOtaConfirmation(confirmationNumber);
+	if (!hasKnownProvider(normalized)) {
+		logReconcile("needs_review.unknown_provider", { confirmationNumber });
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "unknown_ota_provider_no_mutation",
+			automationComment:
+				"The OTA provider was not deterministically established; no reservation lookup or mutation was attempted.",
+			warnings,
+			errors: [
+				...errors,
+				"Could not safely determine the OTA provider identity namespace.",
+			],
+		};
+	}
+
+	const existing = await findReservationByOtaConfirmation(
+		confirmationNumber,
+		normalized.provider
+	);
 	const matchedReservationBy = existing
-		? detectConfirmationMatchFields(existing, confirmationNumber)
+		? detectConfirmationMatchFields(
+				existing,
+				confirmationNumber,
+				normalized.provider
+		  )
 		: [];
 	logReconcile("existing.checked", {
 		platformConfirmationNumber: confirmationNumber,
@@ -5205,26 +5923,62 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 	});
 
 	if (existing && intent === "new_reservation" && !isStatusIntent && !isUpdateIntent) {
-		logReconcile("duplicate_reservation.existing_new_booking", {
+		const incomingAuthority = otaSourceAuthority(normalized);
+		const existingAuthority = Number(
+			existing?.supplierData?.otaSourceAuthority || 0
+		);
+		const existingPendingReview =
+			existing?.otaPlatformReview?.status === "pending" ||
+			[
+				existing?.state,
+				existing?.reservation_status,
+			].some(
+				(value) =>
+					normalizeComparable(value) ===
+					normalizeComparable(OTA_PLATFORM_REVIEW_RESERVATION_STATUS)
+			);
+		const authorityUpgrade = isAuthoritativeSourceUpgrade(
+			incomingAuthority,
+			existingAuthority,
+		);
+		const canAuthoritativelyRefresh =
+			existingPendingReview &&
+			authorityUpgrade &&
+			requiredNewReservationMissing(normalized).length === 0;
+		if (canAuthoritativelyRefresh) {
+			normalized.authoritativeExistingRefresh = true;
+			normalized.otaSourceAuthority = incomingAuthority;
+			warnings.push(
+				"A higher-authority direct OTA confirmation replaced lower-authority pending email facts before hotel release."
+			);
+			logReconcile("existing_new_booking.authoritative_refresh", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				existingAuthority,
+				incomingAuthority,
+			});
+		} else {
+			logReconcile("duplicate_reservation.existing_new_booking", {
 			confirmationNumber,
 			reservationId: String(existing._id),
 			pmsConfirmationNumber: existing.confirmation_number || "",
 			hotelId: existing.hotelId ? String(existing.hotelId) : "",
 			matchedReservationBy,
-		});
-		return {
-			status: "duplicate_reservation",
-			actionTaken: "skipped",
-			skipReason: "duplicate_existing_reservation_no_update",
-			automationComment:
-				"New OTA reservation email matched an existing reservation by confirmation number; no reservation fields were changed.",
-			warnings,
-			errors,
-			reservationId: existing._id,
-			hotelId: existing.hotelId,
-			pmsConfirmationNumber: existing.confirmation_number,
-			matchedReservationBy,
-		};
+			});
+			return {
+				status: "duplicate_reservation",
+				actionTaken: "skipped",
+				skipReason: "duplicate_existing_reservation_no_update",
+				automationComment:
+					"New OTA reservation email matched an existing reservation by confirmation number; no reservation fields were changed.",
+				warnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 	}
 
 	if (!isStatusIntent && isOtaInboundTotalOutlier(normalized)) {
@@ -5259,29 +6013,22 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 
 	if (isStatusIntent) {
 		if (!existing) {
-			if (hasCompleteCreatePayload && statusToApply === "confirmed") {
-				const warning =
-					"Status email did not match an existing reservation, but complete confirmed reservation data was present; creating a new OTA reservation.";
-				if (!warnings.includes(warning)) warnings.push(warning);
-				logReconcile("status.unmatched_confirmed.create_from_complete_payload", {
-					confirmationNumber,
-					statusToApply,
-				});
-			} else {
-				logReconcile("status.needs_review.no_exact_match", {
-					confirmationNumber,
-					statusToApply,
-				});
-				return createUnmappedOtaReviewReservation({
-					normalized,
-					confirmationNumber,
-					warnings: [
-						...warnings,
-						"Status email did not match an existing reservation by confirmation number; saved to OTA review for manual handling.",
-					],
-					errors,
-				});
-			}
+			logReconcile("status.needs_review.no_exact_match", {
+				confirmationNumber,
+				statusToApply,
+			});
+			return {
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "status_email_no_exact_reservation_match",
+				automationComment:
+					"Status emails may only change an existing reservation with an exact confirmation match.",
+				warnings,
+				errors: [
+					...errors,
+					"Status email did not match an existing reservation by confirmation number.",
+				],
+			};
 		}
 		if (existing && !statusToApply) {
 			logReconcile("status.needs_review.unknown_status", {
@@ -5329,27 +6076,21 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 	}
 
 	if (isUpdateIntent && !existing) {
-		if (hasCompleteCreatePayload) {
-			const warning =
-				"Update-labeled OTA email did not match an existing reservation, but complete reservation data was present; creating a new OTA reservation.";
-			if (!warnings.includes(warning)) warnings.push(warning);
-			logReconcile("update.unmatched.create_from_complete_payload", {
-				confirmationNumber,
-			});
-		} else {
-			logReconcile("update.needs_review.no_exact_match", {
-				confirmationNumber,
-			});
-			return createUnmappedOtaReviewReservation({
-				normalized,
-				confirmationNumber,
-				warnings: [
-					...warnings,
-					"Update email did not match an existing reservation by confirmation number; saved to OTA review for manual handling.",
-				],
-				errors,
-			});
-		}
+		logReconcile("update.needs_review.no_exact_match", {
+			confirmationNumber,
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "update_email_no_exact_reservation_match",
+			automationComment:
+				"Update emails may only stage changes against an existing exact confirmation match.",
+			warnings,
+			errors: [
+				...errors,
+				"Update email did not match an existing reservation by confirmation number.",
+			],
+		};
 	}
 
 	const missing = missingForCreate;
@@ -5397,7 +6138,10 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		});
 	}
 
-	const hotelDetails = await resolveHotel(normalized, existing);
+	const hotelDetails = await resolveHotel(
+		normalized,
+		normalized.authoritativeExistingRefresh ? null : existing
+	);
 	if (!hotelDetails) {
 		logReconcile("needs_mapping.hotel", {
 			confirmationNumber,
@@ -5619,12 +6363,14 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 
 	const existingBeforeCreate = await findReservationByOtaConfirmation(
 		confirmationNumber,
+		normalized.provider,
 		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
 	);
 	if (existingBeforeCreate) {
 		const lateMatchedBy = detectConfirmationMatchFields(
 			existingBeforeCreate,
-			confirmationNumber
+			confirmationNumber,
+			normalized.provider
 		);
 		logReconcile("duplicate_reservation.pre_create_recheck", {
 			confirmationNumber,
@@ -5655,7 +6401,10 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		),
 	];
 	// The queue prevents local overlap; this key also protects across processes.
-	document.otaIdentityKey = confirmationNumber;
+	document.otaIdentityKey = buildOtaIdentityKey(
+		normalized.provider,
+		confirmationNumber
+	);
 	applyVccSafeFieldsToDocument(document, normalized);
 	document.confirmation_number = await generateUniquePmsConfirmationNumber();
 	document.customer_details = {
@@ -5702,12 +6451,14 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				});
 				const duplicate = await findReservationByOtaConfirmation(
 					confirmationNumber,
+					normalized.provider,
 					"_id hotelId confirmation_number otaIdentityKey"
 				);
 				if (duplicate) {
 					const duplicateMatchedBy = detectConfirmationMatchFields(
 						duplicate,
-						confirmationNumber
+						confirmationNumber,
+						normalized.provider
 					);
 					return {
 						status: "duplicate_reservation",
@@ -5751,6 +6502,15 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 
 async function reconcileOtaReservation(inputNormalized) {
 	const input = inputNormalized || {};
+	if (input.intent === "not_reservation") {
+		return {
+			status: "not_reservation",
+			warnings: [...(input.warnings || [])],
+			errors: [...(input.errors || [])],
+			actionTaken: "skipped",
+			skipReason: input.skipReason || "not_reservation",
+		};
+	}
 	const confirmationNumber = normalizeConfirmation(
 		input.confirmationNumber || input.reservationId
 	);
@@ -6066,6 +6826,9 @@ module.exports = {
 	explicitHotelNameAliases,
 	expandHotelNameCandidates,
 	normalizeConfirmation,
+	buildOtaIdentityKey,
+	buildOtaConfirmationLookup,
+	detectConfirmationMatchFields,
 	detectProvider,
 	detectEventType,
 	detectStatusToApply,
@@ -6080,6 +6843,11 @@ module.exports = {
 	resolveRoomMatch,
 	resolveRoomDetails,
 	requiredNewReservationMissing,
+	buildExistingReservationUpdateSet,
+	explicitRoomCapacity,
+	findConfidentFuzzyHotelMatch,
+	isAuthoritativeSourceUpgrade,
+	otaSourceAuthority,
 	normalizeStatusToApply,
 	calculateDaysOfResidence,
 	generateDateRange,

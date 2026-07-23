@@ -6,6 +6,9 @@ const {
 	redactSensitive,
 	safeSnippet,
 } = require("./otaReservationMapper");
+const {
+	classifyOtaGuestCommunication,
+} = require("./otaInboundCommunicationClassifier");
 
 const DEFAULT_FORWARD_TO = "ahmed.abdelrazak@jannatbooking.com";
 const DEFAULT_FORWARD_FROM = "noreply@jannatbooking.com";
@@ -35,7 +38,7 @@ const DECISION_RULES = [
 		category: "ota_action_required",
 		reason: "ota_action_required",
 		pattern:
-			/\b(action required|required action|urgent|important|respond within|deadline|missing information|complete setup|property verification|listing verification|partner verification)\b/i,
+			/\b(action required|required action|response required|respond within|reply required|deadline|missing information|complete setup|property verification|listing verification|partner verification)\b/i,
 	},
 	{
 		category: "ota_finance_or_dispute",
@@ -133,6 +136,40 @@ const buildImportantEmailForwardDecision = ({
 	const status = String(reconciliation.status || "").toLowerCase();
 	const sourceText = buildDecisionText({ email, normalized });
 	const redactedText = redactSensitive(sourceText);
+	const communication = classifyOtaGuestCommunication(email, {
+		provider: normalized.provider,
+		providerLabel: normalized.providerLabel,
+		originalFrom: normalized.originalFrom,
+		originalSubject: normalized.originalSubject,
+		fromCandidates: normalized.fromCandidates,
+		subjectCandidates: normalized.subjectCandidates,
+		emailText: sourceText,
+	});
+	const explicitSuppression =
+		normalized.suppressForwarding === true ||
+		normalized.communicationClassification?.suppressForwarding === true;
+
+	// A deterministic communication classification always wins over alert
+	// keywords and processing statuses. These emails are intentionally silent.
+	if (communication.suppressForwarding || explicitSuppression) {
+		const links = extractLinks(redactedText);
+		const suppressionReason =
+			communication.reason ||
+			normalized.communicationClassification?.reason ||
+			"guest_communication";
+		return {
+			shouldForward: false,
+			reason: suppressionReason,
+			categories: [],
+			matchedTerms: [],
+			linkCount: links.length,
+			links,
+			status,
+			suppressed: true,
+			suppressionReason,
+			communicationProvider: communication.provider || normalized.provider || "",
+		};
+	}
 	const categories = [];
 	const matchedTerms = [];
 

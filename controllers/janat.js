@@ -83,6 +83,20 @@ const {
 	normalizeId: normalizeOtaReviewId,
 } = require("../services/otaReservationVisibility");
 const {
+	canonicalizeOtaReviewedRooms,
+	invalidateOtaRoomPricingForHotelAssignment,
+	isOtaSourceReservation,
+	normalizeId: normalizeOtaPricingId,
+	resolveOtaSourceClientTotal,
+	validateOtaReleaseHotelBasePrice,
+	validateOtaSourceClientPricing,
+} = require("../services/otaReviewPricingInvariants");
+const {
+	OTA_REVIEW_CONCURRENT_CHANGE_CODE,
+	addReservationVersionBump,
+	buildReservationSnapshotFilter,
+} = require("../services/otaReviewConcurrency");
+const {
 	attachAdminReservationRoomDetails,
 } = require("../services/adminReservationRoomDetails");
 const {
@@ -2801,126 +2815,6 @@ const buildAdminOtaFinancialSummary = (reservation = {}, actor = {}) => {
 	return summary;
 };
 
-const explicitOtaDayRootPrice = (day = {}) => {
-	const rootPrice = explicitPositiveMoney(day, "rootPrice");
-	if (rootPrice > 0) return rootPrice;
-	const withoutCommission = explicitPositiveMoney(
-		day,
-		"totalPriceWithoutCommission"
-	);
-	return withoutCommission > 0 ? withoutCommission : 0;
-};
-
-const validateOtaReleaseHotelBasePrice = (reservation = {}) => {
-	if (!normalizeId(reservation?.hotelId)) {
-		return {
-			ready: false,
-			code: "ota_hotel_assignment_required",
-			message:
-				"Assign a hotel before releasing this OTA reservation to the hotel.",
-			hotelBaseTotal: 0,
-		};
-	}
-
-	const adminPricing = reservation?.adminPricing || {};
-	const pricingMode = String(adminPricing.mode || "").trim().toLowerCase();
-	const reviewedInOtaQueue =
-		pricingMode === "ota_review" ||
-		Boolean(reservation?.otaPlatformReview?.lastPricingUpdatedAt);
-
-	if (!reviewedInOtaQueue) {
-		return {
-			ready: false,
-			code: "ota_pricing_review_required",
-			message:
-				"Update and save the OTA pricing review before releasing this reservation to the hotel.",
-			hotelBaseTotal: 0,
-		};
-	}
-
-	const adminRootTotal = explicitPositiveMoney(adminPricing, "rootTotal");
-	if (adminRootTotal <= 0) {
-		return {
-			ready: false,
-			code: "ota_hotel_base_price_required",
-			message:
-				"Total base hotel price is required before releasing this OTA reservation to the hotel.",
-			hotelBaseTotal: 0,
-		};
-	}
-
-	const sourceRooms = Array.isArray(reservation.pickedRoomsType)
-		? reservation.pickedRoomsType
-		: [];
-	const pricingRooms = Array.isArray(reservation.pickedRoomsPricing)
-		? reservation.pickedRoomsPricing
-		: [];
-	const rooms = pricingRooms.length ? pricingRooms : sourceRooms;
-	if (!rooms.length) {
-		return {
-			ready: false,
-			code: "ota_daily_base_price_required",
-			message:
-				"Daily room pricing rows are required before releasing this OTA reservation to the hotel.",
-			hotelBaseTotal: adminRootTotal,
-		};
-	}
-
-	let dailyBaseTotal = 0;
-	let dailyRows = 0;
-	let missingBaseRows = 0;
-	rooms.forEach((room) => {
-		const count = roomCountValue(room);
-		const pricingByDay = Array.isArray(room?.pricingByDay)
-			? room.pricingByDay
-			: [];
-		if (!pricingByDay.length) {
-			missingBaseRows += 1;
-			return;
-		}
-		pricingByDay.forEach((day) => {
-			dailyRows += 1;
-			const rootPrice = explicitOtaDayRootPrice(day);
-			if (rootPrice <= 0) {
-				missingBaseRows += 1;
-				return;
-			}
-			dailyBaseTotal = round2(dailyBaseTotal + rootPrice * count);
-		});
-	});
-
-	if (!dailyRows || missingBaseRows > 0 || dailyBaseTotal <= 0) {
-		return {
-			ready: false,
-			code: "ota_daily_base_price_required",
-			message:
-				"Every OTA pricing day must have a base hotel price before release.",
-			hotelBaseTotal: adminRootTotal,
-			missingBaseRows,
-		};
-	}
-
-	if (Math.abs(dailyBaseTotal - adminRootTotal) > 0.05) {
-		return {
-			ready: false,
-			code: "ota_hotel_base_price_mismatch",
-			message:
-				"Total base hotel price must match the saved daily base hotel pricing before release.",
-			hotelBaseTotal: adminRootTotal,
-			dailyBaseTotal,
-		};
-	}
-
-	return {
-		ready: true,
-		code: "",
-		message: "",
-		hotelBaseTotal: adminRootTotal,
-		dailyBaseTotal,
-		missingBaseRows: 0,
-	};
-};
-
 const buildOtaReviewAuditActor = (actor = {}) => ({
 	_id: normalizeOtaReviewId(actor?._id || actor),
 	name: actor?.name || actor?.email || "Platform Admin",
@@ -3068,13 +2962,17 @@ const buildOtaAdminSearchClause = async (searchQuery = "") => {
 };
 
 const otaAssignableHotelFilterForActor = (actor = {}) => {
-	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+	if (
+		!actor ||
+		isConfiguredSuperAdmin(actor) ||
+		!userRoleNumbers(actor).includes(1000)
+	) {
 		return {};
 	}
 	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
 		mongoose.Types.ObjectId.isValid(id)
 	);
-	if (!hotelIds.length) return {};
+	if (!hotelIds.length) return { _id: { $exists: false } };
 	return {
 		_id: {
 			$in: hotelIds.map((id) => mongoose.Types.ObjectId(id)),
@@ -3255,7 +3153,9 @@ exports.assignOtaReservationHotel = async (req, res) => {
 			});
 		}
 
-		const reservation = await Reservations.findById(reservationId);
+		const reservation = await Reservations.findOne(
+			applyPlatformOtaScope(actor, { _id: reservationId }),
+		);
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
@@ -3265,15 +3165,36 @@ exports.assignOtaReservationHotel = async (req, res) => {
 				message: "This OTA reservation is no longer pending platform review.",
 			});
 		}
-
+		if (!hotel.belongsTo || !mongoose.Types.ObjectId.isValid(hotel.belongsTo)) {
+			return res.status(409).json({
+				success: false,
+				message:
+					"This hotel has no valid owner assignment. Assign a hotel owner before routing an OTA reservation to it.",
+			});
+		}
 		const now = new Date();
 		const auditActor = buildOtaReviewAuditActor(actor);
 		const hotelObjectId = mongoose.Types.ObjectId(hotel._id);
-		const ownerObjectId = hotel.belongsTo
-			? mongoose.Types.ObjectId(hotel.belongsTo)
-			: null;
+		const ownerObjectId = mongoose.Types.ObjectId(hotel.belongsTo);
+		const sourceClientTotal = resolveOtaSourceClientTotal(reservation);
+		const invalidatedPickedRoomsType =
+			invalidateOtaRoomPricingForHotelAssignment(
+				reservation.pickedRoomsType,
+			);
+		const invalidatedPickedRoomsPricing =
+			invalidateOtaRoomPricingForHotelAssignment(
+				Array.isArray(reservation.pickedRoomsPricing) &&
+					reservation.pickedRoomsPricing.length
+					? reservation.pickedRoomsPricing
+					: reservation.pickedRoomsType,
+			);
 		const set = {
 			hotelId: hotelObjectId,
+			roomId: [],
+			pickedRoomsType: invalidatedPickedRoomsType,
+			pickedRoomsPricing: invalidatedPickedRoomsPricing,
+			sub_total: 0,
+			commission: 0,
 			otaPlatformReview: {
 				...(reservation.otaPlatformReview || {}),
 				status: OTA_PLATFORM_REVIEW_PENDING,
@@ -3283,10 +3204,31 @@ exports.assignOtaReservationHotel = async (req, res) => {
 				assignedHotelName: hotel.hotelName || "",
 				assignedAt: now,
 				assignedBy: auditActor,
+				lastPricingUpdatedAt: null,
+				lastPricingUpdatedBy: null,
+				pricingReviewInvalidatedAt: now,
+				pricingReviewInvalidatedBy: auditActor,
+				pricingReviewInvalidatedReason: "hotel_assignment_changed",
+				roomMappingStatus: "unreviewed",
+				roomMappingHotelId: "",
 				lastUpdatedAt: now,
 			},
 			adminPricing: {
 				...(reservation.adminPricing || {}),
+				mode: "ota_assignment_pending_pricing",
+				clientTotal:
+					sourceClientTotal.amount ||
+					round2(reservation?.adminPricing?.clientTotal || reservation.total_amount),
+				rootTotal: 0,
+				platformMarginTotal: 0,
+				commissionAmount: 0,
+				sourceClientTotalSar:
+					sourceClientTotal.amount ||
+					round2(reservation?.adminPricing?.clientTotal || reservation.total_amount),
+				sourceClientTotalSource:
+					sourceClientTotal.source || "reservation.total_amount",
+				pricingReviewRequired: true,
+				pricingReviewInvalidatedAt: now,
 				hotelAssignmentRequired: false,
 				assignedHotelId: String(hotel._id),
 				assignedHotelName: hotel.hotelName || "",
@@ -3294,16 +3236,22 @@ exports.assignOtaReservationHotel = async (req, res) => {
 			adminLastUpdatedAt: now,
 			adminLastUpdatedBy: auditActor,
 		};
-		if (ownerObjectId) set.belongsTo = ownerObjectId;
+		set.belongsTo = ownerObjectId;
 		set["supplierData.otaHotelMappingRequired"] = false;
 		set["supplierData.otaAssignedHotelId"] = String(hotel._id);
 		set["supplierData.otaAssignedHotelName"] = hotel.hotelName || "";
 		set["supplierData.otaAssignedHotelAt"] = now;
 		set["supplierData.otaAssignedHotelBy"] = auditActor;
+		set["supplierData.otaMatchedRoomName"] = "";
+		set["supplierData.otaRoomMatchScore"] = 0;
+		set["supplierData.otaRoomMatchType"] = "";
 
-		const updated = await Reservations.findByIdAndUpdate(
-			reservationId,
-			{
+		const updated = await Reservations.findOneAndUpdate(
+			buildReservationSnapshotFilter(reservation, {
+				requirePendingReview: true,
+				includeHotel: true,
+			}),
+			addReservationVersionBump({
 				$set: set,
 				$push: {
 					reservationAuditLog: {
@@ -3312,7 +3260,7 @@ exports.assignOtaReservationHotel = async (req, res) => {
 						action: "hotel-assigned-before-release",
 						by: auditActor,
 						from: {
-							hotelId: normalizeId(reservation.hotelId),
+							hotelId: normalizeOtaPricingId(reservation.hotelId),
 							hotelName:
 								reservation.supplierData?.otaAssignedHotelName ||
 								reservation.supplierData?.otaHotelName ||
@@ -3321,15 +3269,25 @@ exports.assignOtaReservationHotel = async (req, res) => {
 						to: {
 							hotelId: String(hotel._id),
 							hotelName: hotel.hotelName || "",
+							pricingReviewInvalidated: true,
+							roomMappingInvalidated: true,
 						},
 					},
 				},
-			},
+			}),
 			{ new: true }
 		)
 			.populate("belongsTo")
 			.populate("hotelId")
 			.lean();
+		if (!updated) {
+			return res.status(409).json({
+				success: false,
+				code: OTA_REVIEW_CONCURRENT_CHANGE_CODE,
+				message:
+					"This OTA reservation changed while the hotel was being assigned. Refresh it and try again.",
+			});
+		}
 
 		return res.status(200).json({
 			success: true,
@@ -3740,7 +3698,9 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			return res.status(400).json({ success: false, message: "Invalid reservation ID" });
 		}
 
-		const reservation = await Reservations.findById(reservationId);
+		const reservation = await Reservations.findOne(
+			applyPlatformOtaScope(actor, { _id: reservationId }),
+		);
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
@@ -3749,6 +3709,24 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				success: false,
 				message: "This OTA reservation is no longer pending platform review.",
 			});
+		}
+		const assignedHotelId = normalizeOtaPricingId(reservation.hotelId);
+		if (!assignedHotelId || !mongoose.Types.ObjectId.isValid(assignedHotelId)) {
+			throw new ReservationPricingError(
+				"Assign a valid hotel before saving the OTA pricing review.",
+				400,
+				"ota_hotel_assignment_required",
+			);
+		}
+		const assignedHotel = await HotelDetails.findById(assignedHotelId)
+			.select("_id hotelName roomCountDetails")
+			.lean();
+		if (!assignedHotel) {
+			throw new ReservationPricingError(
+				"The assigned hotel could not be found. Assign a valid hotel before saving pricing.",
+				400,
+				"ota_hotel_assignment_required",
+			);
 		}
 
 		const allowedFields = [
@@ -3784,6 +3762,82 @@ exports.updateOtaReservationPricing = async (req, res) => {
 
 		const now = new Date();
 		const auditActor = buildOtaReviewAuditActor(actor);
+		const pricingRooms =
+			Array.isArray(normalizedUpdate.pickedRoomsPricing) &&
+			normalizedUpdate.pickedRoomsPricing.length
+				? normalizedUpdate.pickedRoomsPricing
+				: Array.isArray(normalizedUpdate.pickedRoomsType) &&
+				  normalizedUpdate.pickedRoomsType.length
+				? normalizedUpdate.pickedRoomsType
+				: Array.isArray(reservation.pickedRoomsPricing) &&
+				  reservation.pickedRoomsPricing.length
+				? reservation.pickedRoomsPricing
+				: reservation.pickedRoomsType;
+		const canonicalRoomMapping = canonicalizeOtaReviewedRooms(
+			pricingRooms,
+			assignedHotel,
+		);
+		if (!canonicalRoomMapping.ready) {
+			throw new ReservationPricingError(
+				canonicalRoomMapping.message,
+				400,
+				canonicalRoomMapping.code,
+				{ roomIndex: canonicalRoomMapping.roomIndex },
+			);
+		}
+		normalizedUpdate.pickedRoomsType = canonicalRoomMapping.rooms;
+		normalizedUpdate.pickedRoomsPricing = canonicalRoomMapping.rooms;
+
+		const originalSourceClientTotal = resolveOtaSourceClientTotal(reservation);
+		const existingAdminPricing = reservation.adminPricing || {};
+		const normalizedAdminPricing = normalizedUpdate.adminPricing || {};
+		const nextAdminPricing = {
+			...existingAdminPricing,
+			...normalizedAdminPricing,
+			mode: "ota_review",
+			pricingReviewRequired: false,
+			roomMappingHotelId: assignedHotelId,
+		};
+		if (isOtaSourceReservation(reservation)) {
+			nextAdminPricing.sourceClientTotalSar = originalSourceClientTotal.amount;
+			nextAdminPricing.sourceClientTotalSource = originalSourceClientTotal.source;
+			nextAdminPricing.sourceClientTotalLockedAt =
+				existingAdminPricing.sourceClientTotalLockedAt || now;
+		}
+		normalizedUpdate.adminPricing = nextAdminPricing;
+
+		const reservationPlain =
+			typeof reservation.toObject === "function"
+				? reservation.toObject()
+				: reservation;
+		const prospectiveReservation = {
+			...reservationPlain,
+			...normalizedUpdate,
+			adminPricing: nextAdminPricing,
+		};
+		const clientPricingValidation = validateOtaSourceClientPricing(
+			prospectiveReservation,
+			canonicalRoomMapping.rooms,
+		);
+		if (!clientPricingValidation.ready) {
+			throw new ReservationPricingError(
+				clientPricingValidation.message,
+				400,
+				clientPricingValidation.code,
+				{
+					sourceClientTotal: clientPricingValidation.sourceClientTotal || 0,
+					dailyClientTotal: clientPricingValidation.dailyClientTotal || 0,
+					storedClientTotal: clientPricingValidation.storedClientTotal || 0,
+					reservationClientTotal:
+						clientPricingValidation.reservationClientTotal || 0,
+				},
+			);
+		}
+		if (isOtaSourceReservation(reservation)) {
+			normalizedUpdate.total_amount = clientPricingValidation.sourceClientTotal;
+			normalizedUpdate.adminPricing.clientTotal =
+				clientPricingValidation.sourceClientTotal;
+		}
 		const defaultCommissionAmount = round2(
 			moneyNumber(normalizedUpdate.sub_total || reservation.sub_total) * 0.1
 		);
@@ -3799,7 +3853,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		normalizedUpdate.commission = nextCommissionAmount;
 		normalizedUpdate.adminPricing = {
 			...(normalizedUpdate.adminPricing || {}),
-			mode: requestedAdminPricing.mode || normalizedUpdate.adminPricing?.mode || "ota_review",
+			mode: "ota_review",
 			commissionAmount: nextCommissionAmount,
 		};
 		normalizedUpdate.financial_cycle = {
@@ -3824,14 +3878,19 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				status: OTA_PLATFORM_REVIEW_PENDING,
 				lastPricingUpdatedAt: now,
 				lastPricingUpdatedBy: auditActor,
+				roomMappingStatus: "reviewed",
+				roomMappingHotelId: assignedHotelId,
 			},
 			adminLastUpdatedAt: now,
 			adminLastUpdatedBy: auditActor,
 		};
 
-		const updated = await Reservations.findByIdAndUpdate(
-			reservationId,
-			{
+		const updated = await Reservations.findOneAndUpdate(
+			buildReservationSnapshotFilter(reservation, {
+				requirePendingReview: true,
+				includeHotel: true,
+			}),
+			addReservationVersionBump({
 				$set: set,
 				$push: {
 					reservationAuditLog: {
@@ -3852,12 +3911,20 @@ exports.updateOtaReservationPricing = async (req, res) => {
 						},
 					},
 				},
-			},
+			}),
 			{ new: true }
 		)
 			.populate("belongsTo")
 			.populate("hotelId")
 			.lean();
+		if (!updated) {
+			return res.status(409).json({
+				success: false,
+				code: OTA_REVIEW_CONCURRENT_CHANGE_CODE,
+				message:
+					"This OTA reservation changed while pricing was being saved. Refresh it and review the latest values before trying again.",
+			});
+		}
 
 		return res.status(200).json({
 			success: true,
@@ -3892,7 +3959,9 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 			return res.status(400).json({ success: false, message: "Invalid reservation ID" });
 		}
 
-		const reservation = await Reservations.findById(reservationId);
+		const reservation = await Reservations.findOne(
+			applyPlatformOtaScope(actor, { _id: reservationId }),
+		);
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
@@ -3902,20 +3971,20 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 				message: "This OTA reservation has already been released or is not pending review.",
 			});
 		}
-		const assignedHotelId = normalizeId(reservation.hotelId);
+		const assignedHotelId = normalizeOtaPricingId(reservation.hotelId);
 		if (!assignedHotelId || !mongoose.Types.ObjectId.isValid(assignedHotelId)) {
-			return res.status(422).json({
+			return res.status(400).json({
 				success: false,
 				code: "ota_hotel_assignment_required",
 				message:
 					"Assign a hotel before releasing this OTA reservation to the hotel.",
 			});
 		}
-		const assignedHotelExists = await HotelDetails.exists({
-			_id: assignedHotelId,
-		});
-		if (!assignedHotelExists) {
-			return res.status(422).json({
+		const assignedHotel = await HotelDetails.findById(assignedHotelId)
+			.select("_id hotelName roomCountDetails")
+			.lean();
+		if (!assignedHotel) {
+			return res.status(400).json({
 				success: false,
 				code: "ota_hotel_assignment_required",
 				message:
@@ -3923,9 +3992,11 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 			});
 		}
 		const releasePricingValidation =
-			validateOtaReleaseHotelBasePrice(reservation);
+			validateOtaReleaseHotelBasePrice(reservation, {
+				hotel: assignedHotel,
+			});
 		if (!releasePricingValidation.ready) {
-			return res.status(422).json({
+			return res.status(400).json({
 				success: false,
 				code:
 					releasePricingValidation.code ||
@@ -3937,6 +4008,12 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 					hotelBaseTotal: releasePricingValidation.hotelBaseTotal || 0,
 					dailyBaseTotal: releasePricingValidation.dailyBaseTotal || 0,
 					missingBaseRows: releasePricingValidation.missingBaseRows || 0,
+					sourceClientTotal:
+						releasePricingValidation.sourceClientTotal || 0,
+					dailyClientTotal:
+						releasePricingValidation.dailyClientTotal || 0,
+					roomIndex:
+						releasePricingValidation.roomIndex ?? null,
 				},
 			});
 		}
@@ -3948,6 +4025,12 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 		const updatePayload = {
 			state: OTA_RELEASED_RESERVATION_STATUS,
 			reservation_status: OTA_RELEASED_RESERVATION_STATUS,
+			pickedRoomsType:
+				releasePricingValidation.canonicalRooms ||
+				reservation.pickedRoomsType,
+			pickedRoomsPricing:
+				releasePricingValidation.canonicalRooms ||
+				reservation.pickedRoomsPricing,
 			pendingConfirmation: {
 				...existingPending,
 				status: "pending",
@@ -3978,9 +4061,12 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 			adminLastUpdatedBy: auditActor,
 		};
 
-		const updated = await Reservations.findByIdAndUpdate(
-			reservationId,
-			{
+		const updated = await Reservations.findOneAndUpdate(
+			buildReservationSnapshotFilter(reservation, {
+				requirePendingReview: true,
+				includeHotel: true,
+			}),
+			addReservationVersionBump({
 				$set: updatePayload,
 				$push: {
 					reservationAuditLog: {
@@ -3994,12 +4080,20 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 						},
 					},
 				},
-			},
+			}),
 			{ new: true }
 		)
 			.populate("belongsTo")
 			.populate("hotelId")
 			.lean();
+		if (!updated) {
+			return res.status(409).json({
+				success: false,
+				code: OTA_REVIEW_CONCURRENT_CHANGE_CODE,
+				message:
+					"This OTA reservation changed during release validation. Nothing was released; refresh it and review the latest hotel, room, and pricing values.",
+			});
+		}
 
 		await emitHotelNotificationRefresh(req, updated.hotelId?._id || updated.hotelId, {
 			type: "pending_confirmation",
@@ -4055,11 +4149,29 @@ exports.revertOtaReservationToPlatformReview = async (req, res) => {
 					"This reservation does not have OTA platform review metadata.",
 			});
 		}
-		if (isOtaPlatformReviewPending(reservation)) {
+		if (
+			String(reservation.otaPlatformReview?.status || "").toLowerCase() !==
+			OTA_PLATFORM_REVIEW_RELEASED
+		) {
 			return res.status(409).json({
 				success: false,
 				message:
-					"This reservation is already not released to the hotel.",
+					"Only a reservation currently released to the hotel can be returned to platform review.",
+			});
+		}
+		if (
+			String(reservation.pendingConfirmation?.status || "").toLowerCase() !==
+				"pending" ||
+			![reservation.reservation_status, reservation.state].some(
+				(value) =>
+					String(value || "").trim().toLowerCase() ===
+					String(OTA_RELEASED_RESERVATION_STATUS).toLowerCase()
+			)
+		) {
+			return res.status(409).json({
+				success: false,
+				message:
+					"The hotel has already decided or the reservation is no longer pending confirmation; it cannot be reopened automatically.",
 			});
 		}
 
@@ -4098,9 +4210,12 @@ exports.revertOtaReservationToPlatformReview = async (req, res) => {
 			adminLastUpdatedBy: auditActor,
 		};
 
-		const updated = await Reservations.findByIdAndUpdate(
-			reservationId,
-			{
+		const updated = await Reservations.findOneAndUpdate(
+			buildReservationSnapshotFilter(reservation, {
+				expectedReviewStatus: OTA_PLATFORM_REVIEW_RELEASED,
+				includeHotel: true,
+			}),
+			addReservationVersionBump({
 				$set: updatePayload,
 				$push: {
 					reservationAuditLog: {
@@ -4121,12 +4236,20 @@ exports.revertOtaReservationToPlatformReview = async (req, res) => {
 						reason,
 					},
 				},
-			},
+			}),
 			{ new: true }
 		)
 			.populate("belongsTo")
 			.populate("hotelId")
 			.lean();
+		if (!updated) {
+			return res.status(409).json({
+				success: false,
+				code: OTA_REVIEW_CONCURRENT_CHANGE_CODE,
+				message:
+					"This OTA reservation changed while it was being returned to platform review. Refresh it before trying again.",
+			});
+		}
 
 		await emitHotelNotificationRefresh(req, updated.hotelId?._id || updated.hotelId, {
 			type: "pending_confirmation",
