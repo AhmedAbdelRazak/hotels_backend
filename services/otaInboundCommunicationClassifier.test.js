@@ -69,6 +69,39 @@ test("generic message subjects are not suppressed without OTA evidence", () => {
 	assert.equal(classification.suppressForwarding, false);
 });
 
+test("Jannat transactional copies terminate before AI without hiding forwarded OTA mail", async () => {
+	for (const subject of [
+		"Reservation Confirmation - Invoice Attached",
+		"Payment Link - zad ajyad (#4412872960)",
+	]) {
+		const email = {
+			from: "noreply@jannatbooking.com",
+			to: "guest@example.com",
+			subject,
+			text: "This is an outgoing Jannat transactional copy.",
+		};
+		const classification = classifyOtaGuestCommunication(email);
+		assert.equal(classification.matched, true, subject);
+		assert.equal(classification.reason, "internal_jannat_transactional_email");
+
+		const orchestration = await orchestrateInboundReservationEmail(email);
+		assert.equal(orchestration.normalized.intent, "not_reservation", subject);
+		assert.equal(orchestration.decision.usedAI, false, subject);
+		assert.equal(
+			orchestration.decision.skipReason,
+			"internal_jannat_transactional_email",
+			subject
+		);
+	}
+
+	const forwardedOta = classifyOtaGuestCommunication({
+		from: "support@jannatbooking.com",
+		subject: "Fw: Expedia - New Booking - Arriving on 21 Dec 2026",
+		text: "Expedia booking confirmation 987654321",
+	});
+	assert.equal(forwardedOta.matched, false);
+});
+
 test("Agoda messaging notifications are terminal but booking confirmations are not", () => {
 	for (const subject of [
 		"Special Request for Booking ID 2035192058",

@@ -101,6 +101,22 @@ const classifyOtaGuestCommunication = (email = {}, context = {}) => {
 	const built = buildCommunicationContext(email, context);
 	const { fromText, subjectCandidates, subjectText, body, providerHints } = built;
 	const allText = `${fromText}\n${subjectText}\n${body}`;
+	const internalJannatSender =
+		/\b(?:noreply|no-reply|support)@(?:[\w-]+\.)*jannatbooking\.com\b/i.test(
+			fromText
+		);
+	const internalJannatTransactionalSubject = subjectCandidates.some((subject) =>
+		/^(?:reservation confirmation\s*-\s*invoice attached|payment link\s*-\s*.+\(?#\d+\)?)$/i.test(
+			subject
+		)
+	);
+	if (internalJannatSender && internalJannatTransactionalSubject) {
+		return matchedClassification({
+			provider: "jannatbooking",
+			reason: "internal_jannat_transactional_email",
+			evidence: ["internal_sender", "transactional_subject"],
+		});
+	}
 	const strongReservationSubject = subjectCandidates.some((subject) =>
 		/(?:\bnew\s+(?:booking|reservation)\b|\b(?:booking|reservation)(?:\s+(?:(?:id|number|#)\s*)?[a-z0-9-]{5,})?\s*(?:[-:]\s*)?(?:confirmed|confirmation)\b|\b(?:confirmed|confirmation)\s+(?:booking|reservation)\b)/i.test(
 			subject,
