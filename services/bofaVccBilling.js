@@ -3,11 +3,10 @@
 /**
  * Server-owned billing identities for OTA virtual cards.
  *
- * Bank of America requires billTo fields for REST sale requests. The browser
- * must never choose or override them: the provider comes from the persisted
- * reservation and this module supplies the corresponding server profile.
- * Every field can be overridden in the server environment if an OTA/issuer
- * provides a different billing identity for this merchant account.
+ * Bank of America requires billTo data for REST sale requests. Expedia and
+ * Agoda use server-owned profiles selected from the persisted reservation.
+ * Every other OTA may supply only a postal code; names, email, and country
+ * remain server-owned, and street/city/state are deliberately omitted.
  */
 
 const PROVIDER_DEFAULTS = Object.freeze({
@@ -33,17 +32,13 @@ const PROVIDER_DEFAULTS = Object.freeze({
 		postalCode: "049712",
 		country: "SG",
 	}),
-	booking: Object.freeze({
-		profileId: "booking-nl-v1",
-		label: "Booking.com",
-		firstName: "Booking.com",
-		lastName: "VirtualCard",
-		address1: "Oosterdokskade 163",
-		locality: "Amsterdam",
-		administrativeArea: "NH",
-		postalCode: "1011 DL",
-		country: "NL",
-	}),
+});
+
+const PROVIDER_LABELS = Object.freeze({
+	expedia: "Expedia",
+	agoda: "Agoda",
+	booking: "Booking.com",
+	other: "Other OTA",
 });
 
 const PROFILE_ENV_FIELDS = Object.freeze({
@@ -64,6 +59,17 @@ const clean = (value, max = 255) =>
 		.replace(/\s+/g, " ")
 		.slice(0, max);
 
+const normalizePostalCode = (value) => clean(value, 14).toUpperCase();
+
+const isValidPostalCode = (value) => {
+	const postalCode = normalizePostalCode(value);
+	return (
+		postalCode.length >= 3 &&
+		postalCode.length <= 14 &&
+		/^[A-Z0-9](?:[A-Z0-9 -]*[A-Z0-9])?$/.test(postalCode)
+	);
+};
+
 const resolveVccProvider = (bookingSource) => {
 	const source = clean(bookingSource).toLowerCase();
 	if (source.includes("expedia")) return "expedia";
@@ -76,21 +82,74 @@ const resolveVccProvider = (bookingSource) => {
 	return "other";
 };
 
-const providerLabel = (provider) =>
-	PROVIDER_DEFAULTS[provider]?.label || "Unsupported OTA";
+const providerLabel = (provider) => PROVIDER_LABELS[provider] || "Other OTA";
 
 const resolveServerBillingProfile = (
 	provider,
-	{ env = process.env } = {},
+	{ env = process.env, postalCode: suppliedPostalCode = "" } = {},
 ) => {
 	const defaults = PROVIDER_DEFAULTS[provider];
 	if (!defaults) {
+		const postalCode = normalizePostalCode(suppliedPostalCode);
+		if (!postalCode) {
+			return {
+				ok: false,
+				issue: "BOFA_VCC_POSTAL_CODE_REQUIRED",
+				message:
+					"Enter the ZIP / postal code provided for this virtual card. No charge was sent.",
+				provider,
+			};
+		}
+		if (!isValidPostalCode(postalCode)) {
+			return {
+				ok: false,
+				issue: "BOFA_VCC_POSTAL_CODE_INVALID",
+				message:
+					"Enter a valid ZIP / postal code using 3 to 14 letters, numbers, spaces, or hyphens. No charge was sent.",
+				provider,
+			};
+		}
+
+		const prefix = `BOFA_VCC_${
+			provider === "booking" ? "BOOKING" : "OTHER"
+		}_BILLING`;
+		const fallbackEmail =
+			clean(env?.BOFA_VCC_FALLBACK_EMAIL, 255) ||
+			"support@jannatbooking.com";
+		const defaultLabel = providerLabel(provider);
+		const firstName =
+			clean(env?.[`${prefix}_FIRST_NAME`], 60) ||
+			(provider === "booking" ? "Booking.com" : "OTA");
+		const lastName =
+			clean(env?.[`${prefix}_LAST_NAME`], 60) || "VirtualCard";
+		const country = (
+			clean(env?.[`${prefix}_COUNTRY`]) ||
+			(provider === "booking" ? "NL" : "US")
+		).toUpperCase();
+		const email = clean(env?.[`${prefix}_EMAIL`], 255) || fallbackEmail;
+
+		if (!/^[A-Z]{2}$/.test(country)) {
+			return {
+				ok: false,
+				issue: "BOFA_VCC_SERVER_BILLING_PROFILE_INVALID",
+				message: `The server billing profile for ${defaultLabel} has an invalid country code. No charge was sent.`,
+				provider,
+			};
+		}
+
 		return {
-			ok: false,
-			issue: "BOFA_VCC_UNSUPPORTED_OTA",
-			message:
-				"Bank of America virtual-card processing is available only for Expedia, Agoda, and Booking.com reservations.",
+			ok: true,
 			provider,
+			label: defaultLabel,
+			profileId: `${provider === "booking" ? "booking" : "other"}-postal-v1`,
+			source: "browser_postal_only",
+			billTo: {
+				firstName,
+				lastName,
+				postalCode,
+				country,
+				email,
+			},
 		};
 	}
 
@@ -158,6 +217,9 @@ const resolveServerBillingProfile = (
 
 module.exports = {
 	PROVIDER_DEFAULTS,
+	PROVIDER_LABELS,
+	isValidPostalCode,
+	normalizePostalCode,
 	resolveVccProvider,
 	providerLabel,
 	resolveServerBillingProfile,

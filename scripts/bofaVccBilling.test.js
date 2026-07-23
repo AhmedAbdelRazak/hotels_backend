@@ -16,8 +16,8 @@ test("OTA provider resolution does not mistake Jannat Booking for Booking.com", 
 	assert.equal(resolveVccProvider("Online Jannat Booking"), "other");
 });
 
-test("server billing profiles are complete for supported OTA providers", () => {
-	for (const provider of ["expedia", "agoda", "booking"]) {
+test("Expedia and Agoda use complete server-owned billing profiles", () => {
+	for (const provider of ["expedia", "agoda"]) {
 		const profile = resolveServerBillingProfile(provider, { env: {} });
 		assert.equal(profile.ok, true);
 		assert.equal(profile.provider, provider);
@@ -44,14 +44,6 @@ test("server billing profiles are complete for supported OTA providers", () => {
 		},
 		{ postalCode: "049712", country: "SG" },
 	);
-	assert.deepEqual(
-		{
-			postalCode: resolveServerBillingProfile("booking", { env: {} }).billTo
-				.postalCode,
-			country: resolveServerBillingProfile("booking", { env: {} }).billTo.country,
-		},
-		{ postalCode: "1011 DL", country: "NL" },
-	);
 });
 
 test("server environment can override an issuer-specific profile", () => {
@@ -67,13 +59,55 @@ test("server environment can override an issuer-specific profile", () => {
 	assert.equal(profile.billTo.postalCode, "99999");
 	assert.equal(profile.billTo.country, "US");
 	assert.equal(profile.billTo.email, "payments@example.com");
+
+	const ignoredBrowserOverride = resolveServerBillingProfile("agoda", {
+		env: {},
+		postalCode: "00000",
+	});
+	assert.equal(ignoredBrowserOverride.billTo.postalCode, "049712");
 });
 
-test("unsupported booking sources fail closed before gateway submission", () => {
-	const profile = resolveServerBillingProfile("other", { env: {} });
+test("non-Expedia/Agoda providers require a validated postal code only", () => {
+	const missing = resolveServerBillingProfile("other", { env: {} });
+	assert.equal(missing.ok, false);
+	assert.equal(missing.issue, "BOFA_VCC_POSTAL_CODE_REQUIRED");
+
+	const invalid = resolveServerBillingProfile("other", {
+		env: {},
+		postalCode: "<script>",
+	});
+	assert.equal(invalid.ok, false);
+	assert.equal(invalid.issue, "BOFA_VCC_POSTAL_CODE_INVALID");
+
+	const profile = resolveServerBillingProfile("other", {
+		env: { BOFA_VCC_OTHER_BILLING_ADDRESS1: "Must be ignored" },
+		postalCode: " 92923-1234 ",
+	});
+	assert.equal(profile.ok, true);
+	assert.equal(profile.source, "browser_postal_only");
+	assert.equal(profile.billTo.postalCode, "92923-1234");
+	assert.equal(profile.billTo.country, "US");
+	assert.equal(profile.billTo.address1, undefined);
+	assert.equal(profile.billTo.locality, undefined);
+	assert.equal(profile.billTo.administrativeArea, undefined);
+
+	const booking = resolveServerBillingProfile("booking", {
+		env: {},
+		postalCode: "1011 dl",
+	});
+	assert.equal(booking.ok, true);
+	assert.equal(booking.billTo.postalCode, "1011 DL");
+	assert.equal(booking.billTo.country, "NL");
+	assert.equal(booking.billTo.address1, undefined);
+});
+
+test("the generic server profile rejects an invalid configured country", () => {
+	const profile = resolveServerBillingProfile("other", {
+		env: { BOFA_VCC_OTHER_BILLING_COUNTRY: "USA" },
+		postalCode: "92923",
+	});
 	assert.equal(profile.ok, false);
-	assert.equal(profile.issue, "BOFA_VCC_UNSUPPORTED_OTA");
-	assert.match(profile.message, /Expedia, Agoda, and Booking\.com/i);
+	assert.equal(profile.issue, "BOFA_VCC_SERVER_BILLING_PROFILE_INVALID");
 });
 
 test("the charge controller cannot consume browser billing overrides", () => {
@@ -81,11 +115,16 @@ test("the charge controller cannot consume browser billing overrides", () => {
 		path.join(__dirname, "..", "controllers", "bofaprocessing.js"),
 		"utf8",
 	);
+	const captureControllerSource = controllerSource.slice(
+		controllerSource.indexOf("exports.captureReservationVccSale"),
+	);
 	assert.doesNotMatch(
 		controllerSource,
 		/req\.body\?\.(?:billingAddress|postalCode|cardholderName|confirmationNumber2)/,
 	);
-	assert.doesNotMatch(controllerSource, /card_expiry\s*:/);
+	assert.match(controllerSource, /req\.body\?\.billingPostalCode/);
+	assert.doesNotMatch(captureControllerSource, /card_expiry\s*:/);
+	assert.doesNotMatch(captureControllerSource, /postal_code\s*:/);
 	assert.ok(
 		controllerSource.indexOf("if (!billingProfile.ok)") <
 			controllerSource.indexOf("Atomically reserve this reservation"),

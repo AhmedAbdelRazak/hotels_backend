@@ -523,6 +523,7 @@ const resolveRestPlatform = () => {
 		.toLowerCase()
 		.trim();
 	if (raw === "cybersource" || raw === "cs") return "cybersource";
+	if (raw === "visaacceptance" || raw === "vas") return "visaacceptance";
 	if (raw === "bofa" || raw === "bankofamerica") return "bofa";
 	return "bofa";
 };
@@ -541,11 +542,10 @@ const resolveSignatureStyle = (platform) => {
 		.toLowerCase()
 		.trim();
 	if (raw && SIGNATURE_STYLES[raw]) return raw;
-	// Sensible defaults:
-	// - CyberSource frequently documents (request-target) style.
-	// - Visa Acceptance latest auth examples commonly use v-c-date + request-target.
-	if (platform === "cybersource") return "cs";
-	return "vas_vc";
+	// The Bank of America/CyberSource SDK uses Date + (request-target).
+	// Visa Acceptance's newer examples use v-c-date + request-target.
+	if (platform === "visaacceptance") return "vas_vc";
+	return "cs";
 };
 
 const getRestRuntimeConfig = () => {
@@ -591,12 +591,6 @@ const evaluateRestRuntimeConfig = (cfg) => {
 			"BOFA_REST_SOLUTION_ID must be the 8-character alphanumeric Merchant Solution Code Number (MSCN) assigned by Bank of America.",
 		);
 	}
-	if (!cfg.solutionId) {
-		warnings.push(
-			"BOFA_REST_SOLUTION_ID is not configured. If Bank of America assigned an MSCN to this certified solution, add that exact 8-character value.",
-		);
-	}
-
 	if (
 		cfg.platform !== "bofa" &&
 		cfg.merchantId &&
@@ -781,7 +775,7 @@ const classifyProbeResult = ({ httpStatus, bodyText }) => {
 			code: "RESOURCE_NOT_FOUND",
 			readyForCharge: false,
 			message:
-				"Resource not found (404). Common causes: wrong environment host (live vs test), wrong REST transacting merchant id (v-c-merchant-id), wrong platform host family, or REST Payments (PTS) not provisioned on this merchant profile.",
+				"Bank of America did not route /pts/v2/payments for this merchant (404). Confirm the Shared Secret key was generated in production under this exact MID, and ask Bank of America to activate the Card Not Present Integration Toolkit (Direct REST / PTS) on the merchant account.",
 		};
 	if (httpStatus === 400)
 		return {
@@ -1314,8 +1308,8 @@ exports.getBofaVccHealth = async (req, res) => {
 			recommendations: [
 				"BOFA_REST_MERCHANT_ID, BOFA_REST_KEY_ID, and BOFA_REST_SHARED_SECRET_B64 must come from the same Bank of America Shared Secret key record and environment.",
 				"Make sure REST env (BOFA_REST_ENV) matches where the key was generated (test vs live).",
-				"If you consistently get 404 on /pts/v2/payments, your merchant may not have REST Payments (PTS) provisioned.",
-				"Ask Bank of America whether your integration was assigned an 8-character MSCN; if so, set it as BOFA_REST_SOLUTION_ID.",
+				"If you consistently get 404 on /pts/v2/payments, ask Bank of America to activate the Card Not Present Integration Toolkit (Direct REST / PTS) for this exact MID.",
+				"Only configure BOFA_REST_SOLUTION_ID when Bank of America explicitly assigned an 8-character MSCN to this integration.",
 				"If you get 401/403, check signature style (BOFA_REST_SIGNATURE_STYLE) and key/shared secret pairing.",
 			],
 		};
@@ -1563,7 +1557,12 @@ exports.captureReservationVccSale = async (req, res) => {
 		const provider = resolveVccProvider(snapshot?.booking_source);
 		const status = vccStatusPayload(snapshot, provider);
 		const checkinEligibility = checkCheckinEligibility(snapshot?.checkin_date);
-		const billingProfile = resolveServerBillingProfile(provider);
+		// Only the postal code may come from the browser, and only when the
+		// persisted reservation is not Expedia or Agoda. The billing resolver
+		// ignores this value for both server-managed providers.
+		const billingProfile = resolveServerBillingProfile(provider, {
+			postalCode: req.body?.billingPostalCode,
+		});
 
 		bofaLog("reservation + status resolved", {
 			reservationId,
@@ -1774,10 +1773,10 @@ exports.captureReservationVccSale = async (req, res) => {
 			throw lockError;
 		}
 
-		// billTo is selected exclusively by the backend from the persisted OTA.
-		// Client-supplied address/cardholder fields are intentionally ignored.
+		// billTo is selected by the backend from the persisted OTA. For providers
+		// other than Expedia/Agoda, only a validated postal code is accepted;
+		// client-supplied address and cardholder fields are always ignored.
 		const billTo = billingProfile.billTo;
-		const cardholderName = `${billTo.firstName} ${billTo.lastName}`.trim();
 
 		const bodyObj = {
 			processingInformation: {
@@ -2002,9 +2001,6 @@ exports.captureReservationVccSale = async (req, res) => {
 			cancellationContext: isCancelledOrNoShow(snapshot?.reservation_status)
 				? "cancelled_or_no_show_with_valid_non_refundable_vcc"
 				: "active_or_completed_stay",
-			cardholderName,
-			postalCode: billTo.postalCode,
-			countryCode: billTo.country,
 			billingProfileId: billingProfile.profileId,
 			billingProfileSource: billingProfile.source,
 			chargeAmountUsd: amountUsd,
@@ -2124,9 +2120,6 @@ exports.captureReservationVccSale = async (req, res) => {
 				amount_usd: amountUsd,
 				amount_sar: amountSar,
 				card_last4: cardLast4,
-				cardholder_name: cardholderName,
-				postal_code: billTo.postalCode,
-				country_code: billTo.country,
 			};
 
 			v.attempts.push({
@@ -2149,9 +2142,6 @@ exports.captureReservationVccSale = async (req, res) => {
 				http_status_text: httpStatusText,
 				status: txnStatus,
 				order_reference: providerReferenceCode,
-				cardholder_name: cardholderName,
-				postal_code: billTo.postalCode,
-				country_code: billTo.country,
 				gateway_reason: gatewayReason,
 				gateway_message: gatewayMessage,
 			});
@@ -2264,9 +2254,6 @@ exports.captureReservationVccSale = async (req, res) => {
 			amount_usd: amountUsd,
 			amount_sar: amountSar,
 			card_last4: cardLast4,
-			cardholder_name: cardholderName,
-			postal_code: billTo.postalCode,
-			country_code: billTo.country,
 			configuration_error: isConfigNotFoundError,
 		};
 
@@ -2287,9 +2274,6 @@ exports.captureReservationVccSale = async (req, res) => {
 			http_status_text: httpStatusText,
 			status: txnStatus,
 			order_reference: providerReferenceCode,
-			cardholder_name: cardholderName,
-			postal_code: billTo.postalCode,
-			country_code: billTo.country,
 			gateway_reason: gatewayReason,
 			gateway_message: gatewayMessage,
 			configuration_error: isConfigNotFoundError,
