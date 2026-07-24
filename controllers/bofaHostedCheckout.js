@@ -34,6 +34,9 @@ const {
 	buildReservationPaymentContext,
 } = require("../services/bofaReservationContext");
 const {
+	getVerifiedBofaCaptureSummary,
+} = require("../services/bofaCaptureSummary");
+const {
 	buildAbandonedSessionAudit,
 	canResumeActiveHostedSession,
 	canReleaseAbandonedHostedSession,
@@ -122,6 +125,7 @@ const baseStatus = (reservation, provider = "") => {
 		lastRequestId: clean(vcc.last_request_id),
 		lastMerchantTransactionId: clean(vcc.last_merchant_transaction_id),
 		warningMessage: clean(vcc.warning_message, 600),
+		capture: getVerifiedBofaCaptureSummary(reservation),
 		canDiscardUnsubmittedSession: canReleaseAbandonedHostedSession(reservation),
 		provider: provider || clean(vcc.source),
 		secureAcceptance: {
