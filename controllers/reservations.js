@@ -73,6 +73,9 @@ const {
 const {
 	validateGenericOtaPricingRoute,
 } = require("../services/otaReviewPricingInvariants");
+const {
+	attachAdminReservationRoomDetails,
+} = require("../services/adminReservationRoomDetails");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -6188,9 +6191,32 @@ exports.singleReservationById = async (req, res) => {
 		delete decryptedCustomerDetails.cardCVV;
 		delete decryptedCustomerDetails.cardHolderName;
 
+		let reservationWithRoomDetails = reservation.toObject();
+		if (detailsView) {
+			try {
+				[reservationWithRoomDetails] = await attachAdminReservationRoomDetails(
+					[reservationWithRoomDetails],
+					(roomIds) =>
+						Rooms.find({ _id: { $in: roomIds } })
+							.select("_id hotelId room_number room_type display_name")
+							.lean()
+							.exec()
+				);
+			} catch (roomDetailsError) {
+				console.error(
+					"[RESERVATION DETAILS] Room details enrichment failed:",
+					roomDetailsError?.message || roomDetailsError
+				);
+				reservationWithRoomDetails = {
+					...reservationWithRoomDetails,
+					roomDetails: [],
+				};
+			}
+		}
+
 		// Construct the final reservation object to send in the response
 		const responseReservation = {
-			...reservation.toObject(), // Convert Mongoose document to plain object
+			...reservationWithRoomDetails,
 			customer_details: decryptedCustomerDetails, // Replace with decrypted and masked details
 		};
 

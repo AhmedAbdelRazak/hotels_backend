@@ -31,9 +31,35 @@ const {
 	buildExecutiveReservationMatch,
 	buildExecutiveReservationSummary,
 } = require("../services/adminReservationExecutiveSummary");
+const {
+	reservationRoomNumbers,
+	reservationRoomTypes,
+} = require("../services/reservationRoomSummary");
+const {
+	attachAdminReservationRoomDetails,
+} = require("../services/adminReservationRoomDetails");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
+
+const attachReportRoomDetails = async (reservations = [], reportName = "admin") => {
+	try {
+		return await attachAdminReservationRoomDetails(reservations, (roomIds) =>
+			Rooms.find({ _id: { $in: roomIds } })
+				.select("_id hotelId room_number room_type display_name")
+				.lean()
+				.exec()
+		);
+	} catch (error) {
+		console.error(
+			`[${reportName}] Room details enrichment failed:`,
+			error?.message || error
+		);
+		return (Array.isArray(reservations) ? reservations : []).map(
+			(reservation) => ({ ...reservation, roomDetails: [] })
+		);
+	}
+};
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 
@@ -566,16 +592,20 @@ exports.reservationExecutiveSummary = async (req, res) => {
 			withPlatformHotelScope(req, match)
 		)
 			.select(
-				"confirmation_number hotelId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency pickedRoomsType pickedRoomsPricing"
+				"confirmation_number hotelId roomId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency pickedRoomsType pickedRoomsPricing"
 			)
 			.populate("hotelId", "hotelName hotelName_OtherLanguage")
 			.sort({ createdAt: -1, _id: -1 })
 			.maxTimeMS(15000)
 			.lean();
+		const reservationsWithRoomDetails = await attachReportRoomDetails(
+			reservations,
+			"ADMIN EXECUTIVE SUMMARY"
+		);
 
 		return res.json(
 			buildExecutiveReservationSummary(
-				reservations,
+				reservationsWithRoomDetails,
 				dateWindow,
 				comparisonWindow
 			)
@@ -1089,12 +1119,16 @@ exports.specificListOfReservations = async (req, res) => {
 			.sort({ createdAt: -1 })
 			.populate("hotelId", "_id hotelName")
 			.lean();
+		const reservationsWithRoomDetails = await attachReportRoomDetails(
+			reservations,
+			"ADMIN SPECIFIC RESERVATIONS"
+		);
 
-		const totalDocuments = reservations.length;
+		const totalDocuments = reservationsWithRoomDetails.length;
 		const totalPages = Math.ceil(totalDocuments / limit);
 
 		// -------------------- SCORECARDS (based on the same filtered set) --------------------
-		const allReservations = Array.isArray(reservations) ? reservations : [];
+		const allReservations = reservationsWithRoomDetails;
 
 		// 1) Today & Yesterday reservations (by createdAt)
 		const todayReservations = allReservations.filter((r) =>
@@ -1218,7 +1252,7 @@ exports.specificListOfReservations = async (req, res) => {
 		// 9) Return final payload
 		return res.json({
 			success: true,
-			data: reservations, // full set; frontend paginates on the client
+			data: reservationsWithRoomDetails, // full set; frontend paginates on the client
 			totalDocuments,
 			currentPage: page,
 			totalPages,
@@ -1334,6 +1368,10 @@ exports.exportToExcel = async (req, res) => {
 			.populate("belongsTo", "name phone email")
 			.populate("payment_details")
 			.lean();
+		const reservationsWithRoomDetails = await attachReportRoomDetails(
+			reservations,
+			"ADMIN RESERVATIONS EXPORT"
+		);
 
 		// ------------------------- NEW: Payment Status & Filter Helpers -------------------------
 		// A) Payment Status logic with "Paid Offline"
@@ -1383,7 +1421,7 @@ exports.exportToExcel = async (req, res) => {
 		}
 
 		// C) Build "enriched" array with new payment status
-		let enrichedReservations = reservations.map((r) => {
+		let enrichedReservations = reservationsWithRoomDetails.map((r) => {
 			return {
 				...r,
 				payment_status: computePaymentStatus(r),
@@ -1418,16 +1456,27 @@ exports.exportToExcel = async (req, res) => {
 
 			// Distinct room types
 			let roomTypeString = "";
+			let roomNumberString = "";
 			let roomCount = 0;
-			if (Array.isArray(r.pickedRoomsType) && r.pickedRoomsType.length > 0) {
-				const distinctTypes = new Set(
-					r.pickedRoomsType.map((x) => x.room_type)
-				);
-				const mappedLabels = [...distinctTypes].map((typeVal) => {
+			const reservedTypes = Array.isArray(r.pickedRoomsType)
+				? r.pickedRoomsType
+						.map((room) => room?.room_type || room?.roomType)
+						.filter(Boolean)
+				: [];
+			const distinctTypes = [
+				...new Set(
+					reservedTypes.length > 0 ? reservedTypes : reservationRoomTypes(r)
+				),
+			];
+			if (distinctTypes.length > 0) {
+				const mappedLabels = distinctTypes.map((typeVal) => {
 					const found = ROOM_TYPES_MAPPING.find((rt) => rt.value === typeVal);
 					return found ? found.label : typeVal;
 				});
 				roomTypeString = mappedLabels.join(", ");
+			}
+			roomNumberString = reservationRoomNumbers(r).join(", ");
+			if (Array.isArray(r.pickedRoomsType) && r.pickedRoomsType.length > 0) {
 				roomCount = r.pickedRoomsType.length;
 			}
 
@@ -1444,6 +1493,7 @@ exports.exportToExcel = async (req, res) => {
 				paid_amount: r.paid_amount || 0,
 				paid_offline: paidOffline, // NEW field
 				room_type: roomTypeString,
+				room_number: roomNumberString,
 				room_count: roomCount,
 				createdAt: r.createdAt || null,
 			};

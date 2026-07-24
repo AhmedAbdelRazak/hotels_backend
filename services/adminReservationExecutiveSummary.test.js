@@ -59,9 +59,19 @@ test("executive summary categorizes unique rows without exposing private fields"
 			total_guests: 2,
 			pickedRoomsType: [
 				{
+					room_type: "doubleRooms",
+					displayName: "City View",
 					count: 1,
 					chosenPrice: 280,
 					pricingByDay: [{ price: 280 }, { price: 280 }],
+				},
+			],
+			roomId: [
+				{
+					_id: "room-101",
+					room_number: "101",
+					room_type: "doubleRooms",
+					display_name: "City View",
 				},
 			],
 		},
@@ -94,6 +104,10 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.equal(result.reservations[0].nights, 2);
 	assert.equal(result.reservations[0].averageNightlyAmount, 280);
 	assert.equal(result.reservations[0].amountQuality.status, "verified");
+	assert.deepEqual(result.reservations[0].roomTypes, [
+		"doubleRooms - City View",
+	]);
+	assert.deepEqual(result.reservations[0].roomNumbers, ["101"]);
 	assert.deepEqual(result.reservations[2].activityTypes, ["new-reservation"]);
 	assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
 });

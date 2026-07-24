@@ -395,6 +395,10 @@ test("public and unauthorized detail responses branch before card decryption", (
 	assert.match(controller, /detailsView && !fullDetailsAllowed/);
 	assert.match(
 		controller,
+		/detailsView[\s\S]*attachAdminReservationRoomDetails[\s\S]*"_id hotelId room_number room_type display_name"/
+	);
+	assert.match(
+		controller,
 		/return res\.status\(404\)\.json\(\{ message: "Reservation not found\." \}\);/
 	);
 });

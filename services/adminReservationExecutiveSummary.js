@@ -1,4 +1,8 @@
 const moment = require("moment-timezone");
+const {
+	reservationRoomNumbers,
+	reservationRoomTypes,
+} = require("./reservationRoomSummary");
 
 const EXECUTIVE_SUMMARY_TIMEZONE = "Asia/Riyadh";
 const EXECUTIVE_SUMMARY_TIMEZONE_LABEL = "Makkah Time";
@@ -252,6 +256,8 @@ const serializeExecutiveReservation = (reservation, activityTypes) => {
 		checkoutDate: isoOrNull(reservation.checkout_date),
 		createdAt: isoOrNull(reservation.createdAt),
 		rooms: Math.max(0, safeNumber(reservation.total_rooms)),
+		roomTypes: reservationRoomTypes(reservation),
+		roomNumbers: reservationRoomNumbers(reservation),
 		guests: Math.max(0, safeNumber(reservation.total_guests)),
 		totalAmount: safeNumber(reservation.total_amount),
 		currency: String(reservation.currency || "SAR").toUpperCase(),
