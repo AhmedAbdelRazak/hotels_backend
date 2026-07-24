@@ -282,6 +282,8 @@ const reservationsSchema = new mongoose.Schema(
 					last_reason_code: "",
 					last_decision: "",
 					last_response_payload: {},
+					request_context: {},
+					outbound_metadata: {},
 					callbacks: [],
 				},
 				vcc: {

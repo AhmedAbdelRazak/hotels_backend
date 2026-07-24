@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const Reservations = require("../models/reservations");
 const Rooms = require("../models/rooms");
 const User = require("../models/user");
+const HotelDetails = require("../models/hotel_details");
 const { getSarConversionMeta } = require("../services/otaReservationMapper");
 const {
 	configuredSuperAdminIds,
@@ -25,6 +26,11 @@ const {
 	validateConfig,
 	verifySignature,
 } = require("../services/bofaSecureAcceptance");
+const {
+	buildBankReferenceNumber,
+	buildHostedMerchantDefinedData,
+	buildReservationPaymentContext,
+} = require("../services/bofaReservationContext");
 
 const configuredMaxAttempts = Number(process.env.BOFA_VCC_MAX_ATTEMPTS || 2);
 const MAX_ATTEMPTS = Number.isFinite(configuredMaxAttempts)
@@ -168,9 +174,6 @@ const storedMaximumUsd = (reservation) => {
 	);
 };
 
-const buildReferenceNumber = (reservationId) =>
-	`JB-${String(reservationId).slice(-12)}-${Date.now().toString(36)}`.slice(0, 50);
-
 exports.createSession = async (req, res) => {
 	let reservationId = "";
 	let lockToken = "";
@@ -286,7 +289,20 @@ exports.createSession = async (req, res) => {
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + config.sessionTtlMs);
 		const transactionUuid = crypto.randomUUID();
-		const referenceNumber = buildReferenceNumber(reservationId);
+		const referenceNumber = buildBankReferenceNumber(reservation, now.getTime());
+		const hotel = reservation?.hotelId
+			? await HotelDetails.findById(reservation.hotelId).select("hotelName").lean()
+			: null;
+		const paymentContext = buildReservationPaymentContext({
+			reservation,
+			hotelName: hotel?.hotelName || "",
+			provider,
+			referenceNumber,
+			amountUsd,
+			billingProfileId: billing.profileId,
+			billingSource: billing.source,
+		});
+		const merchantDefinedData = buildHostedMerchantDefinedData(paymentContext);
 		lockToken = crypto.randomUUID();
 		const lock = await Reservations.findOneAndUpdate(
 			{
@@ -313,6 +329,12 @@ exports.createSession = async (req, res) => {
 					"bofa_payment.secure_acceptance.transaction_type": "sale",
 					"bofa_payment.secure_acceptance.expires_at": expiresAt,
 					"bofa_payment.secure_acceptance.created_by": String(actor._id),
+					"bofa_payment.secure_acceptance.request_context": paymentContext,
+					"bofa_payment.secure_acceptance.outbound_metadata": {
+						reference_number: referenceNumber,
+						...merchantDefinedData,
+					},
+					"bofa_payment.vcc.metadata": paymentContext,
 				},
 			},
 			{ new: true },
@@ -332,6 +354,7 @@ exports.createSession = async (req, res) => {
 			transactionUuid,
 			amountUsd,
 			billTo: billing.billTo,
+			merchantDefinedData,
 		});
 		return res.status(200).json({
 			success: true,

@@ -129,6 +129,7 @@ const buildHostedCheckoutFields = ({
 	transactionUuid,
 	amountUsd,
 	billTo = {},
+	merchantDefinedData = {},
 }) => {
 	const fields = {
 		access_key: config.accessKey,
@@ -163,6 +164,14 @@ const buildHostedCheckoutFields = ({
 		clean(billTo.country, 2).toUpperCase(),
 		2,
 	);
+	for (let index = 1; index <= 4; index += 1) {
+		addIfPresent(
+			fields,
+			`merchant_defined_data${index}`,
+			merchantDefinedData?.[`merchant_defined_data${index}`],
+			100,
+		);
+	}
 
 	return signFields(fields, config.secretKey);
 };

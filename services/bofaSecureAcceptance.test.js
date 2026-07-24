@@ -36,6 +36,10 @@ test("builds an embedded HPP sale without any card data", () => {
 		transactionUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		amountUsd: 125.5,
 		billTo: { firstName: "Agoda", lastName: "VirtualCard", country: "SG" },
+		merchantDefinedData: {
+			merchant_defined_data1: "OTA_VIRTUAL_CARD",
+			merchant_defined_data2: "OTA=Agoda",
+		},
 	});
 	assert.equal(fields.transaction_type, "sale");
 	assert.equal(fields.currency, "USD");
@@ -47,6 +51,8 @@ test("builds an embedded HPP sale without any card data", () => {
 	assert.equal(fields.unsigned_field_names, undefined);
 	assert.ok(fields.signed_field_names.includes("amount"));
 	assert.ok(fields.signed_field_names.includes("bill_to_forename"));
+	assert.equal(fields.merchant_defined_data1, "OTA_VIRTUAL_CARD");
+	assert.ok(fields.signed_field_names.includes("merchant_defined_data1"));
 	assert.equal(verifySignature(fields, config.secretKey).ok, true);
 
 	const tampered = { ...fields, amount: "1.00" };
