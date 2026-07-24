@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
 	buildAbandonedSessionAudit,
+	canResumeActiveHostedSession,
 	canReleaseAbandonedHostedSession,
 } = require("./bofaHostedSessionState");
 
@@ -58,4 +59,36 @@ test("abandoned session audit keeps payment context but no card data", () => {
 	assert.equal(audit.confirmed_by, "super-admin-1");
 	assert.equal(audit.gateway_identifiers_present, false);
 	assert.equal(JSON.stringify(audit).includes("card_number"), false);
+});
+
+test("an active callback-free checkout can be resumed but not after expiry", () => {
+	const reservation = blankExpiredSession();
+	reservation.bofa_payment.secure_acceptance.status = "pending";
+	reservation.bofa_payment.secure_acceptance.expires_at = new Date(
+		"2026-07-24T02:00:00.000Z",
+	);
+	reservation.bofa_payment.vcc.processing = true;
+	reservation.bofa_payment.vcc.outcome_unknown = false;
+	assert.equal(
+		canResumeActiveHostedSession(
+			reservation,
+			new Date("2026-07-24T01:30:00.000Z"),
+		),
+		true,
+	);
+	assert.equal(
+		canResumeActiveHostedSession(
+			reservation,
+			new Date("2026-07-24T02:00:01.000Z"),
+		),
+		false,
+	);
+	reservation.bofa_payment.secure_acceptance.last_transaction_id = "txn-1";
+	assert.equal(
+		canResumeActiveHostedSession(
+			reservation,
+			new Date("2026-07-24T01:30:00.000Z"),
+		),
+		false,
+	);
 });

@@ -20,6 +20,8 @@ const {
 	buildHostedCheckoutFields,
 	classifyReply,
 	parseReply,
+	resignHostedCheckoutFields,
+	resumableHostedCheckoutFields,
 	resolveConfig,
 	safeReplyAudit,
 	validateConfig,
@@ -32,6 +34,7 @@ const {
 } = require("../services/bofaReservationContext");
 const {
 	buildAbandonedSessionAudit,
+	canResumeActiveHostedSession,
 	canReleaseAbandonedHostedSession,
 } = require("../services/bofaHostedSessionState");
 
@@ -113,10 +116,12 @@ const baseStatus = (reservation, provider = "") => {
 		secureAcceptance: {
 			status: clean(sa.status) || "not_started",
 			referenceNumber: clean(sa.last_reference_number, 50),
+			amountUsd: round2(sa.amount_usd),
 			expiresAt: sa.expires_at || null,
 			lastCallbackAt: sa.last_callback_at || null,
 			lastDecision: clean(sa.last_decision, 30),
 			lastReasonCode: clean(sa.last_reason_code, 20),
+			resumeAvailable: canResumeActiveHostedSession(reservation),
 		},
 	};
 };
@@ -314,6 +319,99 @@ exports.createSession = async (req, res) => {
 				bofaStatus: status,
 			});
 		}
+		if (status.alreadyCharged) {
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_VCC_ALREADY_CHARGED",
+				message: "This reservation was already charged via OTA virtual card.",
+				alreadyCharged: true,
+				bofaStatus: status,
+			});
+		}
+
+		if (status.processing && canResumeActiveHostedSession(reservation)) {
+			const sa = reservation?.bofa_payment?.secure_acceptance || {};
+			const resumeAmountUsd = round2(sa.amount_usd);
+			const maximumUsd = storedMaximumUsd(reservation);
+			if (maximumUsd > 0 && resumeAmountUsd > maximumUsd + 0.001) {
+				return res.status(409).json({
+					success: false,
+					issue: "BOFA_VCC_AMOUNT_EXCEEDS_SAVED_LIMIT",
+					message: `The active checkout amount of $${money(
+						resumeAmountUsd,
+					)} USD exceeds the saved OTA virtual-card amount of $${money(
+						maximumUsd,
+					)} USD.`,
+					maximumAmountUsd: maximumUsd,
+					bofaStatus: status,
+				});
+			}
+			const savedMetadata = sa.outbound_metadata || {};
+			const merchantDefinedData = Object.fromEntries(
+				Object.entries(savedMetadata).filter(([name]) =>
+					/^merchant_defined_data[1-4]$/.test(name),
+				),
+			);
+			const resumeNow = new Date();
+			const resumeExpiresAt = new Date(sa.expires_at);
+			const savedFields = sa.hosted_request_fields || {};
+			const fields = Object.keys(savedFields).length
+				? resignHostedCheckoutFields(savedFields, config.secretKey, resumeNow)
+				: buildHostedCheckoutFields({
+						config,
+						referenceNumber: sa.last_reference_number,
+						transactionUuid: sa.last_transaction_uuid,
+						amountUsd: resumeAmountUsd,
+						billTo: billing.billTo,
+						merchantDefinedData,
+					});
+			const resumed = await Reservations.updateOne(
+				{
+					_id: reservationId,
+					"bofa_payment.secure_acceptance.status": "pending",
+					"bofa_payment.secure_acceptance.last_reference_number":
+						sa.last_reference_number,
+					"bofa_payment.secure_acceptance.last_transaction_uuid":
+						sa.last_transaction_uuid,
+					"bofa_payment.vcc.processing": true,
+					"bofa_payment.vcc.charged": { $ne: true },
+					"payment_details.bofaVccCharged": { $ne: true },
+				},
+				{
+					$set: {
+						"bofa_payment.secure_acceptance.last_signed_at": resumeNow,
+						"bofa_payment.secure_acceptance.hosted_request_fields":
+							resumableHostedCheckoutFields(fields),
+					},
+				},
+			);
+			if (resumed.modifiedCount !== 1) {
+				return res.status(409).json({
+					success: false,
+					issue: "BOFA_SA_SESSION_STATE_CHANGED",
+					message:
+						"The Bank of America state changed while the secure form was resuming. Refresh the reservation before continuing.",
+				});
+			}
+			return res.status(200).json({
+				success: true,
+				resumed: true,
+				mode: "embedded_hosted_checkout",
+				method: "POST",
+				endpointUrl: config.endpointUrl,
+				fields,
+				session: {
+					referenceNumber: sa.last_reference_number,
+					transactionUuid: sa.last_transaction_uuid,
+					amountUsd: resumeAmountUsd,
+					currency: "USD",
+					expiresAt: resumeExpiresAt,
+					provider,
+					resumed: true,
+				},
+			});
+		}
+
 		const maximumUsd = storedMaximumUsd(reservation);
 		if (maximumUsd > 0 && amountUsd > maximumUsd + 0.001) {
 			return res.status(409).json({
@@ -325,15 +423,6 @@ exports.createSession = async (req, res) => {
 					maximumUsd,
 				)} USD.`,
 				maximumAmountUsd: maximumUsd,
-				bofaStatus: status,
-			});
-		}
-		if (status.alreadyCharged) {
-			return res.status(409).json({
-				success: false,
-				issue: "BOFA_VCC_ALREADY_CHARGED",
-				message: "This reservation was already charged via OTA virtual card.",
-				alreadyCharged: true,
 				bofaStatus: status,
 			});
 		}
@@ -367,6 +456,14 @@ exports.createSession = async (req, res) => {
 			billingSource: billing.source,
 		});
 		const merchantDefinedData = buildHostedMerchantDefinedData(paymentContext);
+		const fields = buildHostedCheckoutFields({
+			config,
+			referenceNumber,
+			transactionUuid,
+			amountUsd,
+			billTo: billing.billTo,
+			merchantDefinedData,
+		});
 		lockToken = crypto.randomUUID();
 		const lock = await Reservations.findOneAndUpdate(
 			{
@@ -398,6 +495,8 @@ exports.createSession = async (req, res) => {
 						reference_number: referenceNumber,
 						...merchantDefinedData,
 					},
+					"bofa_payment.secure_acceptance.hosted_request_fields":
+						resumableHostedCheckoutFields(fields),
 					"bofa_payment.vcc.metadata": paymentContext,
 				},
 			},
@@ -412,14 +511,6 @@ exports.createSession = async (req, res) => {
 			});
 		}
 
-		const fields = buildHostedCheckoutFields({
-			config,
-			referenceNumber,
-			transactionUuid,
-			amountUsd,
-			billTo: billing.billTo,
-			merchantDefinedData,
-		});
 		return res.status(200).json({
 			success: true,
 			mode: "embedded_hosted_checkout",

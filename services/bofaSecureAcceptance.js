@@ -29,10 +29,13 @@ const resolveEnvironment = (env = process.env) => {
 
 const resolveConfig = (env = process.env) => {
 	const environment = resolveEnvironment(env);
-	const sessionTtlCandidate = Number(env.BOFA_SA_SESSION_TTL_MS || 30 * 60 * 1000);
+	// Secure Acceptance reason code 104 documents duplicate detection for the
+	// same access key + transaction UUID within 15 minutes. Keep every resumable
+	// form inside that provider window and never extend it when the form resumes.
+	const sessionTtlCandidate = Number(env.BOFA_SA_SESSION_TTL_MS || 14 * 60 * 1000);
 	const sessionTtlMs = Number.isFinite(sessionTtlCandidate)
-		? Math.min(Math.max(sessionTtlCandidate, 5 * 60 * 1000), 60 * 60 * 1000)
-		: 30 * 60 * 1000;
+		? Math.min(Math.max(sessionTtlCandidate, 5 * 60 * 1000), 14 * 60 * 1000)
+		: 14 * 60 * 1000;
 	const appOrigin = clean(
 		env.BOFA_SA_APP_ORIGIN ||
 			(environment === "live" ? "https://xhotelpro.com" : "http://localhost:3000"),
@@ -98,6 +101,21 @@ const signFields = (inputFields, secretKey) => {
 	fields.signed_field_names = signedNames.join(",");
 	fields.signature = hmacBase64(secretKey, dataToSign(fields, signedNames));
 	return fields;
+};
+
+const resumableHostedCheckoutFields = (fields = {}) => {
+	const allowed = /^(?:access_key|profile_id|transaction_uuid|signed_date_time|reference_number|transaction_type|amount|currency|locale|payment_method|bill_to_(?:forename|surname|email|phone|address_line1|address_city|address_state|address_postal_code|address_country)|merchant_defined_data[1-4])$/;
+	return Object.fromEntries(
+		Object.entries(fields)
+			.filter(([name]) => allowed.test(name))
+			.map(([name, value]) => [name, clean(value, 1000)]),
+	);
+};
+
+const resignHostedCheckoutFields = (fields, secretKey, now = new Date()) => {
+	const resumable = resumableHostedCheckoutFields(fields);
+	resumable.signed_date_time = now.toISOString().replace(/\.\d{3}Z$/, "Z");
+	return signFields(resumable, secretKey);
 };
 
 const verifySignature = (payload, secretKey) => {
@@ -275,6 +293,8 @@ module.exports = {
 	dataToSign,
 	hmacBase64,
 	parseReply,
+	resignHostedCheckoutFields,
+	resumableHostedCheckoutFields,
 	resolveConfig,
 	safeReplyAudit,
 	signFields,

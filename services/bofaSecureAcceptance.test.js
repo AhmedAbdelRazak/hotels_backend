@@ -6,6 +6,8 @@ const {
 	buildHostedCheckoutFields,
 	classifyReply,
 	parseReply,
+	resignHostedCheckoutFields,
+	resumableHostedCheckoutFields,
 	resolveConfig,
 	signFields,
 	verifySignature,
@@ -30,6 +32,7 @@ test("builds an embedded HPP sale without any card data", () => {
 		runtime.endpointUrl,
 		"https://secureacceptance.merchant-services.bankofamerica.com/embedded/pay",
 	);
+	assert.equal(runtime.sessionTtlMs, 14 * 60 * 1000);
 	const fields = buildHostedCheckoutFields({
 		config: { ...runtime, ...config },
 		referenceNumber: "JB-RESERVATION-1",
@@ -93,4 +96,36 @@ test("accepts only a signed full approval and rejects partial approval as charge
 	);
 	assert.equal(classifyReply(partial).charged, false);
 	assert.equal(classifyReply(partial).status, "review");
+});
+
+test("resumes the same hosted transaction without storing or adding card data", () => {
+	const original = buildHostedCheckoutFields({
+		config,
+		referenceNumber: "JB-RESUME-1",
+		transactionUuid: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+		amountUsd: 10,
+		billTo: { postalCode: "92376", country: "US" },
+		merchantDefinedData: { merchant_defined_data1: "OTA_VIRTUAL_CARD" },
+	});
+	const stored = resumableHostedCheckoutFields({
+		...original,
+		card_number: "4111111111111111",
+		card_cvn: "123",
+	});
+	assert.equal(stored.signature, undefined);
+	assert.equal(stored.signed_field_names, undefined);
+	assert.equal(stored.card_number, undefined);
+	assert.equal(stored.card_cvn, undefined);
+
+	const resumed = resignHostedCheckoutFields(
+		stored,
+		config.secretKey,
+		new Date("2026-07-24T01:30:00.000Z"),
+	);
+	assert.equal(resumed.reference_number, original.reference_number);
+	assert.equal(resumed.transaction_uuid, original.transaction_uuid);
+	assert.equal(resumed.amount, "10.00");
+	assert.equal(resumed.bill_to_address_postal_code, "92376");
+	assert.equal(resumed.signed_date_time, "2026-07-24T01:30:00Z");
+	assert.equal(verifySignature(resumed, config.secretKey).ok, true);
 });

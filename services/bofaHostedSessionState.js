@@ -16,6 +16,28 @@ const hasGatewayIdentifier = (reservation) => {
 	);
 };
 
+const canResumeActiveHostedSession = (reservation, now = new Date()) => {
+	const sa = reservation?.bofa_payment?.secure_acceptance || {};
+	const vcc = reservation?.bofa_payment?.vcc || {};
+	const callbacks = Array.isArray(sa.callbacks) ? sa.callbacks : [];
+	const expiresAt = sa.expires_at ? new Date(sa.expires_at) : null;
+	const charged = !!vcc.charged || !!reservation?.payment_details?.bofaVccCharged;
+	return (
+		sa.status === "pending" &&
+		!!vcc.processing &&
+		!charged &&
+		callbacks.length === 0 &&
+		!sa.last_callback_at &&
+		!hasGatewayIdentifier(reservation) &&
+		!!clean(sa.last_reference_number, 50) &&
+		!!clean(sa.last_transaction_uuid, 64) &&
+		Number(sa.amount_usd || 0) > 0 &&
+		expiresAt instanceof Date &&
+		!Number.isNaN(expiresAt.getTime()) &&
+		expiresAt > now
+	);
+};
+
 const canReleaseAbandonedHostedSession = (reservation, referenceNumber = "") => {
 	const sa = reservation?.bofa_payment?.secure_acceptance || {};
 	const vcc = reservation?.bofa_payment?.vcc || {};
@@ -54,6 +76,7 @@ const buildAbandonedSessionAudit = (reservation, { actorId = "", at = new Date()
 
 module.exports = {
 	buildAbandonedSessionAudit,
+	canResumeActiveHostedSession,
 	canReleaseAbandonedHostedSession,
 	hasGatewayIdentifier,
 };
