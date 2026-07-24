@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -159,4 +161,24 @@ test("does not infer physical rooms from pricing, counts, or bed assignments", a
 	);
 
 	assert.deepEqual(result[0].roomDetails, []);
+});
+
+test("admin paid and profit reports use the guarded room enrichment service", () => {
+	const adminReportsSource = fs.readFileSync(
+		path.join(__dirname, "..", "controllers", "adminreports.js"),
+		"utf8",
+	);
+	const overallDashboardSource = fs.readFileSync(
+		path.join(__dirname, "..", "controllers", "overall_dashboard.js"),
+		"utf8",
+	);
+
+	assert.match(
+		adminReportsSource,
+		/paidBreakdownReportAdmin[\s\S]*attachReportRoomDetails\([\s\S]*ADMIN PAID BREAKDOWN/,
+	);
+	assert.match(
+		overallDashboardSource,
+		/listProfitReport[\s\S]*attachOverallReservationRoomDetails\([\s\S]*OVERALL PROFIT REPORT/,
+	);
 });

@@ -63,6 +63,9 @@ const {
 	buildAdminPendingConfirmationQuery,
 	buildAdminReservationCycleHotelFilter,
 } = require("../services/adminReservationCycleScope");
+const {
+	attachAdminReservationRoomDetails,
+} = require("../services/adminReservationRoomDetails");
 
 const ObjectId = mongoose.Types.ObjectId;
 const SYSTEM_ADMIN_ROLE = 10000;
@@ -74,6 +77,28 @@ const SIGNUP_INVITATION_DAYS = 30;
 const EXECUTIVE_REPORT_START_DATE = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
 const PROFIT_REPORT_START_DATE = new Date(Date.UTC(2026, 4, 1, 0, 0, 0, 0));
 const EXECUTIVE_REPORT_TIMEZONE = "Asia/Riyadh";
+
+const attachOverallReservationRoomDetails = async (
+	reservations = [],
+	reportName = "overall report",
+) => {
+	try {
+		return await attachAdminReservationRoomDetails(reservations, (roomIds) =>
+			Rooms.find({ _id: { $in: roomIds } })
+				.select("_id hotelId room_number room_type display_name")
+				.lean()
+				.exec(),
+		);
+	} catch (error) {
+		console.error(
+			`[${reportName}] Room details enrichment failed:`,
+			error?.message || error,
+		);
+		return (Array.isArray(reservations) ? reservations : []).map(
+			(reservation) => ({ ...reservation, roomDetails: [] }),
+		);
+	}
+};
 const EXECUTIVE_PAID_BREAKDOWN_KEYS = [
 	"paid_online_via_link",
 	"paid_at_hotel_cash",
@@ -2848,6 +2873,10 @@ const listProfitReport = async ({ actor, hotels, query = {} }) => {
 		...(facet.scorecards?.[0] || {}),
 	};
 	const total = Number(facet.total?.[0]?.total || 0);
+	const profitReservations = await attachOverallReservationRoomDetails(
+		(facet.rows || []).map(normalizeProfitRow),
+		"OVERALL PROFIT REPORT",
+	);
 
 	return {
 		asOf: new Date(),
@@ -2888,7 +2917,7 @@ const listProfitReport = async ({ actor, hotels, query = {} }) => {
 					facet.bookingSources || []
 			  )
 			: facet.bookingSources || [],
-		reservations: (facet.rows || []).map(normalizeProfitRow),
+		reservations: profitReservations,
 	};
 };
 

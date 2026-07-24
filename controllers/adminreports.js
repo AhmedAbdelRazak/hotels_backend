@@ -4807,9 +4807,13 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			.limit(limit)
 			.populate("hotelId", "hotelName belongsTo")
 			.lean();
+		const reservationsWithRoomDetails = await attachReportRoomDetails(
+			reservations,
+			"ADMIN PAID BREAKDOWN",
+		);
 
 		const scorecards = await buildPaidBreakdownScorecards(baseFilter);
-		const data = reservations.map((reservation) => {
+		const data = reservationsWithRoomDetails.map((reservation) => {
 			const breakdown = reservation.paid_amount_breakdown || {};
 			const paidTotal = computePaidBreakdownTotal(breakdown);
 			return {
@@ -4855,13 +4859,17 @@ exports.paidBreakdownReportHotel = async (req, res) => {
 			.limit(limit)
 			.populate("hotelId", "hotelName belongsTo")
 			.lean();
+		const reservationsWithRoomDetails = await attachReportRoomDetails(
+			reservations,
+			"HOTEL PAID BREAKDOWN",
+		);
 
 		const scorecards = await buildPaidBreakdownScorecards(baseFilter, {
 			hotelVisible: true,
 		});
 		const hotelVisibleReservations =
 			sanitizeReservationAuditLogsCollectionForViewer(
-				reservations,
+				reservationsWithRoomDetails,
 				withHotelManagementSourceViewContext(req.profile, req)
 			);
 		const data = hotelVisibleReservations.map((reservation) => {
