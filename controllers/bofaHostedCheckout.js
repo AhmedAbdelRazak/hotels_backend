@@ -19,6 +19,7 @@ const {
 const {
 	buildHostedCheckoutFields,
 	classifyReply,
+	declineDisplayMessage,
 	parseReply,
 	resignHostedCheckoutFields,
 	resumableHostedCheckoutFields,
@@ -91,6 +92,15 @@ const baseStatus = (reservation, provider = "") => {
 	const vcc = reservation?.bofa_payment?.vcc || {};
 	const sa = reservation?.bofa_payment?.secure_acceptance || {};
 	const failed = Number(vcc.failed_attempts_count || 0);
+	const lastFailureCode = clean(vcc.last_failure_code);
+	const rawLastFailureMessage = clean(vcc.last_failure_message, 600);
+	const lastFailureMessage =
+		lastFailureCode || rawLastFailureMessage
+			? declineDisplayMessage({
+					reasonCode: lastFailureCode,
+					message: rawLastFailureMessage,
+			  })
+			: "";
 	const charged = !!vcc.charged || !!reservation?.payment_details?.bofaVccCharged;
 	const outcomeUnknown = !!vcc.outcome_unknown;
 	return {
@@ -102,8 +112,9 @@ const baseStatus = (reservation, provider = "") => {
 			!charged && !outcomeUnknown && failed > 0 && failed < MAX_ATTEMPTS,
 		failedAttemptsCount: failed,
 		maxAttempts: MAX_ATTEMPTS,
-		lastFailureCode: clean(vcc.last_failure_code),
-		lastFailureMessage: clean(vcc.last_failure_message, 600),
+		lastFailureCode,
+		lastFailureMessage,
+		retryAttemptsRemaining: Math.max(0, MAX_ATTEMPTS - failed),
 		lastAttemptAt: vcc.last_attempt_at || null,
 		lastSuccessAt: vcc.last_success_at || null,
 		lastFailureAt: vcc.last_failure_at || null,
@@ -688,8 +699,7 @@ const processCallback = async (payload, source) => {
 			"bofa_payment.vcc.outcome_unknown": false,
 			"bofa_payment.vcc.last_failure_at": now,
 			"bofa_payment.vcc.last_failure_code": reply.reasonCode,
-			"bofa_payment.vcc.last_failure_message":
-				reply.message || "Bank of America declined the virtual card.",
+			"bofa_payment.vcc.last_failure_message": declineDisplayMessage(reply),
 		});
 		update.$inc = {
 			"bofa_payment.vcc.attempts_count": 1,

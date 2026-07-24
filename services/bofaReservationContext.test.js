@@ -32,7 +32,7 @@ test("builds a traceable internal OTA VCC context without card or guest data", (
 		provider: "agoda",
 		referenceNumber,
 		amountUsd: 108.8,
-		billingProfileId: "agoda-sg-v1",
+		billingProfileId: "agoda-sg-v2",
 		billingSource: "built_in",
 	});
 
@@ -64,6 +64,10 @@ test("emits only non-PII merchant-defined fields and hashes the OTA reference", 
 	assert.equal(fields.merchant_defined_data3, "HOTEL=Zyd Agyad");
 	assert.match(fields.merchant_defined_data4, /STAY=2026-07-19\/2026-07-25/);
 	assert.match(fields.merchant_defined_data4, /OTA_REF_SHA256=[a-f0-9]{16}/);
+	assert.equal(fields.merchant_defined_data5, "OTA_VIRTUAL_CARD");
+	assert.equal(fields.merchant_defined_data6, "OTA=Agoda");
+	assert.equal(fields.merchant_defined_data7, "HOTEL=Zyd Agyad");
+	assert.equal(fields.merchant_defined_data8, fields.merchant_defined_data4);
 	assert.equal(serialized.includes("675894003"), false);
 	assert.equal(serialized.includes("This must never"), false);
 	for (const value of Object.values(fields)) assert.ok(value.length <= 100);

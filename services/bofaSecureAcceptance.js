@@ -104,7 +104,7 @@ const signFields = (inputFields, secretKey) => {
 };
 
 const resumableHostedCheckoutFields = (fields = {}) => {
-	const allowed = /^(?:access_key|profile_id|transaction_uuid|signed_date_time|reference_number|transaction_type|amount|currency|locale|payment_method|bill_to_(?:forename|surname|email|phone|address_line1|address_city|address_state|address_postal_code|address_country)|merchant_defined_data[1-4])$/;
+	const allowed = /^(?:access_key|profile_id|transaction_uuid|signed_date_time|reference_number|transaction_type|amount|currency|locale|payment_method|bill_to_(?:forename|surname|company_name|email|phone|address_line1|address_city|address_state|address_postal_code|address_country)|merchant_defined_data[1-8])$/;
 	return Object.fromEntries(
 		Object.entries(fields)
 			.filter(([name]) => allowed.test(name))
@@ -165,6 +165,7 @@ const buildHostedCheckoutFields = ({
 
 	addIfPresent(fields, "bill_to_forename", billTo.firstName, 60);
 	addIfPresent(fields, "bill_to_surname", billTo.lastName, 60);
+	addIfPresent(fields, "bill_to_company_name", billTo.companyName, 60);
 	addIfPresent(fields, "bill_to_email", billTo.email, 255);
 	addIfPresent(fields, "bill_to_phone", billTo.phoneNumber, 20);
 	addIfPresent(fields, "bill_to_address_line1", billTo.address1, 60);
@@ -182,7 +183,7 @@ const buildHostedCheckoutFields = ({
 		clean(billTo.country, 2).toUpperCase(),
 		2,
 	);
-	for (let index = 1; index <= 4; index += 1) {
+	for (let index = 1; index <= 8; index += 1) {
 		addIfPresent(
 			fields,
 			`merchant_defined_data${index}`,
@@ -286,10 +287,20 @@ const safeReplyAudit = (reply) => ({
 	message: clean(reply.message, 600),
 });
 
+const declineDisplayMessage = (reply = {}) => {
+	const reasonCode = clean(reply.reasonCode, 20);
+	const processorMessage = clean(reply.message, 300);
+	if (reasonCode === "203") {
+		return "The card issuer hard-declined this OTA virtual card for this merchant (code 203: Invalid merchant). No charge was recorded. Confirm with Agoda or Expedia that the card is enabled for this hotel's Bank of America merchant account before using the remaining retry, or use a different virtual card.";
+	}
+	return processorMessage || "Bank of America declined this card.";
+};
+
 module.exports = {
 	HPP_ENDPOINTS,
 	buildHostedCheckoutFields,
 	classifyReply,
+	declineDisplayMessage,
 	dataToSign,
 	hmacBase64,
 	parseReply,

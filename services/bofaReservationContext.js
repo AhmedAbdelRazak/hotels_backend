@@ -132,7 +132,7 @@ const buildHostedMerchantDefinedData = (context = {}) => {
 	const otaHash = clean(context.ota_confirmation_sha256_16, 16);
 	const outboundHotelName =
 		cleanOutboundAscii(context.hotel_name, 90) || "UNSPECIFIED";
-	return {
+	const reportingFields = {
 		merchant_defined_data1: "OTA_VIRTUAL_CARD",
 		merchant_defined_data2: cleanOutboundAscii(
 			`OTA=${context.ota_name || "Other OTA"}`,
@@ -148,6 +148,15 @@ const buildHostedMerchantDefinedData = (context = {}) => {
 				.join(";"),
 			100,
 		),
+	};
+	return {
+		...reportingFields,
+		// Fields 5-100 are passed to Decision Manager. Repeat the same non-PII
+		// operational context so the fraud engine recognizes intentional OTA VCCs.
+		merchant_defined_data5: reportingFields.merchant_defined_data1,
+		merchant_defined_data6: reportingFields.merchant_defined_data2,
+		merchant_defined_data7: reportingFields.merchant_defined_data3,
+		merchant_defined_data8: reportingFields.merchant_defined_data4,
 	};
 };
 

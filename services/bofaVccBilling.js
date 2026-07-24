@@ -15,6 +15,7 @@ const PROVIDER_DEFAULTS = Object.freeze({
 		label: "Expedia",
 		firstName: "Expedia",
 		lastName: "VirtualCard",
+		companyName: "Expedia Group",
 		address1: "1111 Expedia Group Way W",
 		locality: "Seattle",
 		administrativeArea: "WA",
@@ -22,10 +23,11 @@ const PROVIDER_DEFAULTS = Object.freeze({
 		country: "US",
 	}),
 	agoda: Object.freeze({
-		profileId: "agoda-sg-v1",
+		profileId: "agoda-sg-v2",
 		label: "Agoda",
-		firstName: "Agoda",
-		lastName: "VirtualCard",
+		firstName: "Agoda Company",
+		lastName: "Pte Ltd.",
+		companyName: "Agoda Company Pte Ltd.",
 		address1: "30 Cecil Street",
 		locality: "Singapore",
 		administrativeArea: "Singapore",
@@ -44,6 +46,7 @@ const PROVIDER_LABELS = Object.freeze({
 const PROFILE_ENV_FIELDS = Object.freeze({
 	firstName: "FIRST_NAME",
 	lastName: "LAST_NAME",
+	companyName: "COMPANY_NAME",
 	address1: "ADDRESS1",
 	locality: "LOCALITY",
 	administrativeArea: "ADMIN_AREA",
@@ -115,7 +118,7 @@ const resolveServerBillingProfile = (
 		}_BILLING`;
 		const fallbackEmail =
 			clean(env?.BOFA_VCC_FALLBACK_EMAIL, 255) ||
-			"support@jannatbooking.com";
+			"ahmed.abdelrazak@jannatbooking.com";
 		const defaultLabel = providerLabel(provider);
 		const firstName =
 			clean(env?.[`${prefix}_FIRST_NAME`], 60) ||
@@ -163,11 +166,13 @@ const resolveServerBillingProfile = (
 	};
 
 	const fallbackEmail =
-		clean(env?.BOFA_VCC_FALLBACK_EMAIL, 255) || "support@jannatbooking.com";
+		clean(env?.BOFA_VCC_FALLBACK_EMAIL, 255) ||
+		"ahmed.abdelrazak@jannatbooking.com";
 	const phoneNumber = valueFor("phoneNumber", 20);
 	const billTo = {
 		firstName: valueFor("firstName", 60),
 		lastName: valueFor("lastName", 60),
+		companyName: valueFor("companyName", 60),
 		address1: valueFor("address1", 60),
 		locality: valueFor("locality", 50),
 		administrativeArea: valueFor("administrativeArea", 20),

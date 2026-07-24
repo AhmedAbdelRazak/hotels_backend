@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
 	buildHostedCheckoutFields,
 	classifyReply,
+	declineDisplayMessage,
 	parseReply,
 	resignHostedCheckoutFields,
 	resumableHostedCheckoutFields,
@@ -12,6 +13,16 @@ const {
 	signFields,
 	verifySignature,
 } = require("./bofaSecureAcceptance");
+
+test("reason 203 explains the issuer hard decline without implying an app failure", () => {
+	const message = declineDisplayMessage({
+		reasonCode: "203",
+		message: "Invalid merchant",
+	});
+	assert.match(message, /issuer hard-declined/i);
+	assert.match(message, /No charge was recorded/i);
+	assert.match(message, /Agoda or Expedia/i);
+});
 
 const config = {
 	profileId: "11111111-2222-4333-8444-555555555555",
@@ -38,10 +49,17 @@ test("builds an embedded HPP sale without any card data", () => {
 		referenceNumber: "JB-RESERVATION-1",
 		transactionUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		amountUsd: 125.5,
-		billTo: { firstName: "Agoda", lastName: "VirtualCard", country: "SG" },
+		billTo: {
+			firstName: "Agoda Company",
+			lastName: "Pte Ltd.",
+			companyName: "Agoda Company Pte Ltd.",
+			country: "SG",
+		},
 		merchantDefinedData: {
 			merchant_defined_data1: "OTA_VIRTUAL_CARD",
 			merchant_defined_data2: "OTA=Agoda",
+			merchant_defined_data5: "OTA_VIRTUAL_CARD",
+			merchant_defined_data6: "OTA=Agoda",
 		},
 	});
 	assert.equal(fields.transaction_type, "sale");
@@ -56,6 +74,9 @@ test("builds an embedded HPP sale without any card data", () => {
 	assert.ok(fields.signed_field_names.includes("bill_to_forename"));
 	assert.equal(fields.merchant_defined_data1, "OTA_VIRTUAL_CARD");
 	assert.ok(fields.signed_field_names.includes("merchant_defined_data1"));
+	assert.equal(fields.bill_to_company_name, "Agoda Company Pte Ltd.");
+	assert.equal(fields.merchant_defined_data5, "OTA_VIRTUAL_CARD");
+	assert.ok(fields.signed_field_names.includes("merchant_defined_data6"));
 	assert.equal(verifySignature(fields, config.secretKey).ok, true);
 
 	const tampered = { ...fields, amount: "1.00" };

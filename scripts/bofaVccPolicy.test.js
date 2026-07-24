@@ -33,6 +33,11 @@ test("BofA VCC amount validation is USD-only and cent precise", () => {
 		amountUsd: 125.45,
 		currency: "USD",
 	});
+	assert.deepEqual(validateUsdAmount("67.3", "USD"), {
+		ok: true,
+		amountUsd: 67.3,
+		currency: "USD",
+	});
 	assert.equal(validateUsdAmount("125.455", "USD").ok, false);
 	assert.equal(validateUsdAmount("125.45", "SAR").issue, "BOFA_VCC_USD_REQUIRED");
 	assert.equal(validateUsdAmount("0", "USD").ok, false);

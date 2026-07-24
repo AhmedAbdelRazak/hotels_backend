@@ -44,6 +44,11 @@ test("Expedia and Agoda use complete server-owned billing profiles", () => {
 		},
 		{ postalCode: "049712", country: "SG" },
 	);
+	const agoda = resolveServerBillingProfile("agoda", { env: {} });
+	assert.equal(agoda.billTo.firstName, "Agoda Company");
+	assert.equal(agoda.billTo.lastName, "Pte Ltd.");
+	assert.equal(agoda.billTo.companyName, "Agoda Company Pte Ltd.");
+	assert.equal(agoda.billTo.email, "ahmed.abdelrazak@jannatbooking.com");
 });
 
 test("server environment can override an issuer-specific profile", () => {
