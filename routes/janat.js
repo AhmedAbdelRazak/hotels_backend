@@ -76,7 +76,12 @@ router.get("/active-hotel-list", getListOfHotels);
 router.get("/distinct-rooms", distinctRoomTypes);
 router.get("/room-query-list/:query", gettingRoomListFromQuery);
 router.post("/new-reservation-client", createNewReservationClient);
-router.post("/new-reservation-client-employee", createNewReservationClient2);
+router.post(
+	"/new-reservation-client-employee",
+	requireSignin,
+	requireAdminAccess("JannatTools"),
+	createNewReservationClient2
+);
 router.post("/reservation-verification", verifyReservationToken);
 router.get("/user/reservations/:userId", getUserAndReservationData);
 router.get("/user/hotel/:hotelId", getHotelDetailsById);

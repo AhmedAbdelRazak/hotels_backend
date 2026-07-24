@@ -76,6 +76,9 @@ const {
 const {
 	attachAdminReservationRoomDetails,
 } = require("../services/adminReservationRoomDetails");
+const {
+	canPlatformStaffOverrideReservationInventory,
+} = require("../services/reservationInventoryOverridePolicy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1466,6 +1469,13 @@ const protectAdminManagedPricingUpdate = ({
 		Object.prototype.hasOwnProperty.call(updates, "pickedRoomsPricing") &&
 		Array.isArray(updates.pickedRoomsPricing) &&
 		updates.pickedRoomsPricing.length > 0;
+	const hasAuthorizedPlatformAdminPricingPayload =
+		hasExplicitPricingIntent &&
+		canPlatformStaffOverrideReservationInventory(actor || {}) &&
+		hasCompletePricingPayload;
+	if (hasAuthorizedPlatformAdminPricingPayload) {
+		return { allowed: true };
+	}
 	const otaPricingRouteValidation = validateGenericOtaPricingRoute(reservation, {
 		hasExplicitPricingIntent,
 	});
@@ -2679,6 +2689,20 @@ const isPlatformAdminReservationActor = (actor = {}) => {
 		)
 	);
 };
+
+const isRestrictedOrderTakerReservationActor = (actor = {}) =>
+	!canPlatformStaffOverrideReservationInventory(actor) &&
+	isOrderTakingAccount(actor);
+
+if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
+	Object.assign(exports.__test || (exports.__test = {}), {
+		isOrderTakingAccount,
+		isPlatformAdminReservationActor,
+		isRestrictedOrderTakerReservationActor,
+		isSuperAdminReservationActor,
+		protectAdminManagedPricingUpdate,
+	});
+}
 
 const reservationStatusProgressRank = (status = "") => {
 	const normalized = String(status || "")
@@ -4435,7 +4459,8 @@ exports.create = async (req, res) => {
 					orderTaker: actorSnapshot,
 					orderTakenAt: new Date(),
 					booking_source: req.body?.booking_source || actorBookingSource,
-					forcePendingConfirmation: isOrderTakingAccount(actor),
+					forcePendingConfirmation:
+						isRestrictedOrderTakerReservationActor(actor),
 				};
 			}
 		}
@@ -7152,7 +7177,7 @@ exports.updateReservation = async (req, res) => {
 			}
 		}
 		const orderTakerBasicEditOnly =
-			!superAdminUpdateActor && isOrderTakingAccount(requestingActor || {});
+			isRestrictedOrderTakerReservationActor(requestingActor || {});
 		if (orderTakerBasicEditOnly) {
 			const reservationOwnerIds = [
 				existingReservation.createdByUserId,

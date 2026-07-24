@@ -105,6 +105,9 @@ const {
 const {
 	getReservationVccCaptureSummary,
 } = require("../services/bofaCaptureSummary");
+const {
+	canUseEmployeeReservationInventoryOverride,
+} = require("../services/reservationInventoryOverridePolicy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -6012,7 +6015,12 @@ exports.createNewReservationClient2 = async (req, res) => {
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			req.body,
-			{ allowOverbook: false },
+			{
+				allowOverbook: canUseEmployeeReservationInventoryOverride({
+					account: req.profile,
+					sentFrom,
+				}),
+			},
 		);
 		if (!inventoryValidation.allowed) {
 			return res

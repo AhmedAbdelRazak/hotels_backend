@@ -14,6 +14,7 @@
 		"test:hotel-reviews": "node --test scripts/hotelReviewRegressionChecks.test.js scripts/jannatGuestReviewSummary.test.js scripts/janatGuestReviewCacheInvalidation.test.js scripts/singleReservationAccessRegression.test.js",
 		"test:single-reservation-access": "node --test scripts/singleReservationAccessRegression.test.js",
 		"test:guest-card": "node --test scripts/guestCardRegressionChecks.test.js",
+		"test:reservation-inventory-override": "node --test scripts/reservationInventoryOverrideRegression.test.js",
 		"test:admin-room-details": "node --test scripts/adminReservationRoomDetails.test.js scripts/roomListScopeRegression.test.js",
 		"test:paid-report-dates": "node --test scripts/paidBreakdownDateFilter.test.js",
 		"test:ota-inbound": "node --test services/otaReservationQueue.test.js services/otaInboundSafety.test.js services/otaAiRoomMatcher.test.js services/otaInboundCommunicationClassifier.test.js services/otaInboundControllerSafety.test.js services/otaInboundDedupe.test.js services/otaReservationVisibility.test.js scripts/otaReviewPricingInvariants.test.js scripts/otaReviewConcurrency.test.js",
