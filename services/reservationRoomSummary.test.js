@@ -57,3 +57,23 @@ test("room summary supports legacy room number fields", () => {
 	assert.deepEqual(reservationRoomNumbers(reservation), ["202", "203", "204"]);
 	assert.deepEqual(reservationRoomTypes(reservation), ["quadRooms"]);
 });
+
+test("booked room type takes precedence over a physical room display name", () => {
+	const reservation = {
+		pickedRoomsType: [
+			{ room_type: "familyRooms", displayName: "Family Quintuple Room" },
+		],
+		roomDetails: [
+			{
+				room_number: "501",
+				room_type: "familyRooms",
+				display_name: "Spacious Six-Bed Room",
+			},
+		],
+	};
+
+	assert.deepEqual(reservationRoomTypes(reservation), [
+		"familyRooms - Family Quintuple Room",
+	]);
+	assert.deepEqual(reservationRoomNumbers(reservation), ["501"]);
+});

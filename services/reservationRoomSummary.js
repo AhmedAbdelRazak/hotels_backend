@@ -42,13 +42,14 @@ const nestedPickedRoomRecords = (reservation = {}) =>
 		),
 	]);
 
-const reservationRoomTypes = (reservation = {}) =>
-	uniqueText(
-		[
-			...assignedRoomRecords(reservation),
-			...nestedPickedRoomRecords(reservation),
-		].map(roomTypeLabel)
+const reservationRoomTypes = (reservation = {}) => {
+	const reservedTypes = uniqueText(
+		nestedPickedRoomRecords(reservation).map(roomTypeLabel)
 	);
+	if (reservedTypes.length > 0) return reservedTypes;
+
+	return uniqueText(assignedRoomRecords(reservation).map(roomTypeLabel));
+};
 
 const roomNumbersFromRecord = (room = {}) => {
 	if (!room || typeof room !== "object") return [];
