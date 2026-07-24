@@ -19,6 +19,12 @@ router.post(
 	jsonParser,
 	Hosted.createSession,
 );
+router.post(
+	"/bofa/checkout/session/abandon-unsubmitted",
+	requireSignin,
+	jsonParser,
+	Hosted.abandonUnsubmittedSession,
+);
 router.get(
 	"/bofa/checkout/callback/customer",
 	Hosted.healthCallback("customer_response"),

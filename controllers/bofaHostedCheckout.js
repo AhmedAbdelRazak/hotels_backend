@@ -30,6 +30,10 @@ const {
 	buildHostedMerchantDefinedData,
 	buildReservationPaymentContext,
 } = require("../services/bofaReservationContext");
+const {
+	buildAbandonedSessionAudit,
+	canReleaseAbandonedHostedSession,
+} = require("../services/bofaHostedSessionState");
 
 const configuredMaxAttempts = Number(process.env.BOFA_VCC_MAX_ATTEMPTS || 2);
 const MAX_ATTEMPTS = Number.isFinite(configuredMaxAttempts)
@@ -104,6 +108,7 @@ const baseStatus = (reservation, provider = "") => {
 		lastRequestId: clean(vcc.last_request_id),
 		lastMerchantTransactionId: clean(vcc.last_merchant_transaction_id),
 		warningMessage: clean(vcc.warning_message, 600),
+		canDiscardUnsubmittedSession: canReleaseAbandonedHostedSession(reservation),
 		provider: provider || clean(vcc.source),
 		secureAcceptance: {
 			status: clean(sa.status) || "not_started",
@@ -114,6 +119,109 @@ const baseStatus = (reservation, provider = "") => {
 			lastReasonCode: clean(sa.last_reason_code, 20),
 		},
 	};
+};
+
+exports.abandonUnsubmittedSession = async (req, res) => {
+	try {
+		const actor = await requireSuperAdmin(req);
+		const reservationId = clean(req.body?.reservationId, 64);
+		const referenceNumber = clean(req.body?.referenceNumber, 50);
+		if (!reservationId || !referenceNumber) {
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_SA_ABANDONED_SESSION_FIELDS_REQUIRED",
+				message: "reservationId and the saved Bank of America reference are required.",
+			});
+		}
+		if (req.body?.confirmCardWasNotSubmitted !== true) {
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_SA_ABANDONED_SESSION_CONFIRMATION_REQUIRED",
+				message: "Confirm that the card was not submitted before starting a fresh form.",
+			});
+		}
+
+		const reservation = await Reservations.findById(reservationId).lean();
+		if (!reservation) {
+			return res.status(404).json({ success: false, message: "Reservation not found." });
+		}
+		const provider = resolveVccProvider(reservation.booking_source);
+		if (!canReleaseAbandonedHostedSession(reservation, referenceNumber)) {
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_SA_SESSION_CANNOT_BE_DISCARDED",
+				message:
+					"This checkout cannot be discarded because it has bank activity, a different reference, or is no longer an expired blank form.",
+				bofaStatus: baseStatus(reservation, provider),
+			});
+		}
+
+		const now = new Date();
+		const audit = buildAbandonedSessionAudit(reservation, {
+			actorId: actor._id,
+			at: now,
+		});
+		const updated = await Reservations.findOneAndUpdate(
+			{
+				_id: reservationId,
+				"bofa_payment.secure_acceptance.status": "expired_unconfirmed",
+				"bofa_payment.secure_acceptance.last_reference_number": referenceNumber,
+				"bofa_payment.secure_acceptance.callbacks.0": { $exists: false },
+				"bofa_payment.secure_acceptance.last_callback_at": { $in: [null, ""] },
+				"bofa_payment.secure_acceptance.last_transaction_id": { $in: [null, ""] },
+				"bofa_payment.secure_acceptance.last_request_id": { $in: [null, ""] },
+				"bofa_payment.vcc.last_transaction_id": { $in: [null, ""] },
+				"bofa_payment.vcc.last_request_id": { $in: [null, ""] },
+				"bofa_payment.vcc.outcome_unknown": true,
+				"bofa_payment.vcc.charged": { $ne: true },
+				"payment_details.bofaVccCharged": { $ne: true },
+			},
+			{
+				$set: {
+					"bofa_payment.vcc.processing": false,
+					"bofa_payment.vcc.outcome_unknown": false,
+					"bofa_payment.vcc.warning_message": "",
+					"bofa_payment.vcc.lock_token": "",
+					"bofa_payment.vcc.lock_expires_at": null,
+					"bofa_payment.secure_acceptance.status": "abandoned_unsubmitted",
+					"bofa_payment.secure_acceptance.abandoned_at": now,
+					"bofa_payment.secure_acceptance.abandoned_reason": audit.reason,
+				},
+				$push: {
+					"bofa_payment.secure_acceptance.abandoned_sessions": {
+						$each: [audit],
+						$slice: -20,
+					},
+				},
+			},
+			{ new: true },
+		).lean();
+		if (!updated) {
+			const latest = await Reservations.findById(reservationId).lean();
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_SA_SESSION_STATE_CHANGED",
+				message:
+					"The Bank of America state changed while the form was being restarted. No payment state was cleared.",
+				bofaStatus: latest ? baseStatus(latest, provider) : null,
+			});
+		}
+
+		const status = baseStatus(updated, provider);
+		return res.status(200).json({
+			success: true,
+			released: true,
+			message: "The unsubmitted form was archived. A fresh secure form can now be started.",
+			...status,
+			state: status,
+		});
+	} catch (error) {
+		return res.status(error?.statusCode || 500).json({
+			success: false,
+			issue: error?.issue || "BOFA_SA_ABANDONED_SESSION_FAILED",
+			message: error?.message || "The unsubmitted checkout could not be archived.",
+		});
+	}
 };
 
 const markExpiredPendingUnknown = async (reservationId) => {
