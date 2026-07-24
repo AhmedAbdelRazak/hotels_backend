@@ -19,11 +19,10 @@ const roomTypeLabel = (room = {}) => {
 	if (!room || typeof room !== "object") return "";
 	const type = cleanText(room.room_type || room.roomType);
 	const displayName = cleanText(room.display_name || room.displayName);
-	if (!type) return displayName;
-	if (!displayName || displayName.toLowerCase() === type.toLowerCase()) {
-		return type;
+	if (displayName && displayName.toLowerCase() !== type.toLowerCase()) {
+		return displayName;
 	}
-	return `${type} - ${displayName}`;
+	return type || displayName;
 };
 
 const assignedRoomRecords = (reservation = {}) => [

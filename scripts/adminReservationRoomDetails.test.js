@@ -181,4 +181,8 @@ test("admin paid and profit reports use the guarded room enrichment service", ()
 		overallDashboardSource,
 		/listProfitReport[\s\S]*attachOverallReservationRoomDetails\([\s\S]*OVERALL PROFIT REPORT/,
 	);
+	assert.match(
+		adminReportsSource,
+		/exports\.exportToExcel[\s\S]*const distinctTypes = reservationRoomTypes\(r\);[\s\S]*roomTypeString = distinctTypes\.join/,
+	);
 });

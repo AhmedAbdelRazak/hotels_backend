@@ -28,7 +28,7 @@ test("room summary prefers assigned room details and removes duplicates", () => 
 
 	assert.deepEqual(reservationRoomNumbers(reservation), ["101", "305"]);
 	assert.deepEqual(reservationRoomTypes(reservation), [
-		"doubleRooms - City View",
+		"City View",
 		"suite",
 	]);
 });
@@ -44,7 +44,7 @@ test("room summary falls back to reserved types without exposing raw room ids", 
 
 	assert.deepEqual(reservationRoomNumbers(reservation), []);
 	assert.deepEqual(reservationRoomTypes(reservation), [
-		"tripleRooms - Family Triple",
+		"Family Triple",
 	]);
 });
 
@@ -73,7 +73,7 @@ test("booked room type takes precedence over a physical room display name", () =
 	};
 
 	assert.deepEqual(reservationRoomTypes(reservation), [
-		"familyRooms - Family Quintuple Room",
+		"Family Quintuple Room",
 	]);
 	assert.deepEqual(reservationRoomNumbers(reservation), ["501"]);
 });

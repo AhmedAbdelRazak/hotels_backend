@@ -1458,22 +1458,9 @@ exports.exportToExcel = async (req, res) => {
 			let roomTypeString = "";
 			let roomNumberString = "";
 			let roomCount = 0;
-			const reservedTypes = Array.isArray(r.pickedRoomsType)
-				? r.pickedRoomsType
-						.map((room) => room?.room_type || room?.roomType)
-						.filter(Boolean)
-				: [];
-			const distinctTypes = [
-				...new Set(
-					reservedTypes.length > 0 ? reservedTypes : reservationRoomTypes(r)
-				),
-			];
+			const distinctTypes = reservationRoomTypes(r);
 			if (distinctTypes.length > 0) {
-				const mappedLabels = distinctTypes.map((typeVal) => {
-					const found = ROOM_TYPES_MAPPING.find((rt) => rt.value === typeVal);
-					return found ? found.label : typeVal;
-				});
-				roomTypeString = mappedLabels.join(", ");
+				roomTypeString = distinctTypes.join(", ");
 			}
 			roomNumberString = reservationRoomNumbers(r).join(", ");
 			if (Array.isArray(r.pickedRoomsType) && r.pickedRoomsType.length > 0) {

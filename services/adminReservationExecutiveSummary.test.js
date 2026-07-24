@@ -105,7 +105,7 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.equal(result.reservations[0].averageNightlyAmount, 280);
 	assert.equal(result.reservations[0].amountQuality.status, "verified");
 	assert.deepEqual(result.reservations[0].roomTypes, [
-		"doubleRooms - City View",
+		"City View",
 	]);
 	assert.deepEqual(result.reservations[0].roomNumbers, ["101"]);
 	assert.deepEqual(result.reservations[2].activityTypes, ["new-reservation"]);
