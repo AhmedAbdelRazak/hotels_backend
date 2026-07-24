@@ -3,7 +3,6 @@
 const crypto = require("crypto");
 
 const Reservations = require("../models/reservations");
-const Rooms = require("../models/rooms");
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
 const { getSarConversionMeta } = require("../services/otaReservationMapper");
@@ -36,8 +35,6 @@ const configuredMaxAttempts = Number(process.env.BOFA_VCC_MAX_ATTEMPTS || 2);
 const MAX_ATTEMPTS = Number.isFinite(configuredMaxAttempts)
 	? Math.max(1, Math.floor(configuredMaxAttempts))
 	: 2;
-const ROOM_CONFIRM_MESSAGE =
-	"Are you sure you want to proceed without assigning a room to the reservation?";
 const UNKNOWN_OUTCOME_WARNING =
 	"The Bank of America result is not yet conclusive. Do not retry this card until the transaction is checked in Merchant Services using the saved reference.";
 
@@ -47,9 +44,6 @@ const clean = (value, max = 255) =>
 		.slice(0, max);
 const money = (value) => Number(value || 0).toFixed(2);
 const round2 = (value) => Math.round(Number(value || 0) * 100) / 100;
-
-const isCancelledOrNoShow = (status) =>
-	/(cancel|no[\s_-]*show)/i.test(String(status || ""));
 
 const requireSuperAdmin = async (req) => {
 	const userId = clean(req?.auth?._id, 64);
@@ -84,28 +78,6 @@ const requireSuperAdmin = async (req) => {
 		throw error;
 	}
 	return user;
-};
-
-const roomNumbersFromReservation = async (reservation) => {
-	const values = new Set();
-	const add = (value) => {
-		const normalized = clean(value, 50);
-		if (normalized) values.add(normalized);
-	};
-	(Array.isArray(reservation?.roomDetails) ? reservation.roomDetails : []).forEach(
-		(room) => add(room?.room_number || room?.roomNumber || room?.number),
-	);
-	(Array.isArray(reservation?.bedNumber) ? reservation.bedNumber : []).forEach(add);
-	const ids = (Array.isArray(reservation?.roomId) ? reservation.roomId : [])
-		.map((value) => (typeof value === "object" ? value?._id : value))
-		.filter(Boolean);
-	if (ids.length) {
-		const rooms = await Rooms.find({ _id: { $in: ids } })
-			.select("room_number")
-			.lean();
-		(rooms || []).forEach((room) => add(room?.room_number));
-	}
-	return [...values];
 };
 
 const baseStatus = (reservation, provider = "") => {
@@ -266,22 +238,6 @@ exports.createSession = async (req, res) => {
 				message: status.processing
 					? "A Bank of America checkout is already in progress for this reservation."
 					: status.warningMessage || UNKNOWN_OUTCOME_WARNING,
-				bofaStatus: status,
-			});
-		}
-
-		const rooms = await roomNumbersFromReservation(reservation);
-		if (
-			!isCancelledOrNoShow(reservation.reservation_status) &&
-			!rooms.length &&
-			!req.body?.proceedWithoutRoom
-		) {
-			return res.status(409).json({
-				success: false,
-				issue: "BOFA_VCC_ROOM_CONFIRM_REQUIRED",
-				message:
-					"Room assignment is missing for this reservation. Confirm you want to proceed without a room assignment.",
-				confirmationMessage: ROOM_CONFIRM_MESSAGE,
 				bofaStatus: status,
 			});
 		}
