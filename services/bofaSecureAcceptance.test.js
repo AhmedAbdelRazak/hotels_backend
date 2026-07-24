@@ -66,12 +66,20 @@ test("builds an embedded HPP sale without any card data", () => {
 	assert.equal(fields.currency, "USD");
 	assert.equal(fields.amount, "125.50");
 	assert.equal(fields.payment_method, "card");
+	assert.equal(fields.payer_authentication_transaction_mode, "M");
+	assert.equal(fields.payer_authentication_product_code, "ACC");
 	assert.equal(fields.card_number, undefined);
 	assert.equal(fields.card_cvn, undefined);
 	assert.equal(fields.card_expiry_date, undefined);
 	assert.equal(fields.unsigned_field_names, undefined);
 	assert.ok(fields.signed_field_names.includes("amount"));
 	assert.ok(fields.signed_field_names.includes("bill_to_forename"));
+	assert.ok(
+		fields.signed_field_names.includes("payer_authentication_transaction_mode"),
+	);
+	assert.ok(
+		fields.signed_field_names.includes("payer_authentication_product_code"),
+	);
 	assert.equal(fields.merchant_defined_data1, "OTA_VIRTUAL_CARD");
 	assert.ok(fields.signed_field_names.includes("merchant_defined_data1"));
 	assert.equal(fields.bill_to_company_name, "Agoda Company Pte Ltd.");
@@ -147,6 +155,8 @@ test("resumes the same hosted transaction without storing or adding card data", 
 	assert.equal(resumed.transaction_uuid, original.transaction_uuid);
 	assert.equal(resumed.amount, "10.00");
 	assert.equal(resumed.bill_to_address_postal_code, "92376");
+	assert.equal(resumed.payer_authentication_transaction_mode, "M");
+	assert.equal(resumed.payer_authentication_product_code, "ACC");
 	assert.equal(resumed.signed_date_time, "2026-07-24T01:30:00Z");
 	assert.equal(verifySignature(resumed, config.secretKey).ok, true);
 });

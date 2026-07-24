@@ -7,6 +7,12 @@ const HPP_ENDPOINTS = Object.freeze({
 	live: "https://secureacceptance.merchant-services.bankofamerica.com/embedded/pay",
 });
 
+// OTA virtual cards are manually entered by an authorized hotel operator, so
+// Bank of America's documented MOTO channel is the accurate CNP classification.
+// ACC identifies the underlying transaction as an accommodation rental.
+const OTA_VCC_TRANSACTION_MODE = "M";
+const OTA_VCC_PRODUCT_CODE = "ACC";
+
 const clean = (value, max = 255) =>
 	String(value == null ? "" : value)
 		.trim()
@@ -104,7 +110,7 @@ const signFields = (inputFields, secretKey) => {
 };
 
 const resumableHostedCheckoutFields = (fields = {}) => {
-	const allowed = /^(?:access_key|profile_id|transaction_uuid|signed_date_time|reference_number|transaction_type|amount|currency|locale|payment_method|bill_to_(?:forename|surname|company_name|email|phone|address_line1|address_city|address_state|address_postal_code|address_country)|merchant_defined_data[1-8])$/;
+	const allowed = /^(?:access_key|profile_id|transaction_uuid|signed_date_time|reference_number|transaction_type|amount|currency|locale|payment_method|payer_authentication_(?:transaction_mode|product_code)|bill_to_(?:forename|surname|company_name|email|phone|address_line1|address_city|address_state|address_postal_code|address_country)|merchant_defined_data[1-8])$/;
 	return Object.fromEntries(
 		Object.entries(fields)
 			.filter(([name]) => allowed.test(name))
@@ -114,6 +120,10 @@ const resumableHostedCheckoutFields = (fields = {}) => {
 
 const resignHostedCheckoutFields = (fields, secretKey, now = new Date()) => {
 	const resumable = resumableHostedCheckoutFields(fields);
+	resumable.payer_authentication_transaction_mode =
+		resumable.payer_authentication_transaction_mode || OTA_VCC_TRANSACTION_MODE;
+	resumable.payer_authentication_product_code =
+		resumable.payer_authentication_product_code || OTA_VCC_PRODUCT_CODE;
 	resumable.signed_date_time = now.toISOString().replace(/\.\d{3}Z$/, "Z");
 	return signFields(resumable, secretKey);
 };
@@ -161,6 +171,8 @@ const buildHostedCheckoutFields = ({
 		currency: "USD",
 		locale: "en-us",
 		payment_method: "card",
+		payer_authentication_transaction_mode: OTA_VCC_TRANSACTION_MODE,
+		payer_authentication_product_code: OTA_VCC_PRODUCT_CODE,
 	};
 
 	addIfPresent(fields, "bill_to_forename", billTo.firstName, 60);

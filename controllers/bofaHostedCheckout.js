@@ -395,6 +395,10 @@ exports.createSession = async (req, res) => {
 				{
 					$set: {
 						"bofa_payment.secure_acceptance.last_signed_at": resumeNow,
+						"bofa_payment.secure_acceptance.transaction_mode":
+							fields.payer_authentication_transaction_mode,
+						"bofa_payment.secure_acceptance.product_code":
+							fields.payer_authentication_product_code,
 						"bofa_payment.secure_acceptance.hosted_request_fields":
 							resumableHostedCheckoutFields(fields),
 					},
@@ -503,11 +507,19 @@ exports.createSession = async (req, res) => {
 					"bofa_payment.secure_acceptance.amount_usd": amountUsd,
 					"bofa_payment.secure_acceptance.currency": "USD",
 					"bofa_payment.secure_acceptance.transaction_type": "sale",
+					"bofa_payment.secure_acceptance.transaction_mode":
+						fields.payer_authentication_transaction_mode,
+					"bofa_payment.secure_acceptance.product_code":
+						fields.payer_authentication_product_code,
 					"bofa_payment.secure_acceptance.expires_at": expiresAt,
 					"bofa_payment.secure_acceptance.created_by": String(actor._id),
 					"bofa_payment.secure_acceptance.request_context": paymentContext,
 					"bofa_payment.secure_acceptance.outbound_metadata": {
 						reference_number: referenceNumber,
+						payer_authentication_transaction_mode:
+							fields.payer_authentication_transaction_mode,
+						payer_authentication_product_code:
+							fields.payer_authentication_product_code,
 						...merchantDefinedData,
 					},
 					"bofa_payment.secure_acceptance.hosted_request_fields":
