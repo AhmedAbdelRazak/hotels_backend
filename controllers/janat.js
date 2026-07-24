@@ -102,6 +102,9 @@ const {
 const {
 	compactAdminPricingForReservationList,
 } = require("../services/adminReservationListPricing");
+const {
+	getReservationVccCaptureSummary,
+} = require("../services/bofaCaptureSummary");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -4998,6 +5001,8 @@ exports.paginatedReservationList = async (req, res) => {
 				payment: reservation.payment || "",
 				payment_status: reservation.payment_status || "",
 				payment_status_hint: reservation.payment_status_hint || "",
+				vcc_capture_summary:
+					getReservationVccCaptureSummary(reservation) || undefined,
 				supplierData: compactPrimitiveObject(reservation.supplierData),
 				checkin_date: reservation.checkin_date || null,
 				checkout_date: reservation.checkout_date || null,
