@@ -3823,6 +3823,10 @@ function mapRoomType(roomNameRaw) {
 function explicitRoomCapacity(value = "") {
 	const s = normalizeIntlComparable(value);
 	if (!s) return 0;
+	const roomForCapacity = s.match(
+		/\b(?:room|accommodation)\s+for\s+([1-9]\d?)\b/i
+	);
+	if (roomForCapacity) return Number(roomForCapacity[1]);
 	const numeric = s.match(
 		/(?:^|\s)([1-9]\d?)\s*(?:beds?|persons?|people|guests?|occupancy|افراد|أفراد|اشخاص|أشخاص|اسرة|أسرة)(?=$|\s)/i
 	);

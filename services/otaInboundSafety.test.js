@@ -499,7 +499,7 @@ test("explicit six-person inventory selects the six-bed config, never the quintu
 	];
 	const match = resolveRoomMatch(
 		{ roomCountDetails: rooms },
-		"Private Family Room for 6 Persons"
+		"PRIVATE FAMILY ROOM FOR 6 -AJYAD-10 MINS TO HARAM"
 	);
 
 	assert.equal(match.roomDetails?._id, "family-six");
