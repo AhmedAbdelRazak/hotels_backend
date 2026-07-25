@@ -531,7 +531,10 @@ const dayRootPrice = (day = {}) => {
 		: 0;
 };
 
-const validateOtaReleaseHotelBasePrice = (reservation = {}, { hotel = null } = {}) => {
+const validateOtaReleaseHotelBasePrice = (
+	reservation = {},
+	{ hotel = null, allowZeroHotelBasePrice = false } = {},
+) => {
 	const blockingStatus = otaReleaseBlockingStatus(reservation);
 	if (blockingStatus) {
 		return {
@@ -562,7 +565,11 @@ const validateOtaReleaseHotelBasePrice = (reservation = {}, { hotel = null } = {
 		};
 	}
 	const hotelBaseTotal = positiveMoney(pricing.rootTotal) || 0;
-	if (!hotelBaseTotal) {
+	const explicitZeroHotelBasePrice =
+		hasMoney(pricing, "rootTotal") && round2(pricing.rootTotal) === 0;
+	const zeroHotelBasePriceOverride =
+		allowZeroHotelBasePrice === true && explicitZeroHotelBasePrice;
+	if (!hotelBaseTotal && !zeroHotelBasePriceOverride) {
 		return {
 			ready: false,
 			code: "ota_hotel_base_price_required",
@@ -598,7 +605,42 @@ const validateOtaReleaseHotelBasePrice = (reservation = {}, { hotel = null } = {
 			else dailyBaseTotal = round2(dailyBaseTotal + root * roomCount(room));
 		}
 	}
-	if (!dailyRows || missingBaseRows || !dailyBaseTotal) {
+	if (!dailyRows) {
+		return {
+			ready: false,
+			code: "ota_daily_base_price_required",
+			message: "Every OTA pricing day must exist before release.",
+			hotelBaseTotal,
+			dailyBaseTotal,
+			missingBaseRows,
+		};
+	}
+	if (zeroHotelBasePriceOverride) {
+		if (dailyBaseTotal !== 0 || missingBaseRows !== dailyRows) {
+			return {
+				ready: false,
+				code: "ota_zero_hotel_base_price_mismatch",
+				message:
+					"A zero-price hotel release requires every saved nightly base hotel price to be exactly zero.",
+				hotelBaseTotal,
+				dailyBaseTotal,
+				missingBaseRows,
+			};
+		}
+		return {
+			ready: true,
+			hotelBaseTotal: 0,
+			dailyBaseTotal: 0,
+			zeroHotelBasePriceOverride: true,
+			sourceClientTotal: clientValidation.sourceClientTotal,
+			effectiveClientTotal: clientValidation.effectiveClientTotal,
+			clientTotalOverridden: clientValidation.clientTotalOverridden === true,
+			dailyClientTotal: clientValidation.dailyClientTotal,
+			canonicalRooms: roomValidation.canonicalRooms,
+			missingBaseRows,
+		};
+	}
+	if (missingBaseRows || !dailyBaseTotal) {
 		return {
 			ready: false,
 			code: "ota_daily_base_price_required",

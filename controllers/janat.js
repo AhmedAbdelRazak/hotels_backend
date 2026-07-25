@@ -4039,9 +4039,17 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 					"The assigned hotel could not be found. Assign a valid hotel before release.",
 			});
 		}
+		const allowZeroHotelBasePrice =
+			req.body?.allowZeroHotelBasePrice === true;
+		const zeroHotelBasePriceReason = String(
+			req.body?.zeroHotelBasePriceReason || "",
+		)
+			.trim()
+			.slice(0, 240);
 		const releasePricingValidation =
 			validateOtaReleaseHotelBasePrice(reservation, {
 				hotel: assignedHotel,
+				allowZeroHotelBasePrice,
 			});
 		if (!releasePricingValidation.ready) {
 			return res.status(400).json({
@@ -4069,6 +4077,8 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 		const now = new Date();
 		const auditActor = buildOtaReviewAuditActor(actor);
 		const hotelVisibleAmount = releasePricingValidation.hotelBaseTotal;
+		const zeroHotelBasePriceOverride =
+			releasePricingValidation.zeroHotelBasePriceOverride === true;
 		const existingPending = reservation.pendingConfirmation || {};
 		const updatePayload = {
 			state: OTA_RELEASED_RESERVATION_STATUS,
@@ -4097,6 +4107,16 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 				releasedAt: now,
 				releasedBy: auditActor,
 				priceAtRelease: hotelVisibleAmount,
+				zeroHotelBasePriceRelease: zeroHotelBasePriceOverride
+					? {
+							approved: true,
+							at: now,
+							by: auditActor,
+							reason:
+								zeroHotelBasePriceReason ||
+								"Authorized platform confirmation to release the reservation to the hotel at SAR 0.00.",
+					  }
+					: null,
 			},
 			adminPricingVisibility: {
 				...(reservation.adminPricingVisibility || {}),
@@ -4125,6 +4145,8 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 						to: {
 							reservation_status: OTA_RELEASED_RESERVATION_STATUS,
 							hotel_visible_amount: hotelVisibleAmount,
+							zero_hotel_base_price_override:
+								zeroHotelBasePriceOverride,
 						},
 					},
 				},
@@ -4153,6 +4175,7 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 			success: true,
 			data: formatOtaAdminReservation(updated),
 			hotelVisibleAmount,
+			zeroHotelBasePriceOverride,
 		});
 	} catch (error) {
 		console.error("Error releasing OTA reservation:", error);

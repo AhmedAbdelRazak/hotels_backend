@@ -218,6 +218,73 @@ test("a saved reviewed override remains valid during hotel release", () => {
 	assert.equal(release.clientTotalOverridden, true);
 });
 
+test("an authorized zero hotel base override preserves every other release invariant", () => {
+	const configId = roomId();
+	const hotel = {
+		roomCountDetails: [
+			{
+				_id: configId,
+				roomType: "doubleRooms",
+				displayName: "Deluxe Double",
+				activeRoom: true,
+			},
+		],
+	};
+	const zeroPriceRoom = reviewedRoom(configId, {
+		pricingByDay: [
+			{ date: "2026-08-01", clientPrice: 100, rootPrice: 0 },
+			{ date: "2026-08-02", clientPrice: 100, rootPrice: 0 },
+		],
+	});
+	const reservation = otaEmailReservation(configId, {
+		sub_total: 0,
+		adminPricing: {
+			mode: "ota_review",
+			clientTotal: 200,
+			rootTotal: 0,
+			netAfterExpensesTotal: 150,
+		},
+		pickedRoomsType: [zeroPriceRoom],
+		pickedRoomsPricing: [zeroPriceRoom],
+	});
+
+	const normallyBlocked = otaPricing.validateOtaReleaseHotelBasePrice(
+		reservation,
+		{ hotel },
+	);
+	assert.equal(normallyBlocked.ready, false);
+	assert.equal(normallyBlocked.code, "ota_hotel_base_price_required");
+
+	const explicitlyAllowed = otaPricing.validateOtaReleaseHotelBasePrice(
+		reservation,
+		{ hotel, allowZeroHotelBasePrice: true },
+	);
+	assert.equal(explicitlyAllowed.ready, true);
+	assert.equal(explicitlyAllowed.hotelBaseTotal, 0);
+	assert.equal(explicitlyAllowed.dailyBaseTotal, 0);
+	assert.equal(explicitlyAllowed.zeroHotelBasePriceOverride, true);
+	assert.equal(explicitlyAllowed.dailyClientTotal, 200);
+	assert.equal(explicitlyAllowed.canonicalRooms[0].hotelRoomConfigId, configId);
+
+	const inconsistentNightlyPrice = {
+		...reservation,
+		pickedRoomsPricing: [
+			reviewedRoom(configId, {
+				pricingByDay: [
+					{ date: "2026-08-01", clientPrice: 100, rootPrice: 0 },
+					{ date: "2026-08-02", clientPrice: 100, rootPrice: 60 },
+				],
+			}),
+		],
+	};
+	const inconsistent = otaPricing.validateOtaReleaseHotelBasePrice(
+		inconsistentNightlyPrice,
+		{ hotel, allowZeroHotelBasePrice: true },
+	);
+	assert.equal(inconsistent.ready, false);
+	assert.equal(inconsistent.code, "ota_zero_hotel_base_price_mismatch");
+});
+
 test("source-total locking does not apply to manual/non-email pricing", () => {
 	const rooms = [reviewedRoom(roomId())];
 	const manualReservation = {
