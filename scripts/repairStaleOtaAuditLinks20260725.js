@@ -53,11 +53,20 @@ function reparseAudit(audit) {
 	});
 }
 
+function plausibleProviderConfirmation(provider, confirmationNumber) {
+	const value = normalizeConfirmation(confirmationNumber);
+	if (!value || value.length < 6 || value.length > 30) return false;
+	if (["agoda", "expedia"].includes(provider)) return /^\d{8,18}$/.test(value);
+	if (provider === "airbnb") return /^hm[a-z0-9]{6,20}$/i.test(value);
+	return /^[a-z0-9][a-z0-9-]{5,29}$/i.test(value);
+}
+
 function safePlanSummary(plan) {
 	return {
 		auditId: id(plan.audit._id),
 		provider: plan.audit.provider,
-		confirmationNumber: plan.audit.confirmationNumber,
+		previousConfirmationNumber: plan.audit.confirmationNumber,
+		confirmationNumber: plan.confirmationNumber,
 		processingStatus: plan.audit.processingStatus,
 		reservationId: id(plan.reservation._id),
 		previousReservationId: id(plan.previousReservationMongoId),
@@ -124,14 +133,6 @@ async function buildPlans() {
 	const plans = [];
 	const identityPlansByReservation = new Map();
 	for (const audit of audits) {
-		// Exact provider + confirmation identity is required before any audit link.
-		// eslint-disable-next-line no-await-in-loop
-		const reservation = await findReservationByOtaConfirmation(
-			audit.confirmationNumber,
-			audit.provider
-		);
-		if (!reservation) continue;
-
 		const reparsed = reparseAudit(audit);
 		assert.equal(
 			reparsed.provider,
@@ -139,19 +140,34 @@ async function buildPlans() {
 			`provider changed while reparsing audit ${id(audit._id)}`
 		);
 		assert.equal(
-			normalizeConfirmation(reparsed.confirmationNumber),
-			normalizeConfirmation(audit.confirmationNumber),
-			`confirmation changed while reparsing audit ${id(audit._id)}`
-		);
-		assert.equal(
 			reparsed.sourcePresence?.confirmationNumber,
 			true,
 			`confirmation is still not source-backed for audit ${id(audit._id)}`
 		);
+		const confirmationNumber = normalizeConfirmation(
+			reparsed.confirmationNumber
+		);
+		const storedConfirmationNumber = normalizeConfirmation(
+			audit.confirmationNumber
+		);
+		if (confirmationNumber !== storedConfirmationNumber) {
+			assert.equal(
+				plausibleProviderConfirmation(audit.provider, storedConfirmationNumber),
+				false,
+				`refusing to replace a plausible stored confirmation on audit ${id(audit._id)}`
+			);
+		}
+		// Exact provider + confirmation identity is required before any audit link.
+		// eslint-disable-next-line no-await-in-loop
+		const reservation = await findReservationByOtaConfirmation(
+			confirmationNumber,
+			audit.provider
+		);
+		if (!reservation) continue;
 
 		const matchedReservationBy = detectConfirmationMatchFields(
 			reservation,
-			audit.confirmationNumber,
+			confirmationNumber,
 			audit.provider
 		);
 		assert.ok(
@@ -160,14 +176,14 @@ async function buildPlans() {
 		);
 		const otaIdentityKey = buildOtaIdentityKey(
 			audit.provider,
-			audit.confirmationNumber
+			confirmationNumber
 		);
 		assert.ok(otaIdentityKey, `canonical identity missing for audit ${id(audit._id)}`);
 		const previousIdentityKey = String(reservation.otaIdentityKey || "").toLowerCase();
 		if (previousIdentityKey !== otaIdentityKey) {
 			assert.ok(
 				!previousIdentityKey ||
-					previousIdentityKey === normalizeConfirmation(audit.confirmationNumber),
+					previousIdentityKey === confirmationNumber,
 				`reservation ${id(reservation._id)} has a conflicting OTA identity`
 			);
 			// eslint-disable-next-line no-await-in-loop
@@ -197,6 +213,7 @@ async function buildPlans() {
 			reparsed,
 			reservation,
 			matchedReservationBy,
+			confirmationNumber,
 			previousReservationMongoId: audit.reservationMongoId || null,
 		});
 	}
@@ -224,10 +241,11 @@ function connectionUpdate(plan, now) {
 	const set = {
 		hasReservationConnection: true,
 		matchedReservationBy: plan.matchedReservationBy,
+		confirmationNumber: plan.confirmationNumber,
 		reservationMongoId: plan.reservation._id,
 		hotelId: plan.reservation.hotelId || null,
 		pmsConfirmationNumber: plan.reservation.confirmation_number || "",
-		"normalizedReservation.sourcePresence.confirmationNumber": true,
+		normalizedReservation: plan.reparsed,
 		processedAt: now,
 	};
 

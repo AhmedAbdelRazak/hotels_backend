@@ -2619,6 +2619,67 @@ function extractTableOccupancy(text = "") {
 	return { adults: 0, children: 0, totalGuests: 0 };
 }
 
+function extractExpediaPartnerCentralFields(text = "", provider = "") {
+	if (provider !== "expedia") return {};
+	const source = String(text || "");
+	const confirmationNumber = firstNonEmpty(
+		findFirstPattern(source, [
+			/\bReservation\s*#\s*(\d{8,18})\b/i,
+			/\bReservation\s+(?:ID|No\.?|Number)\s*[:#-]?\s*(\d{8,18})\b/i,
+		]),
+		findFirstPattern(source, [
+			/(?:^|\n)\s*Booking\s+[^\n]{0,120}?\b(\d{8,18})\b/i,
+		])
+	);
+	const datePattern = dateTextPattern();
+	const stayMatch = source.match(
+		new RegExp(
+			`\\b(${datePattern})\\s*(?:\\u2014|\\u2013|-)\\s*(${datePattern})\\s*\\(\\s*\\d+\\s+nights?\\s*\\)`,
+			"i"
+		)
+	);
+	const bookedAt = parseDate(
+		findFirstPattern(source, [
+			/\bReservation\s+made\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b/i,
+		])
+	);
+	const adultsMatch = source.match(/\bGuest\s+count\s+(\d+)\s+adults?\b/i);
+	const childrenMatch = source.match(
+		/\bGuest\s+count\s+\d+\s+adults?[\s,]*(\d+)\s+child(?:ren)?\b/i
+	);
+	const adults = Number(adultsMatch?.[1] || 0);
+	const children = Number(childrenMatch?.[1] || 0);
+	const currencyPattern = MONEY_CURRENCY_CODES.join("|");
+	const currency = normalizeMoneyCurrency(
+		findFirstPattern(source, [
+			new RegExp(
+				`\\bAmount\\s+to\\s+charge\\s+Expedia\\s+Group\\s+(${currencyPattern})\\b`,
+				"i"
+			),
+		])
+	);
+	const totalGuestPaymentAmount = findFirstPattern(source, [
+		new RegExp(
+			`\\bTotal\\s+guest\\s+payment\\s+(${moneyNumberPattern()})(?=\\s|$)`,
+			"i"
+		),
+	]);
+	return {
+		confirmationNumber,
+		checkinDate: parseDate(stayMatch?.[1] || ""),
+		checkoutDate: parseDate(stayMatch?.[2] || ""),
+		bookedAt,
+		adults,
+		children,
+		hasChildren: !!childrenMatch,
+		totalGuests: adults + children,
+		totalGuestPaymentText:
+			currency && totalGuestPaymentAmount
+				? `${currency} ${totalGuestPaymentAmount}`
+				: "",
+	};
+}
+
 function cleanFieldValue(value = "") {
 	return cleanOtaDisplayValue(value).replace(/^\*+\s*/, "");
 }
@@ -2844,6 +2905,9 @@ function detectEventType({ subject = "", text = "" } = {}) {
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(haystack)) {
 		return "modified";
 	}
+	if (/(?:^|\n)\s*status\s+booked\b/i.test(String(text || ""))) {
+		return "new";
+	}
 	if (
 		/(reservation\s+status|booking\s+status|\bstatus\b)/i.test(subjectOnly) ||
 		/(reservation\s+status|booking\s+status)/i.test(text)
@@ -3002,7 +3066,7 @@ function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
 	const haystack = String(paymentText || "").toLowerCase();
 	const hasExpediaVirtualCard =
 		/\bevc\b/i.test(haystack) &&
-		/(\bexpedia\s*collect\b|\bevc\s+charge\s+status\b)/i.test(haystack);
+		/(\bexpedia\s*collects?\b|\bevc\s+charge\s+status\b)/i.test(haystack);
 	const hasVirtualCard =
 		/(virtual\s+card|\bvcc\b|card\s+number|validation\s+code|hotel\s+charges?\s+(?:the\s+)?virtual\s+card|charges?\s+(?:a\s+)?virtual\s+card)/i.test(
 			haystack
@@ -3018,7 +3082,7 @@ function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
 		return "hotel_collect";
 	}
 	if (
-		/(\bexpedia\s*collect\b|agoda\s+collect|booking\.com\s+collect|ota\s+collect|ota\s+collects|collected\s+by|platform\s+collect|prepaid|paid\s+online)/i.test(
+		/(\bexpedia\s*collects?\b|agoda\s+collect|booking\.com\s+collect|ota\s+collect|ota\s+collects|collected\s+by|platform\s+collect|prepaid|paid\s+online)/i.test(
 			haystack
 		)
 	) {
@@ -3220,6 +3284,10 @@ function extractNormalizedReservation(email) {
 	});
 	const airbnbFields = extractAirbnbFields(email, text, provider);
 	const agodaFields = extractAgodaFields(email, text, provider);
+	const expediaPartnerCentralFields = extractExpediaPartnerCentralFields(
+		text,
+		provider
+	);
 	const tableStayDates = extractTableStayDates(text);
 	const tableOccupancy = extractTableOccupancy(text);
 	const isHotelRunnerSender = /@(?:[a-z0-9.-]+\.)?hotelrunner\.com\b/i.test(
@@ -3273,6 +3341,7 @@ function extractNormalizedReservation(email) {
 	const explicitProviderConfirmation = firstNonEmpty(
 		airbnbFields.confirmationNumber,
 		agodaFields.confirmationNumber,
+		expediaPartnerCentralFields.confirmationNumber,
 		hotelRunnerArabicFields.confirmationNumber,
 		hotelRunnerConfirmationNumber
 	);
@@ -3356,6 +3425,7 @@ function extractNormalizedReservation(email) {
 		hotelRunnerArabicFields.roomName,
 		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
 	), [
+		"Arrival\\s+information",
 		"Check[-\\s]?in(?:\\s+date)?",
 		"Check[-\\s]?out(?:\\s+date)?",
 		"Guest\\s+count",
@@ -3365,7 +3435,7 @@ function extractNormalizedReservation(email) {
 		"تاريخ\\s*تسجيل\\s*المغادرة",
 		"عدد\\s*الضيوف",
 	]);
-	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || hotelRunnerArabicFields.checkinDate || tableStayDates.checkinDate || findDateValue(
+	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || expediaPartnerCentralFields.checkinDate || hotelRunnerArabicFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -3384,7 +3454,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || hotelRunnerArabicFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
+	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || expediaPartnerCentralFields.checkoutDate || hotelRunnerArabicFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -3411,11 +3481,13 @@ function extractNormalizedReservation(email) {
 	]);
 	const bookedAt =
 		hotelRunnerArabicFields.bookedAt ||
+		expediaPartnerCentralFields.bookedAt ||
 		parseDate(bookedAtField) ||
 		dayjs().format("YYYY-MM-DD");
 
 	const amountText = firstNonEmpty(
 		hotelRunnerArabicFields.orderTotalText,
+		expediaPartnerCentralFields.totalGuestPaymentText,
 		findField(text, [
 			"Total booking amount",
 			"Booking amount",
@@ -3481,6 +3553,7 @@ function extractNormalizedReservation(email) {
 	const adults =
 		airbnbFields.adults ||
 		agodaFields.adults ||
+		expediaPartnerCentralFields.adults ||
 		(hotelRunnerArabicFields.hasOccupancyBreakdown
 			? hotelRunnerArabicFields.adults
 			: hotelRunnerArabicFields.totalGuests) ||
@@ -3489,6 +3562,7 @@ function extractNormalizedReservation(email) {
 	const children =
 		airbnbFields.children ||
 		agodaFields.children ||
+		expediaPartnerCentralFields.children ||
 		(hotelRunnerArabicFields.hasOccupancyBreakdown
 			? hotelRunnerArabicFields.children
 			: 0) ||
@@ -3497,6 +3571,7 @@ function extractNormalizedReservation(email) {
 	const totalGuests =
 		airbnbFields.totalGuests ||
 		agodaFields.totalGuests ||
+		expediaPartnerCentralFields.totalGuests ||
 		hotelRunnerArabicFields.totalGuests ||
 		countNumber(totalGuestsField) ||
 		tableOccupancy.totalGuests ||
@@ -3836,7 +3911,9 @@ function extractNormalizedReservation(email) {
 				!!tableStayDates.checkoutDate ||
 				!!hotelRunnerArabicFields.checkoutDate,
 			bookedAt:
-				!!parseDate(bookedAtField) || !!hotelRunnerArabicFields.bookedAt,
+				!!parseDate(bookedAtField) ||
+				!!hotelRunnerArabicFields.bookedAt ||
+				!!expediaPartnerCentralFields.bookedAt,
 			amount:
 				(!!amountText || !!airbnbFields.amount || !!agodaFields.amount) &&
 				Number(parsedMoney.amount || 0) > 0,
@@ -3844,18 +3921,21 @@ function extractNormalizedReservation(email) {
 				!!adultsField ||
 				!!agodaFields.sourcePresence?.adults ||
 				airbnbFields.adults > 0 ||
+				expediaPartnerCentralFields.adults > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.adults > 0,
 			children:
 				!!childrenField ||
 				!!agodaFields.sourcePresence?.children ||
 				airbnbFields.children > 0 ||
+				expediaPartnerCentralFields.hasChildren === true ||
 				hotelRunnerArabicFields.hasOccupancyBreakdown === true ||
 				tableOccupancy.children > 0,
 			totalGuests:
 				!!totalGuestsField ||
 				!!agodaFields.sourcePresence?.totalGuests ||
 				airbnbFields.totalGuests > 0 ||
+				expediaPartnerCentralFields.totalGuests > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.totalGuests > 0,
 			roomCount:

@@ -188,6 +188,51 @@ test("compact ExpediaCollect remains OTA collect without virtual-card evidence",
 	assert.equal(detectPaymentCollectionModel("Reference code EVC"), "unknown");
 });
 
+test("forwarded Expedia Partner Central bookings retain exact identity, stay, occupancy, and USD pricing", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"Mohammed Hamouda" <xhotelpro@gmail.com>',
+		to: "ota@inbound.jannatbooking.com",
+		subject: "Booking Zad Al Magd 2496563741",
+		text: [
+			"Al-Magd Hotel",
+			"Jul 2, 2026—Jul 4, 2026 (2 nights)",
+			"Room Type Comfort Triple Room, City View Arrival information Estimated arrival time Not provided",
+			"Reservation #2496563741",
+			"Status Booked",
+			"Itinerary number 72076106852131",
+			"Reservation made Jun 29, 2026",
+			"Guest count 2 adults,",
+			"1 child( age 14 years old )",
+			"Expedia Collects Payment",
+			"Total guest payment 42.44",
+			"Your total payout 32.36",
+			"Amount to charge Expedia Group USD Nightly",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "expedia");
+	assert.equal(normalized.intent, "new_reservation");
+	assert.equal(normalized.eventType, "new");
+	assert.equal(normalized.confirmationNumber, "2496563741");
+	assert.equal(normalized.checkinDate, "2026-07-02");
+	assert.equal(normalized.checkoutDate, "2026-07-04");
+	assert.equal(normalized.bookedAt, "2026-06-29");
+	assert.equal(normalized.roomName, "Comfort Triple Room, City View");
+	assert.equal(normalized.adults, 2);
+	assert.equal(normalized.children, 1);
+	assert.equal(normalized.totalGuests, 3);
+	assert.equal(normalized.sourceAmount, 42.44);
+	assert.equal(normalized.sourceCurrency, "USD");
+	assert.equal(normalized.totalAmountSar, 159.15);
+	assert.equal(normalized.currency, "USD");
+	assert.equal(normalized.paymentCollectionModel, "ota_collect");
+	assert.equal(normalized.paidOnline, true);
+	assert.equal(normalized.sourcePresence.confirmationNumber, true);
+	assert.equal(normalized.sourcePresence.checkinDate, true);
+	assert.equal(normalized.sourcePresence.checkoutDate, true);
+	assert.equal(normalized.sourcePresence.bookedAt, true);
+});
+
 test("reservation schema declares an atomic partial unique OTA identity index", () => {
 	const index = Reservations.schema
 		.indexes()
