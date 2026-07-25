@@ -779,6 +779,63 @@ test("Arabic HotelRunner Airbnb messages expose deterministic reservation fields
 	}
 });
 
+test("HotelRunner Expedia Arabic totals, occupancy, and six-person inventory stay source-backed", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - حجز جديد #R073513681",
+		text: [
+			"حجز جديد",
+			"EXPEDIA (EXPEDIA AFFILIATE NETWORK)",
+			"رقم التأكيد 2518431193 اسم الضيف MUHAMMAD ASIF MANZOOR الدولة الولايات المتحدة إجمالي الطلب $ 215.4 تاريخ الحجز سبت، يوليو 25، 2026 18:31 ملاحظة Smoking Type:UNSPECIFIED Payment Method:ExpediaCollect EVC Charge Status:READY TO CHARGE ON CHECK IN DATE",
+			"Comfort Room, Non Smoking, Mountain View - Package - Non-Refundable - Linked",
+			"نوع الغرفة غرفة عائلية -6 أفراد- أجياد- أتوبيس مجانى تاريخ تسجيل الوصول أغسطس 06، 2026 تاريخ تسجيل المغادرة أغسطس 18، 2026 عدد الضيوف 6 (4 أطفال , 2 بالغين) أعمار الأطفال 1, 7, 9, 11 المعدل اليومي المتوسط $ 17.95 الإجمالي $ 215.4 آخر تحديث - الحالة حجز",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "expedia");
+	assert.equal(normalized.confirmationNumber, "2518431193");
+	assert.equal(normalized.checkinDate, "2026-08-06");
+	assert.equal(normalized.checkoutDate, "2026-08-18");
+	assert.equal(normalized.amount, 215.4);
+	assert.equal(normalized.currency, "USD");
+	assert.equal(normalized.sourceAmount, 215.4);
+	assert.equal(normalized.sourceCurrency, "USD");
+	assert.equal(normalized.totalAmountSar, 807.75);
+	assert.equal(normalized.sourcePresence.amount, true);
+	assert.equal(normalized.adults, 2);
+	assert.equal(normalized.children, 4);
+	assert.equal(normalized.totalGuests, 6);
+	assert.equal(normalized.sourcePresence.adults, true);
+	assert.equal(normalized.sourcePresence.children, true);
+	assert.match(normalized.roomName, /Comfort Room/i);
+	assert.match(normalized.roomName, /6 أفراد/u);
+	assert.equal(explicitRoomCapacity(normalized.roomName), 6);
+	assert.deepEqual(requiredNewReservationMissing(normalized), []);
+
+	const match = resolveRoomMatch(
+		{
+			roomCountDetails: [
+				{
+					_id: "family-five",
+					roomType: "familyRooms",
+					displayName: "Family Quintuple Room",
+					activeRoom: true,
+				},
+				{
+					_id: "family-six",
+					roomType: "familyRooms",
+					displayName: "Spacious Six-Bed Room",
+					activeRoom: true,
+				},
+			],
+		},
+		normalized.roomName,
+		{ totalGuests: normalized.totalGuests, normalized }
+	);
+	assert.equal(match.roomDetails?._id, "family-six");
+	assert.equal(match.matchType, "explicit_capacity");
+});
+
 test("Arabic HotelRunner multi-room messages retain all occupancy evidence for review", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"HotelRunner" <noreply@hotelrunner.com>',

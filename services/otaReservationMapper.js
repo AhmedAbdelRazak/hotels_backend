@@ -1322,15 +1322,30 @@ function extractHotelRunnerArabicRoomBlocks(text = "") {
 				guestsLabel.index
 			)
 		);
-		const afterGuests = segment.slice(guestsLabel.index + guestsLabel.length);
+		const afterGuests = normalizeUnicodeDigits(
+			segment.slice(guestsLabel.index + guestsLabel.length)
+		);
 		const guestMatch = afterGuests.match(/^\s*(\d{1,2})\b/u);
 		const totalGuests = Number(guestMatch?.[1] || 0);
 		const tail = guestMatch
 			? afterGuests.slice(Number(guestMatch.index || 0) + guestMatch[0].length)
 			: "";
+		const adultsMatch = tail.match(
+			/(\d{1,2})\s*(?:بالغين|بالغان|بالغون|بالغ)(?=$|[\s,.)،])/u
+		);
+		const childrenMatch = tail.match(
+			/(\d{1,2})\s*(?:أطفال|اطفال|طفل)(?=$|[\s,.)،])/u
+		);
+		const hasOccupancyBreakdown = !!(adultsMatch || childrenMatch);
+		const adults = hasOccupancyBreakdown
+			? Number(adultsMatch?.[1] || 0)
+			: totalGuests;
+		const children = hasOccupancyBreakdown
+			? Number(childrenMatch?.[1] || 0)
+			: 0;
 		const total = parseMoney(
 			findFirstPattern(tail, [
-				/الإجمالي\s*[:#-]?\s*((?:SAR|SR|﷼)?\s*[0-9][0-9,.]*)/i,
+				/الإجمالي\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
 			])
 		);
 		if (!heading || !roomType || !checkinDate || !checkoutDate || !totalGuests) {
@@ -1343,6 +1358,9 @@ function extractHotelRunnerArabicRoomBlocks(text = "") {
 			checkinDate,
 			checkoutDate,
 			totalGuests,
+			adults,
+			children,
+			hasOccupancyBreakdown,
 			totalAmount: total.amount || 0,
 		});
 	}
@@ -1381,13 +1399,23 @@ function extractHotelRunnerArabicFields(text = "") {
 		])
 	);
 	const orderTotalText = findFirstPattern(source, [
-		/إجمالي\s*الطلب\s*[:#-]?\s*((?:SAR|SR|﷼)?\s*[0-9][0-9,.]*)/i,
+		/إجمالي\s*الطلب\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
 	]);
 	const bookedAtText = findFirstPattern(source, [
 		/تاريخ\s*الحجز\s*[:#-]?\s*[^\n]*?((?:يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)\s+\d{1,2}[،,]?\s+\d{4})/i,
 	]);
 	const roomBlocks = extractHotelRunnerArabicRoomBlocks(source);
 	const firstRoom = roomBlocks[0] || {};
+	const roomName = [firstRoom.heading, firstRoom.roomType]
+		.filter(Boolean)
+		.filter(
+			(value, index, values) =>
+				values.findIndex(
+					(candidate) =>
+						normalizeIntlComparable(candidate) === normalizeIntlComparable(value)
+				) === index
+		)
+		.join(" | ");
 	const sameStay = roomBlocks.every(
 		(block) =>
 			block.checkinDate === firstRoom.checkinDate &&
@@ -1400,13 +1428,24 @@ function extractHotelRunnerArabicFields(text = "") {
 		orderTotalText,
 		amount: parseMoney(orderTotalText).amount || 0,
 		bookedAt: parseDate(bookedAtText),
-		roomName: firstRoom.roomName || "",
+		roomName,
 		checkinDate: sameStay ? firstRoom.checkinDate || null : null,
 		checkoutDate: sameStay ? firstRoom.checkoutDate || null : null,
 		roomCount: roomBlocks.length || 0,
 		totalGuests: roomBlocks.reduce(
 			(sum, block) => sum + Number(block.totalGuests || 0),
 			0
+		),
+		adults: roomBlocks.reduce(
+			(sum, block) => sum + Number(block.adults || 0),
+			0
+		),
+		children: roomBlocks.reduce(
+			(sum, block) => sum + Number(block.children || 0),
+			0
+		),
+		hasOccupancyBreakdown: roomBlocks.some(
+			(block) => block.hasOccupancyBreakdown
 		),
 		roomBlocks,
 	};
@@ -3411,12 +3450,17 @@ function extractNormalizedReservation(email) {
 	const adults =
 		airbnbFields.adults ||
 		agodaFields.adults ||
-		hotelRunnerArabicFields.totalGuests ||
+		(hotelRunnerArabicFields.hasOccupancyBreakdown
+			? hotelRunnerArabicFields.adults
+			: hotelRunnerArabicFields.totalGuests) ||
 		tableOccupancy.adults ||
 		countNumber(adultsField);
 	const children =
 		airbnbFields.children ||
 		agodaFields.children ||
+		(hotelRunnerArabicFields.hasOccupancyBreakdown
+			? hotelRunnerArabicFields.children
+			: 0) ||
 		tableOccupancy.children ||
 		countNumber(childrenField);
 	const totalGuests =
@@ -3775,6 +3819,7 @@ function extractNormalizedReservation(email) {
 				!!childrenField ||
 				!!agodaFields.sourcePresence?.children ||
 				airbnbFields.children > 0 ||
+				hotelRunnerArabicFields.hasOccupancyBreakdown === true ||
 				tableOccupancy.children > 0,
 			totalGuests:
 				!!totalGuestsField ||
