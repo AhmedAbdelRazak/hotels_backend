@@ -13,11 +13,15 @@ const InboundEmail = require("../models/inbound_email");
 const Reservations = require("../models/reservations");
 const {
 	PROVIDER_LABELS,
+	buildReservationDocument,
 	buildOtaIdentityKey,
 	extractNormalizedReservation,
+	findReservationByOtaConfirmation,
 	normalizeComparable,
 	normalizeConfirmation,
 	requiredNewReservationMissing,
+	resolveHotel,
+	resolveRoomMatch,
 } = require("../services/otaReservationMapper");
 
 const APPLY = process.argv.includes("--apply");
@@ -338,6 +342,73 @@ async function main() {
 				)
 				.lean()
 		: [];
+	const auditsById = new Map(audits.map((audit) => [id(audit._id), audit]));
+	const staleLinkAssessments = [];
+	for (const staleLink of staleLinks) {
+		const sourceAudit = staleLink.audits
+			.map((summary) => auditsById.get(summary.auditId))
+			.filter(Boolean)
+			.map((audit) => ({
+				audit,
+				normalized: extractNormalizedReservation(emailFromAudit(audit)),
+			}))
+			.find(
+				(entry) =>
+					entry.normalized.intent === "new_reservation" &&
+					entry.normalized.eventType === "new" &&
+					requiredNewReservationMissing(entry.normalized).length === 0
+			);
+		if (!sourceAudit) {
+			staleLinkAssessments.push({
+				reservationId: staleLink.reservationId,
+				status: "not_recoverable_from_source",
+			});
+			continue;
+		}
+		const normalized = sourceAudit.normalized;
+		const existing = await findReservationByOtaConfirmation(
+			normalized.confirmationNumber,
+			normalized.provider
+		);
+		if (existing) {
+			staleLinkAssessments.push({
+				reservationId: staleLink.reservationId,
+				status: "identity_already_stored",
+				existingReservationId: id(existing._id),
+				otaIdentityKey: existing.otaIdentityKey || "",
+			});
+			continue;
+		}
+		const hotel = await resolveHotel(normalized);
+		const roomMatch = hotel
+			? resolveRoomMatch(hotel, normalized.roomName, {
+					totalGuests: normalized.totalGuests,
+					normalized,
+			  })
+			: {};
+		const built = hotel
+			? buildReservationDocument(normalized, hotel, { roomMatch })
+			: { ok: false, error: "hotel did not resolve" };
+		staleLinkAssessments.push({
+			reservationId: staleLink.reservationId,
+			status:
+				hotel && roomMatch.roomDetails && built.ok
+					? "source_complete_and_deterministically_mappable"
+					: "source_complete_but_mapping_incomplete",
+			auditId: id(sourceAudit.audit._id),
+			otaIdentityKey: buildOtaIdentityKey(
+				normalized.provider,
+				normalized.confirmationNumber
+			),
+			hotelId: id(hotel?._id),
+			hotelName: hotel?.hotelName || hotel?.hotelName_OtherLanguage || "",
+			roomId: id(roomMatch.roomDetails?._id),
+			roomName: roomMatch.roomDetails?.displayName || "",
+			roomMatchType: roomMatch.matchType || "",
+			buildOk: built.ok === true,
+			buildError: built.error || "",
+		});
+	}
 
 	const report = {
 		mode: APPLY ? "apply" : "dry-run",
@@ -350,6 +421,7 @@ async function main() {
 		invalidLinkedReservations,
 		staleLinkCount: staleLinks.length,
 		staleLinks,
+		staleLinkAssessments,
 		alreadyProtectedCount: alreadyProtected.length,
 		candidateCount: candidates.length,
 		conflictCount: conflicts.length,
