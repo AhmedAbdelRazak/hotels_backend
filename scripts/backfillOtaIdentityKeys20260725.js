@@ -167,10 +167,12 @@ async function main() {
 		}
 		const current = evidenceByReservation.get(reservationId) || {
 			auditIds: [],
+			auditDocuments: [],
 			evidence: [],
 			identityKeys: new Set(),
 		};
 		current.auditIds.push(id(audit._id));
+		current.auditDocuments.push(audit);
 		current.evidence.push({
 			provider: audit.provider,
 			confirmationNumber,
@@ -198,7 +200,34 @@ async function main() {
 		const reservation = reservationsById.get(reservationId);
 		const identityKeys = [...evidenceGroup.identityKeys];
 		if (!reservation) {
-			staleLinks.push({ reservationId, reason: "linked reservation is missing" });
+			staleLinks.push({
+				reservationId,
+				reason: "linked reservation is missing",
+				identityKeys,
+				audits: evidenceGroup.auditDocuments.map((audit) => {
+					const current = extractNormalizedReservation(emailFromAudit(audit));
+					return {
+						auditId: id(audit._id),
+						receivedAt: audit.receivedAt,
+						processingStatus: audit.processingStatus || "",
+						currentParse: {
+							provider: current.provider || "",
+							intent: current.intent || "",
+							eventType: current.eventType || "",
+							confirmationNumber: current.confirmationNumber || "",
+							guestName: current.guestName || "",
+							hotelName: current.hotelName || "",
+							roomName: current.roomName || "",
+							checkinDate: current.checkinDate || "",
+							checkoutDate: current.checkoutDate || "",
+							sourceAmount: current.sourceAmount || current.amount || 0,
+							sourceCurrency: current.sourceCurrency || current.currency || "",
+							totalAmountSar: current.totalAmountSar || 0,
+							missing: requiredNewReservationMissing(current),
+						},
+					};
+				}),
+			});
 			continue;
 		}
 		if (identityKeys.length !== 1) {
@@ -299,6 +328,16 @@ async function main() {
 		});
 		return false;
 	});
+	const invalidReservationIds = Array.from(
+		new Set(invalidAuditEvidence.map((evidence) => evidence.reservationId).filter(Boolean))
+	);
+	const invalidLinkedReservations = invalidReservationIds.length
+		? await Reservations.find({ _id: { $in: invalidReservationIds } })
+				.select(
+					"_id otaIdentityKey reservation_id confirmation_number booking_source customer_details.name supplierData.otaProvider supplierData.otaConfirmationNumber hotelId state reservation_status checkin_date checkout_date total_amount currency total_rooms total_guests createdAt updatedAt"
+				)
+				.lean()
+		: [];
 
 	const report = {
 		mode: APPLY ? "apply" : "dry-run",
@@ -307,6 +346,8 @@ async function main() {
 		linkedReservationCount: evidenceByReservation.size,
 		invalidAuditEvidenceCount: invalidAuditEvidence.length,
 		invalidAuditEvidence,
+		invalidLinkedReservationCount: invalidLinkedReservations.length,
+		invalidLinkedReservations,
 		staleLinkCount: staleLinks.length,
 		staleLinks,
 		alreadyProtectedCount: alreadyProtected.length,
