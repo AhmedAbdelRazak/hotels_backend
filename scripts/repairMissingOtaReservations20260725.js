@@ -274,7 +274,29 @@ async function buildDryRunDocument(normalized) {
 	assert.ok(roomMatch.roomDetails, `room did not resolve: ${normalized.roomName}`);
 	const built = buildReservationDocument(normalized, hotel, { roomMatch });
 	assert.equal(built.ok, true, built.error || "reservation build failed");
-	const releaseValidation = validateOtaReleaseHotelBasePrice(built.document, {
+	const dryRunReviewedAt = new Date();
+	const reviewedDocument = {
+		...built.document,
+		adminPricing: {
+			...(built.document.adminPricing || {}),
+			mode: "ota_review",
+			pricingReviewRequired: false,
+			roomMappingHotelId: AJYAD_HOTEL_ID,
+			sourceClientTotalSar: round2(built.document.total_amount),
+			sourceClientTotalSource: "supplierData.otaAmountSar",
+			sourceClientTotalLockedAt: dryRunReviewedAt,
+			clientTotalOverrideActive: false,
+			clientTotalOverrideSar: 0,
+		},
+		otaPlatformReview: {
+			...(built.document.otaPlatformReview || {}),
+			status: OTA_PLATFORM_REVIEW_PENDING,
+			lastPricingUpdatedAt: dryRunReviewedAt,
+			roomMappingStatus: "reviewed",
+			roomMappingHotelId: AJYAD_HOTEL_ID,
+		},
+	};
+	const releaseValidation = validateOtaReleaseHotelBasePrice(reviewedDocument, {
 		hotel,
 	});
 	assert.equal(
@@ -298,30 +320,46 @@ async function reviewPricingAndRelease(reservation, hotel) {
 		"reservation is not in pending OTA platform review"
 	);
 
-	const pricingValidation = validateOtaReleaseHotelBasePrice(reservation, { hotel });
+	const pricingReviewedAt = new Date();
+	const sourceClientTotal = round2(reservation.total_amount);
+	const reviewedAdminPricing = {
+		...(reservation.adminPricing || {}),
+		mode: "ota_review",
+		commissionAmount: 0,
+		pricingReviewRequired: false,
+		roomMappingHotelId: AJYAD_HOTEL_ID,
+		sourceClientTotalSar: sourceClientTotal,
+		sourceClientTotalSource: "supplierData.otaAmountSar",
+		sourceClientTotalLockedAt: pricingReviewedAt,
+		clientTotalOverrideActive: false,
+		clientTotalOverrideSar: 0,
+	};
+	const reviewedOtaPlatformReview = {
+		...(reservation.otaPlatformReview || {}),
+		status: OTA_PLATFORM_REVIEW_PENDING,
+		lastPricingUpdatedAt: pricingReviewedAt,
+		lastPricingUpdatedBy: SYSTEM_ACTOR,
+		roomMappingStatus: "reviewed",
+		roomMappingHotelId: AJYAD_HOTEL_ID,
+	};
+	const pricingValidation = validateOtaReleaseHotelBasePrice(
+		{
+			...reservation,
+			adminPricing: reviewedAdminPricing,
+			otaPlatformReview: reviewedOtaPlatformReview,
+		},
+		{ hotel }
+	);
 	assert.equal(
 		pricingValidation.ready,
 		true,
 		pricingValidation.message || "release pricing validation failed"
 	);
-	const pricingReviewedAt = new Date();
-	const sourceClientTotal = round2(reservation.total_amount);
 	const pricingUpdate = {
 		commission: 0,
 		pickedRoomsType: pricingValidation.canonicalRooms,
 		pickedRoomsPricing: pricingValidation.canonicalRooms,
-		adminPricing: {
-			...(reservation.adminPricing || {}),
-			mode: "ota_review",
-			commissionAmount: 0,
-			pricingReviewRequired: false,
-			roomMappingHotelId: AJYAD_HOTEL_ID,
-			sourceClientTotalSar: sourceClientTotal,
-			sourceClientTotalSource: "supplierData.otaAmountSar",
-			sourceClientTotalLockedAt: pricingReviewedAt,
-			clientTotalOverrideActive: false,
-			clientTotalOverrideSar: 0,
-		},
+		adminPricing: reviewedAdminPricing,
 		financial_cycle: {
 			...(reservation.financial_cycle || {}),
 			commissionType: "amount",
@@ -332,14 +370,7 @@ async function reviewPricingAndRelease(reservation, hotel) {
 			lastUpdatedAt: pricingReviewedAt,
 			lastUpdatedBy: null,
 		},
-		otaPlatformReview: {
-			...(reservation.otaPlatformReview || {}),
-			status: OTA_PLATFORM_REVIEW_PENDING,
-			lastPricingUpdatedAt: pricingReviewedAt,
-			lastPricingUpdatedBy: SYSTEM_ACTOR,
-			roomMappingStatus: "reviewed",
-			roomMappingHotelId: AJYAD_HOTEL_ID,
-		},
+		otaPlatformReview: reviewedOtaPlatformReview,
 		adminLastUpdatedAt: pricingReviewedAt,
 		adminLastUpdatedBy: SYSTEM_ACTOR,
 	};
