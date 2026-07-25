@@ -488,10 +488,27 @@ async function main() {
 	await mongoose.connect(database, { autoIndex: false });
 
 	const primaryIds = REPAIRS.map((repair) => repair.primaryAuditId);
+	const targetConfirmations = REPAIRS.map(
+		(repair) => repair.confirmationNumber
+	);
+	const targetConfirmationPattern = new RegExp(
+		targetConfirmations.join("|"),
+		"i"
+	);
 	const candidateAudits = await InboundEmail.find({
 		$or: [
 			{ _id: { $in: primaryIds } },
-			{ receivedAt: { $gte: INCIDENT_START, $lt: INCIDENT_END } },
+			{
+				$and: [
+					{ receivedAt: { $gte: INCIDENT_START, $lt: INCIDENT_END } },
+					{
+						$or: [
+							{ confirmationNumber: { $in: targetConfirmations } },
+							{ bodyText: targetConfirmationPattern },
+						],
+					},
+				],
+			},
 		],
 	})
 		.sort({ receivedAt: 1, _id: 1 })
