@@ -995,7 +995,24 @@ function toSarAmount(amount, currency) {
 }
 
 function parseDate(value) {
-	const s = normalizeWhitespace(value);
+	const arabicMonths = [
+		[/يناير/gi, "January"],
+		[/فبراير/gi, "February"],
+		[/مارس/gi, "March"],
+		[/أبريل|ابريل/gi, "April"],
+		[/مايو/gi, "May"],
+		[/يونيو/gi, "June"],
+		[/يوليو/gi, "July"],
+		[/أغسطس|اغسطس/gi, "August"],
+		[/سبتمبر/gi, "September"],
+		[/أكتوبر|اكتوبر/gi, "October"],
+		[/نوفمبر/gi, "November"],
+		[/ديسمبر/gi, "December"],
+	];
+	const s = arabicMonths.reduce(
+		(result, [pattern, month]) => result.replace(pattern, month),
+		normalizeWhitespace(value).replace(/،/g, ",")
+	);
 	if (!s) return null;
 	if (/^\d+(\.\d+)?$/.test(s)) {
 		const excelEpochStart = new Date(1900, 0, 1);
@@ -1252,6 +1269,102 @@ function stripOtaMarkdownValue(value = "") {
 
 function cleanAgodaValue(value = "") {
 	return cleanFieldValue(stripOtaMarkdownValue(value));
+}
+
+function extractHotelRunnerArabicRoomBlocks(text = "") {
+	const blocks = [];
+	const source = String(text || "").replace(/\r/g, "");
+	const pattern =
+		/(?:^|\n)\s*([^\n]{2,180}?)\s*\n+\s*نوع\s+الغرفة\s+([\s\S]{2,220}?)\s+تاريخ\s+تسجيل\s+الوصول\s+([\s\S]{2,80}?)\s+تاريخ\s+تسجيل\s+المغادرة\s+([\s\S]{2,80}?)\s+عدد\s+الضيوف\s+(\d{1,2})\b([\s\S]{0,420}?)(?=(?:\n\s*[^\n]{2,180}?\s*\n+\s*نوع\s+الغرفة)|(?:\n\s*اذهب\s+إلى\s+الحجز)|$)/gi;
+	for (const match of source.matchAll(pattern)) {
+		const heading = cleanFieldValue(match[1] || "");
+		const roomType = cleanFieldValue(match[2] || "");
+		const checkinDate = parseDate(match[3] || "");
+		const checkoutDate = parseDate(match[4] || "");
+		const totalGuests = Number(match[5] || 0);
+		const tail = String(match[6] || "");
+		const total = parseMoney(
+			findFirstPattern(tail, [
+				/الإجمالي\s*[:#-]?\s*((?:SAR|SR|﷼)?\s*[0-9][0-9,.]*)/i,
+			])
+		);
+		if (!heading || !roomType || !checkinDate || !checkoutDate || !totalGuests) {
+			continue;
+		}
+		blocks.push({
+			heading,
+			roomType,
+			roomName: heading,
+			checkinDate,
+			checkoutDate,
+			totalGuests,
+			totalAmount: total.amount || 0,
+		});
+	}
+
+	const seen = new Set();
+	return blocks.filter((block) => {
+		const key = [
+			block.heading,
+			block.roomType,
+			block.checkinDate,
+			block.checkoutDate,
+			block.totalGuests,
+			block.totalAmount,
+		]
+			.map(normalizeIntlComparable)
+			.join("|");
+		if (!key || seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+function extractHotelRunnerArabicFields(text = "") {
+	const source = String(text || "");
+	const confirmationNumber = findFirstPattern(source, [
+		/رقم\s*التأكيد\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
+	]);
+	const guestName = cleanFieldValue(
+		findFirstPattern(source, [
+			/اسم\s*الضيف\s*[:#-]?\s*([\s\S]{2,160}?)\s+الدولة(?=\s|[:#-]|$)/i,
+		])
+	);
+	const nationality = cleanFieldValue(
+		findFirstPattern(source, [
+			/الدولة\s*[:#-]?\s*([\s\S]{1,100}?)\s+إجمالي\s*الطلب(?=\s|[:#-]|$)/i,
+		])
+	);
+	const orderTotalText = findFirstPattern(source, [
+		/إجمالي\s*الطلب\s*[:#-]?\s*((?:SAR|SR|﷼)?\s*[0-9][0-9,.]*)/i,
+	]);
+	const bookedAtText = findFirstPattern(source, [
+		/تاريخ\s*الحجز\s*[:#-]?\s*[^\n]*?((?:يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)\s+\d{1,2}[،,]?\s+\d{4})/i,
+	]);
+	const roomBlocks = extractHotelRunnerArabicRoomBlocks(source);
+	const firstRoom = roomBlocks[0] || {};
+	const sameStay = roomBlocks.every(
+		(block) =>
+			block.checkinDate === firstRoom.checkinDate &&
+			block.checkoutDate === firstRoom.checkoutDate
+	);
+	return {
+		confirmationNumber: normalizeWhitespace(confirmationNumber),
+		guestName,
+		nationality,
+		orderTotalText,
+		amount: parseMoney(orderTotalText).amount || 0,
+		bookedAt: parseDate(bookedAtText),
+		roomName: firstRoom.roomName || "",
+		checkinDate: sameStay ? firstRoom.checkinDate || null : null,
+		checkoutDate: sameStay ? firstRoom.checkoutDate || null : null,
+		roomCount: roomBlocks.length || 0,
+		totalGuests: roomBlocks.reduce(
+			(sum, block) => sum + Number(block.totalGuests || 0),
+			0
+		),
+		roomBlocks,
+	};
 }
 
 function extractAgodaValueBetweenLabels(
@@ -2537,7 +2650,7 @@ function hasStrongNewReservationSignal(value = "") {
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(subjectOnly)) {
 		return false;
 	}
-	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed)/i.test(
+	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed|حجز\s+جديد)/i.test(
 		subjectOnly
 	);
 }
@@ -2703,7 +2816,7 @@ function detectReservationIntent({
 } = {}) {
 	const haystack = `${subject} ${text}`.toLowerCase();
 	const hasReservationSignal =
-		/(reservation|booking|confirmation|check[\s-]?in|check[\s-]?out|arrival|departure|guest|hotel|property|room|status)/i.test(
+		/(reservation|booking|confirmation|check[\s-]?in|check[\s-]?out|arrival|departure|guest|hotel|property|room|status|حجز|رقم\s*التأكيد|تاريخ\s*تسجيل\s*الوصول|تاريخ\s*تسجيل\s*المغادرة)/i.test(
 			haystack
 		);
 	if (!hasReservationSignal && !reservationId) return "not_reservation";
@@ -2935,10 +3048,16 @@ function extractNormalizedReservation(email) {
 	const isHotelRunnerSender = /@(?:[a-z0-9.-]+\.)?hotelrunner\.com\b/i.test(
 		String(email.from || "")
 	);
+	const hotelRunnerArabicFields = isHotelRunnerSender
+		? extractHotelRunnerArabicFields(
+				String(email.text || "") || htmlToText(email.html || "")
+		  )
+		: {};
 	const hotelRunnerRoomBlocks = isHotelRunnerSender
 		? [
 				extractHotelRunnerRoomBlocks(email.text || ""),
 				extractHotelRunnerRoomBlocks(htmlToText(email.html || "")),
+				hotelRunnerArabicFields.roomBlocks || [],
 		  ].reduce(
 				(longest, blocks) =>
 					blocks.length > longest.length ? blocks : longest,
@@ -2970,11 +3089,14 @@ function extractNormalizedReservation(email) {
 			subject: email.subject,
 		});
 
-	const reservationId = cleanConfirmationCandidate(
-		firstNonEmpty(
-			airbnbFields.confirmationNumber,
-			agodaFields.confirmationNumber,
-			findField(text, [
+	const explicitProviderConfirmation = firstNonEmpty(
+		airbnbFields.confirmationNumber,
+		agodaFields.confirmationNumber,
+		hotelRunnerArabicFields.confirmationNumber
+	);
+	const reservationCandidate = firstNonEmpty(
+		explicitProviderConfirmation,
+		findField(text, [
 				"Reservation ID",
 				"Reservation number",
 				"Reservation No",
@@ -3005,7 +3127,7 @@ function extractNormalizedReservation(email) {
 				"Trip number",
 				"Trip #",
 			]),
-			findFirstPattern(text, [
+		findFirstPattern(text, [
 				/\bReservation\s*(?:ID|No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bConfirmation\s*(?:Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
@@ -3013,9 +3135,15 @@ function extractNormalizedReservation(email) {
 				/\bVoucher\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bItinerary\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bTrip\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
-			])
-		)
+		])
 	);
+	// Airbnb confirmation codes may be alphabetic. Only permit that format when
+	// it came from Airbnb's explicit reservation URL/label or HotelRunner's
+	// explicit Arabic confirmation label; generic alphabetic fragments remain blocked.
+	const reservationId =
+		provider === "airbnb" && explicitProviderConfirmation
+			? normalizeWhitespace(explicitProviderConfirmation)
+			: cleanConfirmationCandidate(reservationCandidate);
 
 	const explicitHotelName = firstNonEmpty(
 		explicitHotelAliasFromText(email.subject || ""),
@@ -3043,6 +3171,7 @@ function extractNormalizedReservation(email) {
 	const roomName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.roomName,
 		agodaFields.roomName,
+		hotelRunnerArabicFields.roomName,
 		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
 	), [
 		"Check[-\\s]?in(?:\\s+date)?",
@@ -3050,8 +3179,11 @@ function extractNormalizedReservation(email) {
 		"Guest\\s+count",
 		"Daily\\s+average\\s+rate",
 		"Total",
+		"تاريخ\\s*تسجيل\\s*الوصول",
+		"تاريخ\\s*تسجيل\\s*المغادرة",
+		"عدد\\s*الضيوف",
 	]);
-	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || tableStayDates.checkinDate || findDateValue(
+	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || hotelRunnerArabicFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -3070,7 +3202,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
+	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || hotelRunnerArabicFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -3095,19 +3227,25 @@ function extractNormalizedReservation(email) {
 		"Booked",
 		"Created",
 	]);
-	const bookedAt = parseDate(bookedAtField) || dayjs().format("YYYY-MM-DD");
+	const bookedAt =
+		hotelRunnerArabicFields.bookedAt ||
+		parseDate(bookedAtField) ||
+		dayjs().format("YYYY-MM-DD");
 
-	const amountText = findField(text, [
-		"Total booking amount",
-		"Booking amount",
-		"Total guest payment",
-		"Reservation total",
-		"Total amount",
-		"Grand total",
-		"Guest total",
-		"Order total",
-		"Amount paid",
-	]);
+	const amountText = firstNonEmpty(
+		hotelRunnerArabicFields.orderTotalText,
+		findField(text, [
+			"Total booking amount",
+			"Booking amount",
+			"Total guest payment",
+			"Reservation total",
+			"Total amount",
+			"Grand total",
+			"Guest total",
+			"Order total",
+			"Amount paid",
+		])
+	);
 	const explicitAggregateMoney = parseMoney(amountText);
 	const hasExplicitAggregateMoney = explicitAggregateMoney.amount > 0;
 	const parsedMoney = hasExplicitAggregateMoney
@@ -3161,6 +3299,7 @@ function extractNormalizedReservation(email) {
 	const adults =
 		airbnbFields.adults ||
 		agodaFields.adults ||
+		hotelRunnerArabicFields.totalGuests ||
 		tableOccupancy.adults ||
 		countNumber(adultsField);
 	const children =
@@ -3171,11 +3310,17 @@ function extractNormalizedReservation(email) {
 	const totalGuests =
 		airbnbFields.totalGuests ||
 		agodaFields.totalGuests ||
+		hotelRunnerArabicFields.totalGuests ||
 		countNumber(totalGuestsField) ||
 		tableOccupancy.totalGuests ||
 		adults + children ||
 		1;
-	const roomCount = airbnbFields.roomCount || agodaFields.roomCount || countNumber(roomCountField) || 1;
+	const roomCount =
+		airbnbFields.roomCount ||
+		agodaFields.roomCount ||
+		hotelRunnerArabicFields.roomCount ||
+		countNumber(roomCountField) ||
+		1;
 	const guestEmailField = findField(text, [
 		"Guest email",
 		"Email",
@@ -3217,6 +3362,7 @@ function extractNormalizedReservation(email) {
 	const guestName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.guestName,
 		agodaFields.guestName,
+		hotelRunnerArabicFields.guestName,
 		hotelRunnerInlineGuest.guestName,
 		extractProviderGuestName(text),
 		guestNameField,
@@ -3230,6 +3376,7 @@ function extractNormalizedReservation(email) {
 		"Booked\\s+Date",
 	]);
 	const nationality = trimFlattenedFieldTail(firstNonEmpty(
+		hotelRunnerArabicFields.nationality,
 		hotelRunnerInlineGuest.nationality,
 		agodaFields.nationality,
 		findField(text, [
@@ -3245,6 +3392,7 @@ function extractNormalizedReservation(email) {
 		"Check[-\\s]?out",
 		"Room\\s+Type",
 		"Booked\\s+Date",
+		"إجمالي\\s*الطلب",
 	]);
 	const guestNotes = firstNonEmpty(airbnbFields.guestNotes, findGuestNoteField(text));
 	const guestPhone = firstNonEmpty(
@@ -3492,13 +3640,24 @@ function extractNormalizedReservation(email) {
 			airbnbListingId: !!airbnbFields.airbnbListingId,
 			airbnbListingTitle: !!airbnbFields.airbnbListingTitle,
 			roomName: !!roomName,
-			checkinDate: !!checkinDate || !!tableStayDates.checkinDate,
-			checkoutDate: !!checkoutDate || !!tableStayDates.checkoutDate,
-			bookedAt: !!parseDate(bookedAtField),
+			checkinDate:
+				!!checkinDate ||
+				!!tableStayDates.checkinDate ||
+				!!hotelRunnerArabicFields.checkinDate,
+			checkoutDate:
+				!!checkoutDate ||
+				!!tableStayDates.checkoutDate ||
+				!!hotelRunnerArabicFields.checkoutDate,
+			bookedAt:
+				!!parseDate(bookedAtField) || !!hotelRunnerArabicFields.bookedAt,
 			amount:
 				(!!amountText || !!airbnbFields.amount || !!agodaFields.amount) &&
 				Number(parsedMoney.amount || 0) > 0,
-			adults: !!adultsField || !!agodaFields.sourcePresence?.adults || tableOccupancy.adults > 0,
+			adults:
+				!!adultsField ||
+				!!agodaFields.sourcePresence?.adults ||
+				hotelRunnerArabicFields.totalGuests > 0 ||
+				tableOccupancy.adults > 0,
 			children:
 				!!childrenField ||
 				!!agodaFields.sourcePresence?.children ||
@@ -3506,8 +3665,12 @@ function extractNormalizedReservation(email) {
 			totalGuests:
 				!!totalGuestsField ||
 				!!agodaFields.sourcePresence?.totalGuests ||
+				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.totalGuests > 0,
-			roomCount: !!roomCountField || !!agodaFields.sourcePresence?.roomCount,
+			roomCount:
+				!!roomCountField ||
+				!!agodaFields.sourcePresence?.roomCount ||
+				hotelRunnerArabicFields.roomCount > 0,
 			guestName: !!guestName,
 			guestEmail: !!guestEmail,
 			guestPhone: !!guestPhone,
@@ -5889,9 +6052,11 @@ function canCreateUnmappedOtaReviewReservation(
 	normalized = {},
 	allowCreate = false
 ) {
-	if (!allowCreate || normalized.requiresManualReview === true) return false;
+	if (!allowCreate) return false;
 	return requiredNewReservationMissing(normalized).every(
-		(item) => item === "source-backed hotel/property"
+		(item) =>
+			item === "source-backed hotel/property" ||
+			item === "single unambiguous room block"
 	);
 }
 
@@ -5906,8 +6071,9 @@ async function createUnmappedOtaReviewReservation({
 		(item) => item !== "source-backed hotel/property"
 	);
 	if (!canCreateUnmappedOtaReviewReservation(normalized, allowCreate)) {
-		// Weak or ambiguous facts stay in the inbound audit. The only permitted
-		// as-is reservation is a complete booking whose hotel cannot be mapped.
+		// Weak facts stay in the inbound audit. A source-backed booking may be
+		// saved as an isolated platform-review record when only hotel/room
+		// assignment is uncertain; it cannot enter normal operations until release.
 		const reviewText = [...errors, ...warnings, ...nonHotelMissing].join(" ");
 		const needsMapping = /\b(hotel|property|room|mapping|assignment)\b/i.test(
 			reviewText
@@ -5953,9 +6119,9 @@ async function createUnmappedOtaReviewReservation({
 		};
 	}
 
-	const missingHotelWarning =
-		"Hotel was not confidently resolved from the OTA email; the OTA room name was saved as-is in platform review pending hotel assignment.";
-	if (!warnings.includes(missingHotelWarning)) warnings.push(missingHotelWarning);
+	const pendingReviewWarning =
+		"The source-backed OTA booking was saved as-is in platform review; an administrator must confirm hotel, room mapping, and pricing before release.";
+	if (!warnings.includes(pendingReviewWarning)) warnings.push(pendingReviewWarning);
 	const document = buildUnmappedOtaReviewReservationDocument({
 		...normalized,
 		confirmationNumber,
@@ -6043,7 +6209,7 @@ async function createUnmappedOtaReviewReservation({
 		actionTaken: "created_unmapped_ota_review",
 		skipReason: "",
 		automationComment:
-			"OTA reservation was saved with its OTA room name as-is because no hotel could be confidently mapped; assign a hotel and PMS room before release.",
+			"The source-backed OTA reservation was preserved in platform review; confirm its hotel, room mapping, and pricing before release.",
 		warnings,
 		errors,
 		reservationId: created._id,
@@ -6108,6 +6274,21 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			reasons: manualReasons,
 		});
+		if (
+			intent === "new_reservation" &&
+			confirmationNumber &&
+			hasKnownProvider(normalized) &&
+			hasSourceField(normalized, "confirmationNumber") &&
+			canCreateUnmappedOtaReviewReservation(normalized, true)
+		) {
+			return createUnmappedOtaReviewReservation({
+				normalized,
+				confirmationNumber,
+				warnings: [...warnings, ...manualReasons],
+				errors,
+				allowCreate: true,
+			});
+		}
 		return {
 			status: "needs_review",
 			actionTaken: "skipped",
@@ -6499,6 +6680,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: manualWarnings,
 			errors,
+			allowCreate: true,
 		});
 	}
 
@@ -6554,9 +6736,10 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: [
 				...warnings,
-				`${built.error} Held in the inbound audit; no reservation was created from an unresolved room or price.`,
+				`${built.error} Saved as an isolated OTA platform review pending room and pricing confirmation.`,
 			],
 			errors,
+			allowCreate: true,
 		});
 	}
 	(built.warnings || []).forEach((warning) => {
@@ -6610,9 +6793,10 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			confirmationNumber,
 			warnings: [
 				...warnings,
-				`${error.message || "Could not calculate reservation pricing."} Held in the inbound audit; no reservation was created from unresolved pricing.`,
+				`${error.message || "Could not calculate reservation pricing."} Saved as an isolated OTA platform review pending pricing confirmation.`,
 			],
 			errors,
+			allowCreate: true,
 		});
 	}
 	if (existing) {

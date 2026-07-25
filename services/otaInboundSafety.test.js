@@ -625,6 +625,97 @@ test("alphabetic template fragments cannot become OTA confirmation identities", 
 	}
 });
 
+test("source-backed alphabetic Airbnb confirmation codes remain valid identities", () => {
+	const normalized = extractNormalizedReservation({
+		from: "automated@airbnb.com",
+		subject: "Reservation confirmed - Mubashar Kalyar arrives Jul 25",
+		text: [
+			"Confirmation code",
+			"HMHBHJDJJM",
+			"https://www.airbnb.com/hosting/reservations/details/HMHBHJDJJM",
+			"PRIVATE FAMILY ROOM FOR 6 -AJYAD-10 MINS TO HARAM",
+			"Room",
+			"Check-in",
+			"Jul 25, 2026",
+			"Checkout",
+			"Jul 26, 2026",
+			"Guests",
+			"6 adults",
+			"Total (SAR)",
+			"SAR 102.46",
+			"You earn",
+			"SAR 73.36",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "airbnb");
+	assert.equal(normalized.confirmationNumber, "hmhbhjdjjm");
+	assert.equal(normalized.sourcePresence.confirmationNumber, true);
+});
+
+test("Arabic HotelRunner Airbnb messages expose deterministic reservation fields", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - حجز جديد #R833757345",
+		text: [
+			"حجز جديد",
+			"AIRBNB",
+			"رقم التأكيد HM9N2QZQWJ اسم الضيف Muhammad Alhassan الدولة ~غير متاح إجمالي الطلب ﷼ 104.33 تاريخ الحجز سبت، يوليو 25، 2026 14:25",
+			"غرفة ثلاثية فندق زاد أجياد 2 · Private Room-3beds - Ajyad Hotel-15 mins to Haram",
+			"نوع الغرفة غرفة لثلاث أفراد خاصة - أجياد - أتوبيس مجانى تاريخ تسجيل الوصول يوليو 25، 2026 تاريخ تسجيل المغادرة يوليو 27، 2026 عدد الضيوف 1 المعدل اليومي المتوسط ﷼ 52.17 الإجمالي ﷼ 104.33 آخر تحديث - الحالة حجز",
+			"اذهب إلى الحجز",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "airbnb");
+	assert.equal(normalized.intent, "new_reservation");
+	assert.equal(normalized.confirmationNumber, "hm9n2qzqwj");
+	assert.equal(normalized.guestName, "Muhammad Alhassan");
+	assert.match(normalized.roomName, /3beds/i);
+	assert.equal(normalized.checkinDate, "2026-07-25");
+	assert.equal(normalized.checkoutDate, "2026-07-27");
+	assert.equal(normalized.totalGuests, 1);
+	assert.equal(normalized.roomCount, 1);
+	assert.equal(normalized.totalAmountSar, 104.33);
+	for (const field of [
+		"confirmationNumber",
+		"guestName",
+		"roomName",
+		"checkinDate",
+		"checkoutDate",
+		"amount",
+	]) {
+		assert.equal(normalized.sourcePresence[field], true, field);
+	}
+});
+
+test("Arabic HotelRunner multi-room messages retain all occupancy evidence for review", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - حجز جديد #R833757346",
+		text: [
+			"حجز جديد",
+			"AGODA",
+			"رقم التأكيد 2035742642 اسم الضيف Abdullah Ayoub الدولة Saudi Arabia إجمالي الطلب ﷼ 288.12 تاريخ الحجز سبت، يوليو 25، 2026 14:28",
+			"5 Beds Room (Comfort 5 Beds Room )",
+			"نوع الغرفة غرفة عائلية خاصة لخمسة أفراد - أجياد تاريخ تسجيل الوصول يوليو 28، 2026 تاريخ تسجيل المغادرة يوليو 31، 2026 عدد الضيوف 3 المعدل اليومي المتوسط ﷼ 48.02 الإجمالي ﷼ 144.06",
+			"5 Beds Room (Comfort 5 Beds Room )",
+			"نوع الغرفة غرفة عائلية خاصة لخمسة أفراد - أجياد تاريخ تسجيل الوصول يوليو 28، 2026 تاريخ تسجيل المغادرة يوليو 31، 2026 عدد الضيوف 2 المعدل اليومي المتوسط ﷼ 48.02 الإجمالي ﷼ 144.06",
+			"اذهب إلى الحجز",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "agoda");
+	assert.equal(normalized.confirmationNumber, "2035742642");
+	assert.equal(normalized.roomCount, 2);
+	assert.equal(normalized.totalGuests, 5);
+	assert.equal(normalized.checkinDate, "2026-07-28");
+	assert.equal(normalized.checkoutDate, "2026-07-31");
+	assert.equal(normalized.totalAmountSar, 288.12);
+	assert.equal(normalized.requiresManualReview, true);
+	assert.match(normalized.manualReviewReasons[0], /2 room blocks/i);
+});
+
 test("confirmation nouns and bare active text cannot mutate reservation status", () => {
 	for (const text of [
 		"Reservation ID: 12345678. Confirmation details are available.",
@@ -874,6 +965,17 @@ test("the as-is OTA room fallback is unassigned and financially blocked pending 
 		false
 	);
 	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, false), false);
+	assert.equal(
+		canCreateUnmappedOtaReviewReservation(
+			{
+				...normalized,
+				requiresManualReview: true,
+				manualReviewReasons: ["The email contains 2 room blocks."],
+			},
+			true
+		),
+		true
+	);
 	assert.equal(document.hotelId, undefined);
 	assert.equal(document.belongsTo, undefined);
 	assert.equal(document.pickedRoomsType[0].displayName, "Original OTA Room Wording");
