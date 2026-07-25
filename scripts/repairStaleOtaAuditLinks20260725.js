@@ -134,28 +134,25 @@ async function buildPlans() {
 	const identityPlansByReservation = new Map();
 	for (const audit of audits) {
 		const reparsed = reparseAudit(audit);
-		assert.equal(
-			reparsed.provider,
-			audit.provider,
-			`provider changed while reparsing audit ${id(audit._id)}`
-		);
-		assert.equal(
-			reparsed.sourcePresence?.confirmationNumber,
-			true,
-			`confirmation is still not source-backed for audit ${id(audit._id)}`
-		);
+		if (
+			reparsed.provider !== audit.provider ||
+			reparsed.sourcePresence?.confirmationNumber !== true
+		) {
+			continue;
+		}
 		const confirmationNumber = normalizeConfirmation(
 			reparsed.confirmationNumber
 		);
+		if (!plausibleProviderConfirmation(audit.provider, confirmationNumber)) {
+			continue;
+		}
 		const storedConfirmationNumber = normalizeConfirmation(
 			audit.confirmationNumber
 		);
 		if (confirmationNumber !== storedConfirmationNumber) {
-			assert.equal(
-				plausibleProviderConfirmation(audit.provider, storedConfirmationNumber),
-				false,
-				`refusing to replace a plausible stored confirmation on audit ${id(audit._id)}`
-			);
+			if (plausibleProviderConfirmation(audit.provider, storedConfirmationNumber)) {
+				continue;
+			}
 		}
 		// Exact provider + confirmation identity is required before any audit link.
 		// eslint-disable-next-line no-await-in-loop
