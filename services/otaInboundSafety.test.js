@@ -480,6 +480,20 @@ test("multi-room or multi-rate Agoda payloads require manual review", () => {
 	assert.equal(multiRate.totalAmountSar, 210);
 	assert.equal(multiRate.requiresManualReview, true);
 	assert.ok(multiRate.manualReviewReasons.some((reason) => /multiple reference/i.test(reason)));
+
+	const mirroredSingleRate = extractNormalizedReservation({
+		from: "no-reply@agoda.com",
+		subject: "Agoda Booking ID 682028098 - CONFIRMED",
+		text: [
+			"Booking ID 682028098 Reservation Information Booking confirmation Zyd Agyad",
+			"Customer First Name Safe Customer Last Name Guest Country of Residence Saudi Arabia Check-in July 23, 2026 Check-out July 24, 2026",
+			"Room Type No. of Rooms Occupancy No. of Extra Bed Double Room 1 2 Adults 0",
+			"Reference sell rate (incl. taxes & fees) SAR 70.00",
+			"Reference sell rate (incl. taxes & fees) SAR 70.00",
+		].join("\n"),
+	});
+	assert.equal(mirroredSingleRate.totalAmountSar, 70);
+	assert.equal(mirroredSingleRate.requiresManualReview, false);
 });
 
 test("explicit six-person inventory selects the six-bed config, never the quintuple", () => {

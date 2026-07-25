@@ -246,6 +246,21 @@ function assertReservationIntegrity(reservation, repair) {
 	}
 }
 
+function isPromotableIncidentReview(reservation, repair) {
+	return Boolean(
+		reservation &&
+			!id(reservation.hotelId) &&
+			String(reservation.otaPlatformReview?.status || "").toLowerCase() ===
+				OTA_PLATFORM_REVIEW_PENDING &&
+			String(reservation.reservation_status || "").toLowerCase() ===
+				"ota platform review" &&
+			reservation.otaIdentityKey ===
+				buildOtaIdentityKey(repair.provider, repair.confirmationNumber) &&
+			String(reservation.supplierData?.otaInboundEmailId || "") ===
+				repair.primaryAuditId
+	);
+}
+
 function jsonSafe(value) {
 	return JSON.parse(JSON.stringify(value));
 }
@@ -312,6 +327,81 @@ async function buildDryRunDocument(normalized) {
 		releaseValidation.message || "release pricing validation failed"
 	);
 	return { hotel, roomMatch, built, releaseValidation };
+}
+
+async function promotePendingIncidentReview(reservation, repair, dryRun) {
+	assert.equal(
+		isPromotableIncidentReview(reservation, repair),
+		true,
+		"only the exact unassigned incident review may be promoted"
+	);
+	const promotedAt = new Date();
+	const canonical = {
+		...dryRun.built.document,
+		confirmation_number: reservation.confirmation_number,
+		otaIdentityKey: buildOtaIdentityKey(
+			repair.provider,
+			repair.confirmationNumber
+		),
+		customer_details: {
+			...(dryRun.built.document.customer_details || {}),
+			confirmation_number2: repair.confirmationNumber,
+		},
+		supplierData: {
+			...(dryRun.built.document.supplierData || {}),
+			suppliedBookingNo: repair.confirmationNumber,
+			otaConfirmationNumber: repair.confirmationNumber,
+			platformConfirmationNumber: repair.confirmationNumber,
+			pmsConfirmationNumber: reservation.confirmation_number,
+			otaCreatedFromEmail: true,
+			otaCreatedFromSync: false,
+			otaInboundEmailId: repair.primaryAuditId,
+			otaCreatedAt:
+				reservation.supplierData?.otaCreatedAt || reservation.createdAt || promotedAt,
+		},
+		otaPlatformReview: {
+			...(dryRun.built.document.otaPlatformReview || {}),
+			status: OTA_PLATFORM_REVIEW_PENDING,
+			createdAt:
+				reservation.otaPlatformReview?.createdAt || reservation.createdAt || promotedAt,
+		},
+	};
+	delete canonical.reservationAuditLog;
+	delete canonical._id;
+	delete canonical.__v;
+	delete canonical.createdAt;
+	delete canonical.updatedAt;
+
+	const promoted = await Reservations.findOneAndUpdate(
+		{
+			_id: reservation._id,
+			__v: Number(reservation.__v || 0),
+			hotelId: null,
+			otaIdentityKey: canonical.otaIdentityKey,
+			"otaPlatformReview.status": OTA_PLATFORM_REVIEW_PENDING,
+			"supplierData.otaInboundEmailId": repair.primaryAuditId,
+		},
+		{
+			$set: canonical,
+			$inc: { __v: 1 },
+			$push: {
+				reservationAuditLog: {
+					at: promotedAt,
+					source: "ota-incident-repair",
+					action: "promoted-unassigned-review-to-verified-mapping",
+					by: SYSTEM_ACTOR,
+					to: {
+						hotelId: AJYAD_HOTEL_ID,
+						roomId: repair.expectedRoomId,
+						roomCount: repair.roomCount,
+					},
+				},
+			},
+		},
+		{ new: true }
+	).lean();
+	assert.ok(promoted, "concurrent change blocked incident review promotion");
+	return promoted;
 }
 
 async function reviewPricingAndRelease(reservation, hotel) {
@@ -587,7 +677,7 @@ async function main() {
 			repair.provider
 		);
 		let dryRun = null;
-		if (existing) {
+		if (existing && !isPromotableIncidentReview(existing, repair)) {
 			assertReservationIntegrity(existing, repair);
 		} else {
 			dryRun = await buildDryRunDocument(normalized);
@@ -662,6 +752,16 @@ async function main() {
 			repair.confirmationNumber,
 			repair.provider
 		);
+		if (isPromotableIncidentReview(reservation, repair)) {
+			const promotionDryRun =
+				plan.dryRun || (await buildDryRunDocument(normalized));
+			// eslint-disable-next-line no-await-in-loop
+			reservation = await promotePendingIncidentReview(
+				reservation.toObject?.() || reservation,
+				repair,
+				promotionDryRun
+			);
+		}
 		assertReservationIntegrity(reservation, repair);
 		if (RELEASE) {
 			// eslint-disable-next-line no-await-in-loop

@@ -1596,6 +1596,18 @@ function extractAgodaMoneyByLabel(text = "", label = "") {
 	return { amount: 0, currency: "" };
 }
 
+function distinctAgodaReferenceSellRates(text = "") {
+	const rates = [];
+	const pattern =
+		/Reference\s+sell\s+rate\s*\(incl\.\s*taxes\s*&\s*fees\)\s*[:#-]?\s*((?:(?:SAR|SR|USD|US\$|\$|﷼)\s*)?[+-]?[0-9][0-9,.]*)/gi;
+	for (const match of String(text || "").matchAll(pattern)) {
+		const parsed = parseMoney(match[1] || "");
+		if (!parsed.amount) continue;
+		rates.push(`${round2(parsed.amount)}:${parsed.currency || "SAR"}`);
+	}
+	return Array.from(new Set(rates));
+}
+
 function nextAgodaValue(lines = [], startIndex = -1, skipPattern = null) {
 	if (startIndex < 0) return "";
 	for (
@@ -1659,15 +1671,11 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		]),
 		findField(text, ["Customer First Name"])
 	);
-	const textReferenceSellRateOccurrences = (
-		String(email.text || "").match(
-			/Reference sell rate \(incl\. taxes & fees\)/gi
-		) || []
+	const textReferenceSellRateOccurrences = distinctAgodaReferenceSellRates(
+		email.text || ""
 	).length;
-	const htmlReferenceSellRateOccurrences = (
-		htmlToText(email.html || "").match(
-			/Reference sell rate \(incl\. taxes & fees\)/gi
-		) || []
+	const htmlReferenceSellRateOccurrences = distinctAgodaReferenceSellRates(
+		htmlToText(email.html || "")
 	).length;
 	const referenceSellRateOccurrences =
 		textReferenceSellRateOccurrences || htmlReferenceSellRateOccurrences
@@ -1675,11 +1683,7 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 					textReferenceSellRateOccurrences,
 					htmlReferenceSellRateOccurrences
 			  )
-			: (
-					String(text || "").match(
-						/Reference sell rate \(incl\. taxes & fees\)/gi
-					) || []
-			  ).length;
+			: distinctAgodaReferenceSellRates(text).length;
 	const agodaRoomReferences = Array.from(
 		new Set(
 			Array.from(String(text || "").matchAll(/\[?Rm\s*No\.?\s*(\d+)\]?/gi))
