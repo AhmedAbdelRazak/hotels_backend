@@ -3700,6 +3700,9 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		if (!canManageOtaReservations(actor)) {
 			return res.status(403).json({ success: false, message: "Access denied" });
 		}
+		const allowSourceClientTotalOverride = parseBooleanFlag(
+			req.body?.allowOtaClientTotalOverride,
+		);
 		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
 			return res.status(400).json({ success: false, message: "Invalid reservation ID" });
 		}
@@ -3824,6 +3827,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		const clientPricingValidation = validateOtaSourceClientPricing(
 			prospectiveReservation,
 			canonicalRoomMapping.rooms,
+			{ allowSourceClientTotalOverride },
 		);
 		if (!clientPricingValidation.ready) {
 			throw new ReservationPricingError(
@@ -3833,6 +3837,8 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				{
 					sourceClientTotal: clientPricingValidation.sourceClientTotal || 0,
 					dailyClientTotal: clientPricingValidation.dailyClientTotal || 0,
+					effectiveClientTotal:
+						clientPricingValidation.effectiveClientTotal || 0,
 					storedClientTotal: clientPricingValidation.storedClientTotal || 0,
 					reservationClientTotal:
 						clientPricingValidation.reservationClientTotal || 0,
@@ -3840,9 +3846,39 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			);
 		}
 		if (isOtaSourceReservation(reservation)) {
-			normalizedUpdate.total_amount = clientPricingValidation.sourceClientTotal;
-			normalizedUpdate.adminPricing.clientTotal =
+			const effectiveClientTotal =
+				clientPricingValidation.effectiveClientTotal ||
 				clientPricingValidation.sourceClientTotal;
+			normalizedUpdate.total_amount = effectiveClientTotal;
+			normalizedUpdate.adminPricing.clientTotal =
+				effectiveClientTotal;
+			if (clientPricingValidation.clientTotalOverridden === true) {
+				normalizedUpdate.adminPricing.clientTotalOverrideActive = true;
+				normalizedUpdate.adminPricing.clientTotalOverrideSar =
+					effectiveClientTotal;
+				normalizedUpdate.adminPricing.clientTotalOverrideOriginalSar =
+					originalSourceClientTotal.amount || 0;
+				normalizedUpdate.adminPricing.clientTotalOverrideAt =
+					allowSourceClientTotalOverride
+						? now
+						: existingAdminPricing.clientTotalOverrideAt || now;
+				normalizedUpdate.adminPricing.clientTotalOverrideBy =
+					allowSourceClientTotalOverride
+						? auditActor
+						: existingAdminPricing.clientTotalOverrideBy || auditActor;
+				normalizedUpdate.adminPricing.clientTotalOverrideSource =
+					"platform_ota_pricing_review";
+			} else {
+				normalizedUpdate.adminPricing.clientTotalOverrideActive = false;
+				normalizedUpdate.adminPricing.clientTotalOverrideSar = 0;
+				if (
+					allowSourceClientTotalOverride &&
+					existingAdminPricing.clientTotalOverrideActive === true
+				) {
+					normalizedUpdate.adminPricing.clientTotalOverrideClearedAt = now;
+					normalizedUpdate.adminPricing.clientTotalOverrideClearedBy = auditActor;
+				}
+			}
 		}
 		const defaultCommissionAmount = round2(
 			moneyNumber(normalizedUpdate.sub_total || reservation.sub_total) * 0.1
@@ -3914,6 +3950,12 @@ exports.updateOtaReservationPricing = async (req, res) => {
 							sub_total: set.sub_total,
 							commission: set.commission,
 							hotel_visible_amount: computeOtaHotelVisibleAmount(set),
+							original_source_client_total_sar:
+								originalSourceClientTotal.amount || 0,
+							client_total_override_active:
+								set.adminPricing?.clientTotalOverrideActive === true,
+							client_total_override_sar:
+								set.adminPricing?.clientTotalOverrideSar || 0,
 						},
 					},
 				},

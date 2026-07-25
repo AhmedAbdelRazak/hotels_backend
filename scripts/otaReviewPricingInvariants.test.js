@@ -131,6 +131,93 @@ test("nightly client pricing must reconcile to the immutable OTA guest total", (
 	assert.equal(rejected.dailyClientTotal, 150);
 });
 
+test("an explicit platform pricing review can override the OTA source total", () => {
+	const configId = roomId();
+	const reservation = otaEmailReservation(configId, {
+		total_amount: 180.32,
+		adminPricing: {
+			mode: "ota_review",
+			clientTotal: 180.32,
+			rootTotal: 120,
+			netAfterExpensesTotal: 180.32,
+		},
+		pickedRoomsPricing: [
+			reviewedRoom(configId, {
+				pricingByDay: [
+					{ date: "2026-08-01", clientPrice: 90.16, rootPrice: 60 },
+					{ date: "2026-08-02", clientPrice: 90.16, rootPrice: 60 },
+				],
+			}),
+		],
+	});
+
+	const rejected = otaPricing.validateOtaSourceClientPricing(
+		reservation,
+		reservation.pickedRoomsPricing,
+	);
+	assert.equal(rejected.ready, false);
+	assert.equal(rejected.code, "ota_source_client_total_mismatch");
+
+	const accepted = otaPricing.validateOtaSourceClientPricing(
+		reservation,
+		reservation.pickedRoomsPricing,
+		{ allowSourceClientTotalOverride: true },
+	);
+	assert.equal(accepted.ready, true);
+	assert.equal(accepted.sourceClientTotal, 200);
+	assert.equal(accepted.effectiveClientTotal, 180.32);
+	assert.equal(accepted.clientTotalOverridden, true);
+});
+
+test("a saved reviewed override remains valid during hotel release", () => {
+	const configId = roomId();
+	const hotel = {
+		roomCountDetails: [
+			{
+				_id: configId,
+				roomType: "doubleRooms",
+				displayName: "Deluxe Double",
+				activeRoom: true,
+			},
+		],
+	};
+	const reservation = otaEmailReservation(configId, {
+		total_amount: 180.32,
+		adminPricing: {
+			mode: "ota_review",
+			clientTotal: 180.32,
+			rootTotal: 120,
+			netAfterExpensesTotal: 180.32,
+			clientTotalOverrideActive: true,
+			clientTotalOverrideSar: 180.32,
+		},
+		pickedRoomsType: [
+			reviewedRoom(configId, {
+				pricingByDay: [
+					{ date: "2026-08-01", clientPrice: 90.16, rootPrice: 60 },
+					{ date: "2026-08-02", clientPrice: 90.16, rootPrice: 60 },
+				],
+			}),
+		],
+		pickedRoomsPricing: [
+			reviewedRoom(configId, {
+				pricingByDay: [
+					{ date: "2026-08-01", clientPrice: 90.16, rootPrice: 60 },
+					{ date: "2026-08-02", clientPrice: 90.16, rootPrice: 60 },
+				],
+			}),
+		],
+	});
+
+	const release = otaPricing.validateOtaReleaseHotelBasePrice(reservation, {
+		hotel,
+	});
+	assert.equal(release.ready, true);
+	assert.equal(release.sourceClientTotal, 200);
+	assert.equal(release.effectiveClientTotal, 180.32);
+	assert.equal(release.clientTotalOverridden, true);
+});
+
 test("source-total locking does not apply to manual/non-email pricing", () => {
 	const rooms = [reviewedRoom(roomId())];
 	const manualReservation = {

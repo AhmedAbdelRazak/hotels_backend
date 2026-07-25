@@ -211,6 +211,20 @@ const resolveOtaSourceClientTotal = (reservation = {}) => {
 	return { amount: 0, source: "" };
 };
 
+const resolvePersistedOtaClientTotalOverride = (reservation = {}) => {
+	const pricing = reservation.adminPricing || {};
+	if (pricing.clientTotalOverrideActive !== true) {
+		return { amount: 0, source: "" };
+	}
+	const amount = positiveMoney(pricing.clientTotalOverrideSar);
+	return amount === null
+		? { amount: 0, source: "" }
+		: {
+				amount,
+				source: "adminPricing.clientTotalOverrideSar",
+		  };
+};
+
 const dayClientPrice = (day = {}) => {
 	for (const field of [
 		"clientPrice",
@@ -243,7 +257,11 @@ const summarizeOtaReviewedClientPricing = (rooms = []) => {
 	return { dailyClientTotal, dailyRows, missingClientRows };
 };
 
-const validateOtaSourceClientPricing = (reservation = {}, rooms = []) => {
+const validateOtaSourceClientPricing = (
+	reservation = {},
+	rooms = [],
+	{ allowSourceClientTotalOverride = false } = {},
+) => {
 	const daily = summarizeOtaReviewedClientPricing(rooms);
 	if (isOtaReviewReservation(reservation)) {
 		const dateCoverage = validateOtaStayDateCoverage(reservation, rooms);
@@ -253,17 +271,36 @@ const validateOtaSourceClientPricing = (reservation = {}, rooms = []) => {
 		return {
 			ready: true,
 			sourceClientTotal: round2(reservation.total_amount),
+			effectiveClientTotal: round2(reservation.total_amount),
 			dailyClientTotal: daily.dailyClientTotal,
 		};
 	}
 	const source = resolveOtaSourceClientTotal(reservation);
-	if (!(source.amount > 0)) {
+	const persistedOverride = resolvePersistedOtaClientTotalOverride(reservation);
+	const requestedOverrideAmount = allowSourceClientTotalOverride
+		? positiveMoney(daily.dailyClientTotal)
+		: null;
+	const requestedOverrideDiffersFromSource =
+		requestedOverrideAmount !== null &&
+		(!(source.amount > 0) ||
+			Math.abs(requestedOverrideAmount - source.amount) > TOTAL_TOLERANCE);
+	const activeOverride = allowSourceClientTotalOverride
+		? requestedOverrideDiffersFromSource
+			? {
+					amount: requestedOverrideAmount,
+					source: "reviewed nightly client pricing",
+			  }
+			: { amount: 0, source: "" }
+		: persistedOverride;
+	const effectiveTotal = activeOverride.amount > 0 ? activeOverride : source;
+	if (!(effectiveTotal.amount > 0)) {
 		return {
 			ready: false,
 			code: "ota_source_client_total_required",
 			message:
-				"The original OTA guest total is missing. Confirm the source total before saving or releasing pricing.",
+				"The original OTA guest total is missing. Enter and save a reviewed platform client total before releasing pricing.",
 			sourceClientTotal: 0,
+			effectiveClientTotal: 0,
 			dailyClientTotal: 0,
 		};
 	}
@@ -274,6 +311,7 @@ const validateOtaSourceClientPricing = (reservation = {}, rooms = []) => {
 			message:
 				"Every OTA pricing day must have a positive client price before pricing can be saved or released.",
 			sourceClientTotal: source.amount,
+			effectiveClientTotal: effectiveTotal.amount,
 			dailyClientTotal: daily.dailyClientTotal,
 			missingClientRows: daily.missingClientRows,
 		};
@@ -284,17 +322,24 @@ const validateOtaSourceClientPricing = (reservation = {}, rooms = []) => {
 		["reservation client total", positiveMoney(reservation.total_amount)],
 	].filter(([, value]) => value !== null);
 	const mismatch = reviewedTotals.find(
-		([, value]) => Math.abs(value - source.amount) > TOTAL_TOLERANCE,
+		([, value]) => Math.abs(value - effectiveTotal.amount) > TOTAL_TOLERANCE,
 	);
 	if (mismatch) {
 		return {
 			ready: false,
 			code: "ota_source_client_total_mismatch",
-			message: `The ${mismatch[0]} must match the original OTA guest total of SAR ${source.amount.toFixed(
+			message: `The ${mismatch[0]} must match the ${
+				activeOverride.amount > 0
+					? "saved platform-reviewed client total"
+					: "original OTA guest total"
+			} of SAR ${effectiveTotal.amount.toFixed(
 				2,
-			)}. OTA payout/net amounts must not replace the guest total.`,
+			)}.`,
 			sourceClientTotal: source.amount,
 			sourceClientTotalSource: source.source,
+			effectiveClientTotal: effectiveTotal.amount,
+			effectiveClientTotalSource: effectiveTotal.source,
+			clientTotalOverridden: activeOverride.amount > 0,
 			dailyClientTotal: daily.dailyClientTotal,
 			storedClientTotal: positiveMoney(reservation?.adminPricing?.clientTotal) || 0,
 			reservationClientTotal: positiveMoney(reservation.total_amount) || 0,
@@ -304,6 +349,9 @@ const validateOtaSourceClientPricing = (reservation = {}, rooms = []) => {
 		ready: true,
 		sourceClientTotal: source.amount,
 		sourceClientTotalSource: source.source,
+		effectiveClientTotal: effectiveTotal.amount,
+		effectiveClientTotalSource: effectiveTotal.source,
+		clientTotalOverridden: activeOverride.amount > 0,
 		dailyClientTotal: daily.dailyClientTotal,
 	};
 };
@@ -575,6 +623,8 @@ const validateOtaReleaseHotelBasePrice = (reservation = {}, { hotel = null } = {
 		hotelBaseTotal,
 		dailyBaseTotal,
 		sourceClientTotal: clientValidation.sourceClientTotal,
+		effectiveClientTotal: clientValidation.effectiveClientTotal,
+		clientTotalOverridden: clientValidation.clientTotalOverridden === true,
 		dailyClientTotal: clientValidation.dailyClientTotal,
 		canonicalRooms: roomValidation.canonicalRooms,
 		missingBaseRows: 0,
@@ -589,6 +639,7 @@ module.exports = {
 	isOtaSyncReservation,
 	normalizeId,
 	otaReleaseBlockingStatus,
+	resolvePersistedOtaClientTotalOverride,
 	resolveOtaSourceClientTotal,
 	summarizeOtaReviewedClientPricing,
 	validateOtaStayDateCoverage,

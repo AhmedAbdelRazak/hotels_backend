@@ -6,9 +6,37 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const {
+	canManageOtaReservations,
 	platformOtaScopeFilter,
 	strictPlatformOtaHotelScopeFilter,
 } = require("./otaReservationVisibility");
+
+test("only active platform OTA staff receive pricing-management authority", () => {
+	assert.equal(
+		canManageOtaReservations({
+			activeUser: true,
+			role: 1000,
+			accessTo: ["OTAReservations"],
+		}),
+		true,
+	);
+	assert.equal(
+		canManageOtaReservations({
+			activeUser: true,
+			role: 1000,
+			accessTo: ["AllReservations"],
+		}),
+		false,
+	);
+	assert.equal(
+		canManageOtaReservations({
+			activeUser: false,
+			role: 1000,
+			accessTo: ["OTAReservations"],
+		}),
+		false,
+	);
+});
 
 test("role 1000 is scoped whether it is primary or granted through roles", () => {
 	const hotelId = new mongoose.Types.ObjectId();
@@ -40,4 +68,3 @@ test("inbound-email PII scope includes assigned hotels only", () => {
 	assert.deepEqual(scope, { hotelId: { $in: [hotelId] } });
 	assert.equal(JSON.stringify(scope).includes("$exists"), false);
 });
-
