@@ -108,7 +108,7 @@ test("AI room decisions must use an allowlisted PMS ID and pass confidence, ambi
 	);
 	assert.equal(
 		normalizeAiRoomDecision(
-			aiDecision({ selectedRoomId: "room-six", confidence: 0.69 }),
+			aiDecision({ selectedRoomId: "room-six", confidence: 0.59 }),
 			candidates,
 			{ sourceCapacity: 6, candidateCapacities: capacities }
 		).matched,

@@ -8,7 +8,7 @@ const {
 	buildChatCompletionBody,
 } = require("./openaiModelConfig");
 
-const DEFAULT_AI_ROOM_MATCH_CONFIDENCE = 0.7;
+const DEFAULT_AI_ROOM_MATCH_CONFIDENCE = 0.6;
 const DEFAULT_AI_ROOM_MATCH_MARGIN = 0.08;
 const AI_ROOM_MATCH_BASES = new Set([
 	"explicit_capacity",
