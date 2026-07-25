@@ -5,7 +5,9 @@ const test = require("node:test");
 
 const {
 	attachAdminReservationRoomDetails,
+	buildExactRoomNumberPattern,
 	collectReservationRoomIds,
+	parseAdminReservationRoomSearch,
 } = require("../services/adminReservationRoomDetails");
 
 const HOTEL_A = "64a000000000000000000001";
@@ -14,6 +16,22 @@ const ROOM_101 = "65a000000000000000000101";
 const ROOM_305 = "65a000000000000000000305";
 const ROOM_ORPHAN = "65a000000000000000000999";
 const ROOM_OTHER_HOTEL = "65b000000000000000000401";
+
+test("parses the dedicated admin room-number search without affecting ordinary searches", () => {
+	assert.equal(parseAdminReservationRoomSearch("r501"), "501");
+	assert.equal(parseAdminReservationRoomSearch("R501"), "501");
+	assert.equal(parseAdminReservationRoomSearch(" r #501 "), "501");
+	assert.equal(parseAdminReservationRoomSearch("501"), null);
+	assert.equal(parseAdminReservationRoomSearch("reservation 501"), null);
+	assert.equal(parseAdminReservationRoomSearch("r501a"), null);
+});
+
+test("builds an exact case-insensitive room-number matcher", () => {
+	const pattern = buildExactRoomNumberPattern("501");
+	assert.equal(pattern.test("501"), true);
+	assert.equal(pattern.test("0501"), false);
+	assert.equal(pattern.test("5010"), false);
+});
 
 test("does not query rooms when the page has no physical assignments", async () => {
 	let calls = 0;
@@ -184,5 +202,39 @@ test("admin paid and profit reports use the guarded room enrichment service", ()
 	assert.match(
 		adminReportsSource,
 		/exports\.exportToExcel[\s\S]*const distinctTypes = reservationRoomTypes\(r\);[\s\S]*roomTypeString = distinctTypes\.join/,
+	);
+});
+
+test("admin all-reservations applies room search before pagination and scorecards", () => {
+	const controllerSource = fs.readFileSync(
+		path.join(__dirname, "..", "controllers", "janat.js"),
+		"utf8",
+	);
+	const handlerStart = controllerSource.indexOf(
+		"exports.paginatedReservationList",
+	);
+	const handlerEnd = controllerSource.indexOf("\nexports.", handlerStart + 1);
+	const handlerSource = controllerSource.slice(handlerStart, handlerEnd);
+
+	assert.match(
+		handlerSource,
+		/const roomNumberSearch = parseAdminReservationRoomSearch\(searchQuery\)/,
+	);
+	assert.match(
+		handlerSource,
+		/room_number:\s*\{[\s\S]*buildExactRoomNumberPattern\(roomNumberSearch\)/,
+	);
+	assert.match(
+		handlerSource,
+		/andFilters\.push\(\{[\s\S]*roomId:\s*\{\s*\$in:/,
+	);
+	assert.ok(
+		handlerSource.indexOf("roomId: { $in:") <
+			handlerSource.indexOf("const allDocs = await Reservations.find"),
+		"room filtering must happen before reservation loading",
+	);
+	assert.match(
+		handlerSource,
+		/if \(searchQ && roomNumberSearch === null\)/,
 	);
 });

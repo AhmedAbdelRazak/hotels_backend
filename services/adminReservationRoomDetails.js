@@ -20,6 +20,16 @@ const normalizeObjectId = (value) => {
 const normalizeText = (value) =>
 	value === null || value === undefined ? "" : String(value).trim();
 
+const parseAdminReservationRoomSearch = (value) => {
+	const match = normalizeText(value).match(/^r\s*#?\s*(\d+)$/i);
+	return match ? match[1] : null;
+};
+
+const buildExactRoomNumberPattern = (roomNumber) => {
+	const escaped = normalizeText(roomNumber).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^${escaped}$`, "i");
+};
+
 const reservationRoomIds = (reservation = {}) => {
 	const seen = new Set();
 	return asArray(reservation.roomId).reduce((ids, roomRef) => {
@@ -119,8 +129,10 @@ const attachAdminReservationRoomDetails = async (
 
 module.exports = {
 	attachAdminReservationRoomDetails,
+	buildExactRoomNumberPattern,
 	collectReservationRoomIds,
 	minimalRoomDetails,
 	normalizeObjectId,
+	parseAdminReservationRoomSearch,
 	reservationRoomIds,
 };
