@@ -28,6 +28,7 @@ const {
 	reservationsOccupancyCurrent,
 	reservationsOccupancySummary,
 	updateReservation,
+	updateHotelManagementReservation,
 	agodaDataDump,
 	expediaDataDump,
 	bookingDataDump,
@@ -265,6 +266,11 @@ router.post(
 
 router.get("/reservations2/:accountId", optionalSignin, reservationsList2);
 router.put("/reservation-update/:reservationId", requireSignin, updateReservation);
+router.put(
+	"/hotel-management/reservations/:reservationId",
+	requireSignin,
+	updateHotelManagementReservation,
+);
 router.post("/send-reservation-email", sendReservationEmail);
 router.post("/send-payment-link-email", sendPaymentLinkEmail);
 router.get(

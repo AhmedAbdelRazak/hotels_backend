@@ -79,6 +79,10 @@ const {
 const {
 	canPlatformStaffOverrideReservationInventory,
 } = require("../services/reservationInventoryOverridePolicy");
+const {
+	canEditHotelReservation,
+	sanitizeHotelReservationUpdate,
+} = require("../services/hotelReservationUpdatePolicy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1628,14 +1632,19 @@ const findRoomDetailForCalendar = (details = [], selection = {}) => {
 // Agent/order-taker reservations must respect hotel calendar blocks.
 // The public booking site treats a nightly pricing row with price <= 0 as unavailable;
 // this validator mirrors that rule on the PMS API so agents cannot bypass it.
-const validateOrderTakerBlockedCalendar = async (reservationData = {}) => {
+const validateOrderTakerBlockedCalendar = async (
+	reservationData = {},
+	{ stayDates: stayDatesOverride = null } = {},
+) => {
 	const hotelId = normalizeId(reservationData.hotelId);
 	if (!ObjectId.isValid(hotelId)) return { allowed: true };
 
-	const stayDates = buildStayDateKeys(
-		reservationData.checkin_date,
-		reservationData.checkout_date
-	);
+	const stayDates = Array.isArray(stayDatesOverride)
+		? [...new Set(stayDatesOverride.map(dateOnlyKey).filter(Boolean))]
+		: buildStayDateKeys(
+				reservationData.checkin_date,
+				reservationData.checkout_date,
+		  );
 	if (stayDates.length === 0) return { allowed: true };
 
 	const selections = await getReservationRoomSelections(reservationData);
@@ -2688,6 +2697,107 @@ const isPlatformAdminReservationActor = (actor = {}) => {
 			].includes(description),
 		)
 	);
+};
+
+const normalizePhysicalRoomIds = (value) =>
+	(Array.isArray(value) ? value : value ? [value] : [])
+		.map((room) => normalizeId(room?._id || room))
+		.filter((roomId) => ObjectId.isValid(roomId))
+		.filter((roomId, index, roomIds) => roomIds.indexOf(roomId) === index);
+
+const validatePhysicalRoomAssignmentsForUpdate = async (
+	reservationData = {},
+	{
+		excludeReservationId = "",
+		stayDates = [],
+		validateRoomScope = false,
+	} = {},
+) => {
+	const hotelId = normalizeId(reservationData.hotelId);
+	const roomIds = normalizePhysicalRoomIds(reservationData.roomId);
+	const dates = Array.isArray(stayDates)
+		? [...new Set(stayDates.map(dateOnlyKey).filter(Boolean))].sort()
+		: [];
+	if (!ObjectId.isValid(hotelId) || !roomIds.length || !dates.length) {
+		return { allowed: true, roomIds, conflicts: [] };
+	}
+
+	if (validateRoomScope) {
+		const matchingRooms = await Rooms.find({
+			_id: { $in: roomIds.map((roomId) => ObjectId(roomId)) },
+			hotelId: ObjectId(hotelId),
+			active: { $ne: false },
+			activeRoom: { $ne: false },
+		})
+			.select("_id")
+			.lean()
+			.exec();
+		const matchingRoomIds = new Set(
+			matchingRooms.map((room) => normalizeId(room._id)),
+		);
+		const invalidRoomIds = roomIds.filter(
+			(roomId) => !matchingRoomIds.has(roomId),
+		);
+		if (invalidRoomIds.length) {
+			return {
+				allowed: false,
+				code: "hotel_reservation_physical_room_invalid",
+				roomIds,
+				invalidRoomIds,
+				conflicts: [],
+			};
+		}
+	}
+
+	const rangeStart = moment.utc(dates[0], "YYYY-MM-DD", true).startOf("day");
+	const rangeEndExclusive = moment
+		.utc(dates[dates.length - 1], "YYYY-MM-DD", true)
+		.add(1, "day")
+		.startOf("day");
+	if (!rangeStart.isValid() || !rangeEndExclusive.isValid()) {
+		return { allowed: true, roomIds, conflicts: [] };
+	}
+
+	const query = {
+		hotelId: ObjectId(hotelId),
+		roomId: { $in: roomIds.map((roomId) => ObjectId(roomId)) },
+		checkin_date: { $lt: rangeEndExclusive.toDate() },
+		checkout_date: { $gt: rangeStart.toDate() },
+	};
+	const excludedId = normalizeId(excludeReservationId);
+	if (ObjectId.isValid(excludedId)) query._id = { $ne: ObjectId(excludedId) };
+
+	const overlappingReservations = await Reservations.find(query)
+		.select(`${RESERVATION_INVENTORY_RESERVATION_SELECT} roomId confirmation_number`)
+		.lean()
+		.exec();
+	const selectedRoomIdSet = new Set(roomIds);
+	const conflicts = overlappingReservations
+		.filter(
+			(reservation) =>
+				reservationBlocksInventory(reservation) &&
+				dates.some((date) => reservationCoversStayDate(reservation, date)),
+		)
+		.map((reservation) => {
+			const conflictingRoomIds = normalizePhysicalRoomIds(reservation.roomId).filter(
+				(roomId) => selectedRoomIdSet.has(roomId),
+			);
+			return {
+				reservationId: normalizeId(reservation._id),
+				confirmation_number: reservation.confirmation_number || "",
+				roomIds: conflictingRoomIds,
+			};
+		})
+		.filter((conflict) => conflict.roomIds.length > 0);
+
+	return {
+		allowed: conflicts.length === 0,
+		code: conflicts.length
+			? "hotel_reservation_physical_room_conflict"
+			: "hotel_reservation_physical_room_available",
+		roomIds,
+		conflicts,
+	};
 };
 
 const isRestrictedOrderTakerReservationActor = (actor = {}) =>
@@ -6869,6 +6979,66 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 	}
 };
 
+exports.updateHotelManagementReservation = async (req, res) => {
+	try {
+		const reservationId = String(req.params?.reservationId || "").trim();
+		const actorId = normalizeId(req.auth?._id || "");
+		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
+		if (!mongoose.Types.ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Authentication required" });
+		}
+
+		const [reservation, actor] = await Promise.all([
+			Reservations.findById(reservationId).select("_id hotelId").lean().exec(),
+			User.findById(actorId)
+				.select(
+					"_id name email activeUser role roles roleDescription roleDescriptions hotelIdWork hotelIdsWork hotelIdsOwner hotelsToSupport belongsToId accountScope platformEmployee accessTo",
+				)
+				.lean()
+				.exec(),
+		]);
+		if (!reservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+		if (!actor) {
+			return res.status(401).json({ error: "Authentication required" });
+		}
+		const hotelId = normalizeId(reservation.hotelId);
+		const hotel = mongoose.Types.ObjectId.isValid(hotelId)
+			? await HotelDetails.findById(hotelId)
+					.select("_id belongsTo")
+					.lean()
+					.exec()
+			: null;
+		if (!hotel || !canEditHotelReservation(actor, hotel)) {
+			return res.status(403).json({
+				error:
+					"You are not authorized to edit reservations for this hotel.",
+				errorArabic:
+					"ليس لديك صلاحية تعديل حجوزات هذا الفندق.",
+				code: "hotel_reservation_update_forbidden",
+			});
+		}
+
+		const sanitizedUpdate = sanitizeHotelReservationUpdate(req.body || {});
+		if (!Object.keys(sanitizedUpdate).length) {
+			return res.status(400).json({
+				error: "No supported reservation changes were provided.",
+				code: "hotel_reservation_update_empty",
+			});
+		}
+
+		req.body = sanitizedUpdate;
+		req.hotelManagementReservationUpdate = true;
+		return exports.updateReservation(req, res);
+	} catch (error) {
+		console.error("Error authorizing hotel reservation update:", error);
+		return res.status(500).json({ error: "Failed to authorize reservation update" });
+	}
+};
+
 exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
@@ -7515,6 +7685,149 @@ exports.updateReservation = async (req, res) => {
 				hasExplicitAdminPricingIntent,
 			}
 		);
+		if (
+			req.hotelManagementReservationUpdate === true &&
+			!configuredSuperAdminUpdateActor
+		) {
+			const existingPlain =
+				typeof existingReservation.toObject === "function"
+					? existingReservation.toObject()
+					: existingReservation;
+			const mergedReservationForAvailability = {
+				...existingPlain,
+				...normalizedUpdateData,
+			};
+			if (protectedCustomerDetails) {
+				mergedReservationForAvailability.customer_details = {
+					...(existingPlain.customer_details || {}),
+					...protectedCustomerDetails,
+				};
+			}
+			const availabilitySensitiveChanged = [
+				"checkin_date",
+				"checkout_date",
+				"pickedRoomsType",
+				"pickedRoomsPricing",
+				"total_rooms",
+				"roomId",
+			].some(
+				(field) =>
+					Object.prototype.hasOwnProperty.call(
+						normalizedUpdateData,
+						field,
+					) &&
+					auditStringify(normalizedUpdateData[field]) !==
+						auditStringify(existingPlain[field]),
+			);
+
+			if (availabilitySensitiveChanged) {
+				const [existingSelections, nextSelections] = await Promise.all([
+					getReservationRoomSelections(existingPlain),
+					getReservationRoomSelections(mergedReservationForAvailability),
+				]);
+				const selectionSignature = (selections = []) =>
+					selections
+						.map((selection) =>
+							[
+								normalizeCalendarText(selection.room_type),
+								normalizeCalendarText(selection.displayName),
+								Math.max(1, Number(selection.count || 1)),
+							].join("|"),
+						)
+						.sort();
+				const roomSelectionChanged =
+					auditStringify(selectionSignature(existingSelections)) !==
+					auditStringify(selectionSignature(nextSelections));
+				const existingPhysicalRoomIds = normalizePhysicalRoomIds(
+					existingPlain.roomId,
+				).sort();
+				const nextPhysicalRoomIds = normalizePhysicalRoomIds(
+					mergedReservationForAvailability.roomId,
+				).sort();
+				const physicalRoomSelectionChanged =
+					auditStringify(existingPhysicalRoomIds) !==
+					auditStringify(nextPhysicalRoomIds);
+				const existingStayDateSet = new Set(
+					buildStayDateKeys(
+						existingPlain.checkin_date,
+						existingPlain.checkout_date,
+					),
+				);
+				const nextStayDates = buildStayDateKeys(
+					mergedReservationForAvailability.checkin_date,
+					mergedReservationForAvailability.checkout_date,
+				);
+				const calendarDatesToValidate = roomSelectionChanged
+					? nextStayDates
+					: nextStayDates.filter((date) => !existingStayDateSet.has(date));
+				if (calendarDatesToValidate.length > 0) {
+					const calendarValidation = await validateOrderTakerBlockedCalendar(
+						mergedReservationForAvailability,
+						{ stayDates: calendarDatesToValidate },
+					);
+					if (!calendarValidation.allowed) {
+						return res.status(409).json({
+							error:
+								"A selected room type is blocked on the hotel calendar for one or more newly selected stay dates.",
+							errorArabic:
+								"أحد أنواع الغرف المختارة محجوب في تقويم الفندق خلال تاريخ أو أكثر من التواريخ الجديدة.",
+							code: "hotel_reservation_calendar_blocked",
+							blockedCalendar: calendarValidation,
+						});
+					}
+				}
+
+				const inventoryValidation =
+					await validateReservationInventoryForCreate(
+						mergedReservationForAvailability,
+						{
+							allowOverbook: false,
+							excludeReservationId: reservationId,
+						},
+					);
+				if (!inventoryValidation.allowed) {
+					return res.status(409).json({
+						error:
+							inventoryValidation.message ||
+							"There is not enough room inventory for the selected dates.",
+						errorArabic:
+							"لا يوجد مخزون كافٍ من الغرف خلال التواريخ المحددة.",
+						code: "hotel_reservation_inventory_unavailable",
+						inventory: inventoryValidation,
+					});
+				}
+
+				const physicalRoomDatesToValidate = physicalRoomSelectionChanged
+					? nextStayDates
+					: calendarDatesToValidate;
+				if (nextPhysicalRoomIds.length && physicalRoomDatesToValidate.length) {
+					const physicalRoomValidation =
+						await validatePhysicalRoomAssignmentsForUpdate(
+							mergedReservationForAvailability,
+							{
+								excludeReservationId: reservationId,
+								stayDates: physicalRoomDatesToValidate,
+								validateRoomScope: physicalRoomSelectionChanged,
+							},
+						);
+					if (!physicalRoomValidation.allowed) {
+						const invalidRoomScope =
+							physicalRoomValidation.code ===
+							"hotel_reservation_physical_room_invalid";
+						return res.status(invalidRoomScope ? 400 : 409).json({
+							error: invalidRoomScope
+								? "A selected physical room is inactive or does not belong to this hotel."
+								: "A selected physical room is already assigned to another reservation on one or more newly selected stay dates.",
+							errorArabic: invalidRoomScope
+								? "إحدى الغرف الفعلية المختارة غير نشطة أو لا تتبع هذا الفندق."
+								: "إحدى الغرف الفعلية المختارة مخصصة بالفعل لحجز آخر في تاريخ أو أكثر من التواريخ الجديدة.",
+							code: physicalRoomValidation.code,
+							physicalRooms: physicalRoomValidation,
+						});
+					}
+				}
+			}
+		}
 		if (hasExplicitSuperAdminCommission) {
 			const existingCommissionData =
 				existingReservation.commissionData &&
