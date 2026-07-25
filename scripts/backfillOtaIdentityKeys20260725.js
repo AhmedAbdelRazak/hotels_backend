@@ -306,57 +306,56 @@ async function main() {
 	});
 	console.log(`Before snapshot: ${beforeSnapshot}`);
 
-	const session = await mongoose.startSession();
-	try {
-		await session.withTransaction(async () => {
-			for (const candidate of candidates) {
-				const identityFilter = candidate.previousIdentityKey
-					? { otaIdentityKey: candidate.previousIdentityKey }
-					: {
-							$or: [
-								{ otaIdentityKey: { $exists: false } },
-								{ otaIdentityKey: null },
-								{ otaIdentityKey: "" },
-							],
-						  };
-				const result = await Reservations.updateOne(
-					{
-						_id: candidate.reservation._id,
-						__v: Number(candidate.reservation.__v || 0),
-						...identityFilter,
-					},
-					{
-						$set: { otaIdentityKey: candidate.otaIdentityKey },
-						$inc: { __v: 1 },
-						$push: {
-							reservationAuditLog: {
-								at: new Date(),
-								source: "ota-identity-backfill",
-								action: "canonical-ota-identity-added",
-								by: SYSTEM_ACTOR,
-								from: { otaIdentityKey: candidate.previousIdentityKey },
-								to: { otaIdentityKey: candidate.otaIdentityKey },
-								evidenceAuditIds: candidate.auditIds,
-							},
+	const operations = candidates.map((candidate) => {
+		const identityFilter = candidate.previousIdentityKey
+			? { otaIdentityKey: candidate.previousIdentityKey }
+			: {
+					$or: [
+						{ otaIdentityKey: { $exists: false } },
+						{ otaIdentityKey: null },
+						{ otaIdentityKey: "" },
+					],
+			  };
+		return {
+			updateOne: {
+				filter: {
+					_id: candidate.reservation._id,
+					__v: Number(candidate.reservation.__v || 0),
+					...identityFilter,
+				},
+				update: {
+					$set: { otaIdentityKey: candidate.otaIdentityKey },
+					$inc: { __v: 1 },
+					$push: {
+						reservationAuditLog: {
+							at: new Date(),
+							source: "ota-identity-backfill",
+							action: "canonical-ota-identity-added",
+							by: SYSTEM_ACTOR,
+							from: { otaIdentityKey: candidate.previousIdentityKey },
+							to: { otaIdentityKey: candidate.otaIdentityKey },
+							evidenceAuditIds: candidate.auditIds,
 						},
 					},
-					{ session }
-				);
-				assert.equal(
-					result.matchedCount,
-					1,
-					`concurrent change: ${candidate.reservationId}`
-				);
-				assert.equal(
-					result.modifiedCount,
-					1,
-					`identity was not written: ${candidate.reservationId}`
-				);
-			}
-		});
-	} finally {
-		await session.endSession();
-	}
+				},
+			},
+		};
+	});
+	// Production MongoDB is standalone, so multi-document transactions are not
+	// available. One ordered bulk command plus exact old-value/version filters and
+	// the unique index keeps every individual identity update guarded and idempotent.
+	const bulkResult = await Reservations.bulkWrite(operations, { ordered: true });
+	const matchedCount = Number(
+		bulkResult.matchedCount ?? bulkResult.nMatched ?? bulkResult.result?.nMatched ?? 0
+	);
+	const modifiedCount = Number(
+		bulkResult.modifiedCount ??
+			bulkResult.nModified ??
+			bulkResult.result?.nModified ??
+			0
+	);
+	assert.equal(matchedCount, candidates.length, "not every guarded identity matched");
+	assert.equal(modifiedCount, candidates.length, "not every identity was updated");
 
 	const afterReservations = await Reservations.find({
 		_id: { $in: candidates.map((candidate) => candidate.reservation._id) },
