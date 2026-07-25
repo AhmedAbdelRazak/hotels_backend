@@ -612,6 +612,21 @@ test("repeated HotelRunner room blocks require manual review", () => {
 	assert.equal(verifiedMirroredText.sourcePresence.confirmationNumber, true);
 	assert.equal(verifiedMirroredText.requiresManualReview, false);
 	assert.equal(verifiedMirroredText.paymentCollectionModel, "hotel_collect");
+
+	const verifiedRiyalMirroredText = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - New Reservation #R013869207",
+		text: [
+			"AGODA (PRIVATE SALE + INTERNATIONAL RATE)",
+			"Confirmation Number 675894003 Guest Name Test Guest Country Iraq Order Total ﷼ 252.48 Booked Date Sunday, July 05, 2026 17:40",
+			roomBlock.replace("Total SAR 100", "Total ﷼ 252.48"),
+			roomBlock.replace("Total SAR 100", "Total ﷼ 252.48"),
+			"Go to reservation",
+		].join("\n"),
+	});
+	assert.equal(verifiedRiyalMirroredText.totalAmountSar, 252.48);
+	assert.equal(verifiedRiyalMirroredText.sourcePresence.amount, true);
+	assert.equal(verifiedRiyalMirroredText.requiresManualReview, false);
 });
 
 test("ambiguous broad room categories and occupancy-only guesses fail closed", () => {

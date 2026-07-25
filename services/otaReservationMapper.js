@@ -3153,7 +3153,7 @@ function extractHotelRunnerRoomBlocks(text = "") {
 	if (blocks.length > 1 && uniqueBlocks.length === 1) {
 		const orderTotal = parseMoney(
 			findFirstPattern(text, [
-				/\bOrder\s+Total\s*[:#-]?\s*((?:[A-Z]{3}|US\$|\$|ï·¼)?\s*[0-9][0-9,.]*)/i,
+				/\bOrder\s+Total\s*[:#-]?\s*((?:[A-Z]{3}|US\$|\$|\uFDFC)?\s*[0-9][0-9,.]*)/i,
 			])
 		).amount;
 		const repeatedBlockTotal = Number(uniqueBlocks[0].split("|").at(-1) || 0);
