@@ -16,9 +16,13 @@ const {
 
 const DETAILS = process.argv.includes("--details");
 const sinceArgument = process.argv.find((argument) => argument.startsWith("--since="));
+const skipArgument = process.argv.find((argument) => argument.startsWith("--skip="));
+const limitArgument = process.argv.find((argument) => argument.startsWith("--limit="));
 const since = sinceArgument
 	? new Date(sinceArgument.slice("--since=".length))
 	: new Date("2026-07-01T00:00:00.000Z");
+const skip = Math.max(0, Number(skipArgument?.slice("--skip=".length) || 0));
+const limit = Math.max(0, Number(limitArgument?.slice("--limit=".length) || 0));
 
 if (Number.isNaN(since.getTime())) {
 	throw new Error("--since must be a valid ISO date.");
@@ -97,12 +101,14 @@ async function main() {
 	if (!database) throw new Error("Missing DATABASE/MONGO connection string.");
 	await mongoose.connect(database, { autoIndex: false });
 
-	const audits = await InboundEmail.find({
+	let auditQuery = InboundEmail.find({
 		from: /hotelrunner\.com/i,
 		receivedAt: { $gte: since },
 	})
 		.sort({ receivedAt: 1, _id: 1 })
-		.lean();
+		.skip(skip);
+	if (limit) auditQuery = auditQuery.limit(limit);
+	const audits = await auditQuery.lean();
 
 	const parsed = audits.map((audit) => {
 		const normalized = extractNormalizedReservation(emailFromAudit(audit));
@@ -198,6 +204,8 @@ async function main() {
 	const report = {
 		readOnly: true,
 		since: since.toISOString(),
+		skip,
+		limit: limit || null,
 		hotelRunnerAudits: audits.length,
 		newReservationAuditCopies: newReservationEntries.length,
 		uniqueNewReservationIdentities: grouped.size,
