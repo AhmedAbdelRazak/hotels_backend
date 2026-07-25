@@ -200,10 +200,23 @@ async function buildPlans() {
 			previousReservationMongoId: audit.reservationMongoId || null,
 		});
 	}
+	const plannedAuditIds = new Set(plans.map((plan) => id(plan.audit._id)));
+	const unresolvedStaleAudits = staleAudits
+		.filter((audit) => !plannedAuditIds.has(id(audit._id)))
+		.map((audit) => ({
+			auditId: id(audit._id),
+			provider: audit.provider,
+			confirmationNumber: audit.confirmationNumber,
+			processingStatus: audit.processingStatus,
+			previousReservationId: id(audit.reservationMongoId),
+			subject: audit.subject,
+			reason: "no exact existing reservation matched the stored provider and confirmation",
+		}));
 	return {
 		plans,
 		identityPlans: [...identityPlansByReservation.values()],
 		staleAuditCount: staleAudits.length,
+		unresolvedStaleAudits,
 	};
 }
 
@@ -294,13 +307,15 @@ async function main() {
 	if (!database) throw new Error("Missing DATABASE/MONGO connection string.");
 	await mongoose.connect(database, { autoIndex: false });
 
-	const { plans, identityPlans, staleAuditCount } = await buildPlans();
+	const { plans, identityPlans, staleAuditCount, unresolvedStaleAudits } =
+		await buildPlans();
 	console.log(
 		JSON.stringify(
 			{
 				mode: APPLY ? "apply" : "dry-run",
 				exactSourceBackedLinks: plans.length,
 				staleAuditLinks: staleAuditCount,
+				unresolvedStaleAudits,
 				canonicalIdentitiesToAdd: identityPlans.length,
 				identityPlans: identityPlans.map((plan) => ({
 					reservationId: id(plan.reservation._id),
