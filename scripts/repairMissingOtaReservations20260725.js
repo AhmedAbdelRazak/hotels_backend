@@ -140,6 +140,26 @@ const REPAIRS = [
 		overrideWarning:
 			"The guarded semantic matcher selected the closest active family-room PMS inventory during the verified incident repair.",
 	},
+	{
+		provider: "expedia",
+		confirmationNumber: "2518431193",
+		primaryAuditId: "6a64d6e1c8620b708c39994e",
+		guestName: /MUHAMMAD ASIF MANZOOR/i,
+		checkinDate: "2026-08-06",
+		checkoutDate: "2026-08-18",
+		totalAmountSar: 807.75,
+		totalPayoutSar: 0,
+		sourceAmount: 215.4,
+		sourceCurrency: "USD",
+		paymentCollectionModel: "virtual_card",
+		roomCount: 1,
+		totalGuests: 6,
+		adults: 2,
+		children: 4,
+		roomName: /6\s*أفراد|six|6 persons/i,
+		expectedRoomId: "6a4a84216022cd7f31729011",
+		minimumRelatedAudits: 1,
+	},
 ];
 
 const SYSTEM_ACTOR = {
@@ -205,8 +225,35 @@ function assertSourceBacked(normalized, repair) {
 	assert.equal(normalized.checkoutDate, repair.checkoutDate, "check-out mismatch");
 	assert.equal(Number(normalized.roomCount), repair.roomCount, "room-count mismatch");
 	assert.equal(Number(normalized.totalGuests), repair.totalGuests, "guest-count mismatch");
+	if (repair.adults !== undefined) {
+		assert.equal(Number(normalized.adults), repair.adults, "adult-count mismatch");
+	}
+	if (repair.children !== undefined) {
+		assert.equal(Number(normalized.children), repair.children, "child-count mismatch");
+	}
 	assert.match(normalized.roomName || "", repair.roomName, "room-name mismatch");
 	assertMoney(normalized.totalAmountSar, repair.totalAmountSar, "guest-total mismatch");
+	if (repair.sourceAmount !== undefined) {
+		assertMoney(
+			normalized.sourceAmount || normalized.amount,
+			repair.sourceAmount,
+			"source guest-total mismatch"
+		);
+	}
+	if (repair.sourceCurrency) {
+		assert.equal(
+			String(normalized.sourceCurrency || normalized.currency).toUpperCase(),
+			repair.sourceCurrency,
+			"source currency mismatch"
+		);
+	}
+	if (repair.paymentCollectionModel) {
+		assert.equal(
+			normalized.paymentCollectionModel,
+			repair.paymentCollectionModel,
+			"payment-collection model mismatch"
+		);
+	}
 	assertMoney(
 		normalized.totalPayoutSar || normalized.netAfterExpensesTotal,
 		repair.totalPayoutSar,
@@ -288,7 +335,55 @@ function assertReservationIntegrity(reservation, repair) {
 	assert.equal(ymd(reservation.checkout_date), repair.checkoutDate, "check-out mismatch");
 	assert.equal(Number(reservation.total_rooms), repair.roomCount, "room-count mismatch");
 	assert.equal(Number(reservation.total_guests), repair.totalGuests, "guest-count mismatch");
+	if (repair.adults !== undefined) {
+		assert.equal(Number(reservation.adults), repair.adults, "saved adult-count mismatch");
+	}
+	if (repair.children !== undefined) {
+		assert.equal(Number(reservation.children), repair.children, "saved child-count mismatch");
+	}
 	assertMoney(reservation.total_amount, repair.totalAmountSar, "guest-total mismatch");
+	assert.equal(
+		String(reservation.currency || "").toUpperCase(),
+		"SAR",
+		"canonical reservation currency must be SAR"
+	);
+	if (reservation.ota_financial_summary?.currency) {
+		assert.equal(
+			String(reservation.ota_financial_summary.currency).toUpperCase(),
+			"SAR",
+			"OTA financial summary currency must be SAR"
+		);
+	}
+	if (repair.sourceAmount !== undefined) {
+		assertMoney(
+			reservation.supplierData?.otaSourceAmount,
+			repair.sourceAmount,
+			"saved source guest-total mismatch"
+		);
+		assertMoney(
+			reservation.supplierData?.otaAmountSar,
+			repair.totalAmountSar,
+			"saved SAR guest-total mismatch"
+		);
+	}
+	if (repair.sourceCurrency) {
+		assert.equal(
+			String(reservation.supplierData?.otaSourceCurrency || "").toUpperCase(),
+			repair.sourceCurrency,
+			"saved source currency mismatch"
+		);
+		assert.ok(
+			Number(reservation.supplierData?.otaSourceExchangeRateToSar || 0) > 0,
+			"saved SAR exchange rate is missing"
+		);
+	}
+	if (repair.paymentCollectionModel) {
+		assert.equal(
+			reservation.supplierData?.otaPaymentCollectionModel,
+			repair.paymentCollectionModel,
+			"saved payment-collection model mismatch"
+		);
+	}
 	assert.equal(
 		(reservation.pickedRoomsType || []).length,
 		repair.roomCount,
