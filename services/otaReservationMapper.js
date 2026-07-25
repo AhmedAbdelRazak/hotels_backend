@@ -2622,15 +2622,14 @@ function extractTableOccupancy(text = "") {
 function extractExpediaPartnerCentralFields(text = "", provider = "") {
 	if (provider !== "expedia") return {};
 	const source = String(text || "");
-	const confirmationNumber = firstNonEmpty(
-		findFirstPattern(source, [
-			/\bReservation\s*#\s*(\d{8,18})\b/i,
-			/\bReservation\s+(?:ID|No\.?|Number)\s*[:#-]?\s*(\d{8,18})\b/i,
-		]),
-		findFirstPattern(source, [
-			/(?:^|\n)\s*Booking\s+[^\n]{0,120}?\b(\d{8,18})\b/i,
-		])
+	const reservationMatch = source.match(
+		/\bReservation\s*#\s*(\d{8,18})\b/i
 	);
+	// HotelRunner may label its channel as Expedia and may contain very large
+	// mirrored HTML. Only run this template-specific parser when both Expedia
+	// Partner Central signatures are present.
+	if (!reservationMatch || !/\bItinerary\s+number\b/i.test(source)) return {};
+	const confirmationNumber = reservationMatch[1];
 	const datePattern = dateTextPattern();
 	const stayMatch = source.match(
 		new RegExp(
