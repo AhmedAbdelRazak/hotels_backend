@@ -11,6 +11,8 @@ const Reservations = require("../models/reservations");
 const {
 	buildOtaIdentityKey,
 	extractNormalizedReservation,
+	normalizeComparable,
+	normalizeConfirmation,
 	requiredNewReservationMissing,
 } = require("../services/otaReservationMapper");
 
@@ -95,6 +97,62 @@ function bestEntry(left, right) {
 		: right;
 }
 
+function reservationConfirmationValues(reservation = {}) {
+	const values = [
+		reservation.reservation_id,
+		reservation.customer_details?.confirmation_number2,
+		reservation.supplierData?.suppliedBookingNo,
+		reservation.supplierData?.otaConfirmationNumber,
+		reservation.supplierData?.platformConfirmationNumber,
+	];
+	const identityKey = String(reservation.otaIdentityKey || "");
+	if (identityKey.includes(":")) values.push(identityKey.slice(identityKey.indexOf(":") + 1));
+	return new Set(values.map(normalizeConfirmation).filter(Boolean));
+}
+
+function reservationProviderValues(reservation = {}) {
+	return new Set(
+		[
+			reservation.supplierData?.otaProvider,
+			reservation.otaPlatformReview?.provider,
+			reservation.supplierData?.supplierName,
+			reservation.booking_source,
+			reservation.customer_details?.booking_source,
+		]
+			.map((value) => normalizeComparable(value).replace(/\s+/g, ""))
+			.filter(Boolean)
+	);
+}
+
+function reservationMatchesEntry(reservation, entry) {
+	const confirmation = normalizeConfirmation(entry.normalized.confirmationNumber);
+	const provider = normalizeComparable(entry.normalized.provider).replace(/\s+/g, "");
+	const providerLabel = normalizeComparable(entry.normalized.providerLabel).replace(/\s+/g, "");
+	const confirmationMatches = reservationConfirmationValues(reservation).has(confirmation);
+	const providers = reservationProviderValues(reservation);
+	return confirmationMatches && (providers.has(provider) || providers.has(providerLabel));
+}
+
+function canonicalSarIssues(reservation = {}) {
+	const issues = [];
+	if (String(reservation.currency || "SAR").toUpperCase() !== "SAR") {
+		issues.push(`root currency is ${reservation.currency || "blank"}`);
+	}
+	const financialCurrency = reservation.ota_financial_summary?.currency;
+	if (financialCurrency && String(financialCurrency).toUpperCase() !== "SAR") {
+		issues.push(`OTA financial summary currency is ${financialCurrency}`);
+	}
+	for (const [field, value] of Object.entries({
+		total_amount: reservation.total_amount,
+		sub_total: reservation.sub_total,
+		paid_amount: reservation.paid_amount,
+		commission: reservation.commission,
+	})) {
+		if (!Number.isFinite(Number(value || 0))) issues.push(`${field} is not numeric`);
+	}
+	return issues;
+}
+
 async function main() {
 	const database =
 		process.env.DATABASE || process.env.MONGO_URI || process.env.MONGODB_URI;
@@ -140,19 +198,39 @@ async function main() {
 	}
 
 	const identityKeys = [...grouped.keys()];
+	const confirmationValues = Array.from(
+		new Set(
+			[...grouped.values()]
+				.flatMap((entry) => {
+					const raw = String(entry.normalized.confirmationNumber || "");
+					const normalized = normalizeConfirmation(raw);
+					return [raw, raw.toLowerCase(), raw.toUpperCase(), normalized];
+				})
+				.filter(Boolean)
+		)
+	);
 	const reservations = identityKeys.length
-		? await Reservations.find({ otaIdentityKey: { $in: identityKeys } })
+		? await Reservations.find({
+				$or: [
+					{ otaIdentityKey: { $in: identityKeys } },
+					{ reservation_id: { $in: confirmationValues } },
+					{ "customer_details.confirmation_number2": { $in: confirmationValues } },
+					{ "supplierData.suppliedBookingNo": { $in: confirmationValues } },
+					{ "supplierData.otaConfirmationNumber": { $in: confirmationValues } },
+					{ "supplierData.platformConfirmationNumber": { $in: confirmationValues } },
+				],
+			})
 				.select(
-					"_id otaIdentityKey confirmation_number reservation_status hotelId customer_details.name booked_at createdAt"
+					"_id otaIdentityKey reservation_id confirmation_number reservation_status hotelId customer_details booking_source booked_at createdAt currency total_amount sub_total paid_amount commission supplierData otaPlatformReview ota_financial_summary"
 				)
 				.lean()
 		: [];
 	const reservationsByIdentity = new Map();
-	for (const reservation of reservations) {
-		const key = String(reservation.otaIdentityKey || "").toLowerCase();
-		const current = reservationsByIdentity.get(key) || [];
-		current.push(reservation);
-		reservationsByIdentity.set(key, current);
+	for (const [identityKey, entry] of grouped) {
+		reservationsByIdentity.set(
+			identityKey,
+			reservations.filter((reservation) => reservationMatchesEntry(reservation, entry))
+		);
 	}
 
 	const completeMissing = [];
@@ -171,6 +249,16 @@ async function main() {
 				reservationIds: matches.map((reservation) => id(reservation._id)),
 				reservationStatuses: matches.map(
 					(reservation) => reservation.reservation_status || ""
+				),
+				canonicalIdentityPresent: matches.every(
+					(reservation) =>
+						String(reservation.otaIdentityKey || "").toLowerCase() === identityKey
+				),
+				canonicalSarIssues: matches.flatMap((reservation) =>
+					canonicalSarIssues(reservation).map((issue) => ({
+						reservationId: id(reservation._id),
+						issue,
+					}))
 				),
 			});
 		}
@@ -213,6 +301,19 @@ async function main() {
 		completeMissingCount: completeMissing.length,
 		incompleteCount: incomplete.length + identityless.length,
 		duplicateIdentityGroups,
+		storedWithoutCanonicalIdentityCount: stored.filter(
+			(entry) => !entry.canonicalIdentityPresent
+		).length,
+		canonicalSarIssueCount: stored.reduce(
+			(total, entry) => total + entry.canonicalSarIssues.length,
+			0
+		),
+		canonicalSarIssues: stored
+			.filter((entry) => entry.canonicalSarIssues.length)
+			.map((entry) => ({
+				identityKey: entry.identityKey,
+				issues: entry.canonicalSarIssues,
+			})),
 		byProvider,
 		byCurrency,
 		nonNewByEvent,
