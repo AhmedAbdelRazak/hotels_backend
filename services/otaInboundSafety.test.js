@@ -851,6 +851,54 @@ test("HotelRunner Expedia Arabic totals, occupancy, and six-person inventory sta
 	assert.equal(match.matchType, "explicit_capacity");
 });
 
+test("HotelRunner Arabic ISO currencies convert into SAR-only canonical reservation pricing", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - \u062d\u062c\u0632 \u062c\u062f\u064a\u062f #R073513682",
+		text: [
+			"\u062d\u062c\u0632 \u062c\u062f\u064a\u062f",
+			"EXPEDIA",
+			"\u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f 2518431194 \u0627\u0633\u0645 \u0627\u0644\u0636\u064a\u0641 Currency Test Guest \u0627\u0644\u062f\u0648\u0644\u0629 UAE \u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u0637\u0644\u0628 AED 100.00 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u062c\u0632 July 25, 2026",
+			"Comfort Double Room",
+			"\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629 -2 \u0623\u0641\u0631\u0627\u062f \u062a\u0627\u0631\u064a\u062e \u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u0648\u0635\u0648\u0644 August 06, 2026 \u062a\u0627\u0631\u064a\u062e \u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 August 07, 2026 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 2 \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a AED 100.00 \u0622\u062e\u0631 \u062a\u062d\u062f\u064a\u062b",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "expedia");
+	assert.equal(normalized.confirmationNumber, "2518431194");
+	assert.equal(normalized.amount, 100);
+	assert.equal(normalized.currency, "AED");
+	assert.equal(normalized.sourceCurrency, "AED");
+	assert.equal(normalized.totalAmountSar, 102.1);
+	assert.deepEqual(requiredNewReservationMissing(normalized), []);
+
+	const room = {
+		_id: "double-room",
+		roomType: "doubleRooms",
+		displayName: "Double Room",
+		activeRoom: true,
+		price: { basePrice: 75 },
+	};
+	const hotel = {
+		_id: "hotel-zad",
+		belongsTo: "owner-zad",
+		roomCountDetails: [room],
+	};
+	const roomMatch = resolveRoomMatch(hotel, normalized.roomName, {
+		totalGuests: normalized.totalGuests,
+		normalized,
+	});
+	const built = buildReservationDocument(normalized, hotel, { roomMatch });
+
+	assert.equal(built.ok, true);
+	assert.equal(built.document.currency, "SAR");
+	assert.equal(built.document.total_amount, 102.1);
+	assert.equal(built.document.ota_financial_summary.currency, "SAR");
+	assert.equal(built.document.supplierData.otaSourceCurrency, "AED");
+	assert.equal(built.document.supplierData.otaSourceAmount, 100);
+	assert.equal(built.document.supplierData.otaAmountSar, 102.1);
+});
+
 test("Arabic HotelRunner multi-room messages retain all occupancy evidence for review", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"HotelRunner" <noreply@hotelrunner.com>',

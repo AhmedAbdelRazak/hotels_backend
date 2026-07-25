@@ -78,7 +78,14 @@ const DEFAULT_SAR_EXCHANGE_RATES = {
 	THB: 0.1,
 };
 
-const MONEY_CURRENCY_CODES = Object.keys(DEFAULT_SAR_EXCHANGE_RATES);
+const MONEY_CURRENCY_CODES = Array.from(
+	new Set([
+		...Object.keys(DEFAULT_SAR_EXCHANGE_RATES),
+		...`AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CLP CNY COP CRC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IQD IRR ISK JMD JOD JPY KES KGS KHR KMF KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VES VND VUV WST XAF XCD XOF XPF YER ZAR ZMW ZWG`.split(
+			/\s+/
+		),
+	])
+);
 const STABLE_DEFAULT_RATE_CURRENCIES = new Set(["USD", "AED", "QAR", "BHD", "OMR"]);
 const EXCHANGE_RATE_CACHE_TTL_MS = Number(
 	process.env.OTA_EXCHANGE_RATE_CACHE_TTL_MS || 6 * 60 * 60 * 1000
@@ -694,11 +701,8 @@ function moneyNumberPattern() {
 	return String.raw`-?(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:[,.]\d{1,2})?)`;
 }
 
-function parseMoneyCandidates(value) {
-	const source = normalizeWhitespace(value);
-	if (!source) return [];
-
-	const currencyPattern = [
+function moneyCurrencyPattern() {
+	return [
 		...MONEY_CURRENCY_CODES,
 		"US\\$",
 		"\\$",
@@ -709,6 +713,17 @@ function parseMoneyCandidates(value) {
 		"\u20ac",
 		"\u00a3",
 	].join("|");
+}
+
+function moneyValuePattern() {
+	return `(?:(?:${moneyCurrencyPattern()})\\s*)?${moneyNumberPattern()}`;
+}
+
+function parseMoneyCandidates(value) {
+	const source = normalizeWhitespace(value);
+	if (!source) return [];
+
+	const currencyPattern = moneyCurrencyPattern();
 	const numberPattern = moneyNumberPattern();
 	const candidates = [];
 	const seen = new Set();
@@ -1344,9 +1359,17 @@ function extractHotelRunnerArabicRoomBlocks(text = "") {
 			? Number(childrenMatch?.[1] || 0)
 			: 0;
 		const total = parseMoney(
-			findFirstPattern(tail, [
-				/الإجمالي\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
-			])
+			firstNonEmpty(
+				findFirstPattern(tail, [
+					/الإجمالي\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
+				]),
+				findFirstPattern(tail, [
+					new RegExp(
+						`\\u0627\\u0644\\u0625\\u062c\\u0645\\u0627\\u0644\\u064a\\s*[:#-]?\\s*(${moneyValuePattern()})`,
+						"iu"
+					),
+				])
+			)
 		);
 		if (!heading || !roomType || !checkinDate || !checkoutDate || !totalGuests) {
 			continue;
@@ -1398,9 +1421,17 @@ function extractHotelRunnerArabicFields(text = "") {
 			/الدولة\s*[:#-]?\s*([\s\S]{1,100}?)\s+إجمالي\s*الطلب(?=\s|[:#-]|$)/i,
 		])
 	);
-	const orderTotalText = findFirstPattern(source, [
-		/إجمالي\s*الطلب\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
-	]);
+	const orderTotalText = firstNonEmpty(
+		findFirstPattern(source, [
+			/إجمالي\s*الطلب\s*[:#-]?\s*((?:SAR|SR|USD|US\$|[$€£﷼])?\s*[0-9][0-9,.]*)/i,
+		]),
+		findFirstPattern(source, [
+			new RegExp(
+				`\\u0625\\u062c\\u0645\\u0627\\u0644\\u064a\\s*\\u0627\\u0644\\u0637\\u0644\\u0628\\s*[:#-]?\\s*(${moneyValuePattern()})`,
+				"iu"
+			),
+		])
+	);
 	const bookedAtText = findFirstPattern(source, [
 		/تاريخ\s*الحجز\s*[:#-]?\s*[^\n]*?((?:يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)\s+\d{1,2}[،,]?\s+\d{4})/i,
 	]);
