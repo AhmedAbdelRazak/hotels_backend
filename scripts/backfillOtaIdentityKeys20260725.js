@@ -306,40 +306,56 @@ async function main() {
 	});
 	console.log(`Before snapshot: ${beforeSnapshot}`);
 
-	for (const candidate of candidates) {
-		const identityFilter = candidate.previousIdentityKey
-			? { otaIdentityKey: candidate.previousIdentityKey }
-			: {
-					$or: [
-						{ otaIdentityKey: { $exists: false } },
-						{ otaIdentityKey: null },
-						{ otaIdentityKey: "" },
-					],
-			  };
-		const result = await Reservations.updateOne(
-			{
-				_id: candidate.reservation._id,
-				__v: Number(candidate.reservation.__v || 0),
-				...identityFilter,
-			},
-			{
-				$set: { otaIdentityKey: candidate.otaIdentityKey },
-				$inc: { __v: 1 },
-				$push: {
-					reservationAuditLog: {
-						at: new Date(),
-						source: "ota-identity-backfill",
-						action: "canonical-ota-identity-added",
-						by: SYSTEM_ACTOR,
-						from: { otaIdentityKey: candidate.previousIdentityKey },
-						to: { otaIdentityKey: candidate.otaIdentityKey },
-						evidenceAuditIds: candidate.auditIds,
+	const session = await mongoose.startSession();
+	try {
+		await session.withTransaction(async () => {
+			for (const candidate of candidates) {
+				const identityFilter = candidate.previousIdentityKey
+					? { otaIdentityKey: candidate.previousIdentityKey }
+					: {
+							$or: [
+								{ otaIdentityKey: { $exists: false } },
+								{ otaIdentityKey: null },
+								{ otaIdentityKey: "" },
+							],
+						  };
+				const result = await Reservations.updateOne(
+					{
+						_id: candidate.reservation._id,
+						__v: Number(candidate.reservation.__v || 0),
+						...identityFilter,
 					},
-				},
+					{
+						$set: { otaIdentityKey: candidate.otaIdentityKey },
+						$inc: { __v: 1 },
+						$push: {
+							reservationAuditLog: {
+								at: new Date(),
+								source: "ota-identity-backfill",
+								action: "canonical-ota-identity-added",
+								by: SYSTEM_ACTOR,
+								from: { otaIdentityKey: candidate.previousIdentityKey },
+								to: { otaIdentityKey: candidate.otaIdentityKey },
+								evidenceAuditIds: candidate.auditIds,
+							},
+						},
+					},
+					{ session }
+				);
+				assert.equal(
+					result.matchedCount,
+					1,
+					`concurrent change: ${candidate.reservationId}`
+				);
+				assert.equal(
+					result.modifiedCount,
+					1,
+					`identity was not written: ${candidate.reservationId}`
+				);
 			}
-		);
-		assert.equal(result.matchedCount, 1, `concurrent change: ${candidate.reservationId}`);
-		assert.equal(result.modifiedCount, 1, `identity was not written: ${candidate.reservationId}`);
+		});
+	} finally {
+		await session.endSession();
 	}
 
 	const afterReservations = await Reservations.find({
