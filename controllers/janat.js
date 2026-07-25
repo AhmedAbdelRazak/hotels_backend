@@ -98,6 +98,8 @@ const {
 } = require("../services/otaReviewConcurrency");
 const {
 	attachAdminReservationRoomDetails,
+	buildExactRoomNumberPattern,
+	parseAdminReservationRoomSearch,
 } = require("../services/adminReservationRoomDetails");
 const {
 	compactAdminPricingForReservationList,
@@ -4427,6 +4429,7 @@ exports.paginatedReservationList = async (req, res) => {
 			(typeof s === "string" ? s : "")
 				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 				.trim();
+		const roomNumberSearch = parseAdminReservationRoomSearch(searchQuery);
 
 		// Date helpers (UTC day ranges)
 		const toISODateYMD = (d) => {
@@ -4512,6 +4515,22 @@ exports.paginatedReservationList = async (req, res) => {
 			createdTo,
 		);
 		if (createdClause) andFilters.push(createdClause);
+
+		// A leading `r` is the dedicated physical-room search syntax (for
+		// example, r501 or R501). Resolve matching room IDs before loading the
+		// reservations so pagination and scorecards describe the same result set.
+		if (roomNumberSearch !== null) {
+			const matchingRooms = await Rooms.find({
+				room_number: {
+					$regex: buildExactRoomNumberPattern(roomNumberSearch),
+				},
+			})
+				.select("_id")
+				.lean();
+			andFilters.push({
+				roomId: { $in: matchingRooms.map((room) => room._id) },
+			});
+		}
 
 		const mongoFilter =
 			andFilters.length > 1 ? { $and: andFilters } : scopedBaseFilter;
@@ -4716,7 +4735,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		// -------------------- Search (unchanged) --------------------
 		const searchQ = (searchQuery || "").trim().toLowerCase();
-		if (searchQ) {
+		if (searchQ && roomNumberSearch === null) {
 			filteredDocs = filteredDocs.filter((r) => {
 				const cnum = String(r.confirmation_number || "").toLowerCase();
 				const cnum2 = String(r.confirmation_number2 || "").toLowerCase();
