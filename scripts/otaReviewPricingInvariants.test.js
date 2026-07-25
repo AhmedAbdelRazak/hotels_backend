@@ -374,6 +374,42 @@ test("pricing review stamps only an exact unambiguous current hotel room id", ()
 	assert.equal(ambiguous.code, "ota_room_mapping_ambiguous");
 });
 
+test("room mapping options expose only active canonical PMS room identities", () => {
+	const activeId = roomId();
+	const inactiveId = roomId();
+	const options = otaPricing.otaRoomMappingOptionsForHotel({
+		roomCountDetails: [
+			{
+				_id: activeId,
+				roomType: "tripleRooms",
+				displayName: "Triple Premium",
+				displayName_OtherLanguage: "Arabic triple",
+				count: 4,
+				activeRoom: true,
+				pricingRate: [{ calendarDate: "2026-07-27", rootPrice: 75 }],
+			},
+			{
+				_id: inactiveId,
+				roomType: "familyRooms",
+				displayName: "Inactive Family",
+				count: 20,
+				activeRoom: false,
+			},
+		],
+	});
+
+	assert.deepEqual(options, [
+		{
+			hotelRoomConfigId: activeId,
+			room_type: "tripleRooms",
+			displayName: "Triple Premium",
+			displayNameOtherLanguage: "Arabic triple",
+			configuredCount: 4,
+		},
+	]);
+	assert.equal(Object.hasOwn(options[0], "pricingRate"), false);
+});
+
 test("release validates the current room identity and both root/client totals", () => {
 	const configId = roomId();
 	const hotel = {

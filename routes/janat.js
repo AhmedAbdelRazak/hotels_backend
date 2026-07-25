@@ -31,6 +31,7 @@ const {
 	paginatedAdminRejectedReservationList,
 	exportAdminRejectedReservationList,
 	listOtaAssignableHotels,
+	getOtaReservationRoomOptions,
 	assignOtaReservationHotel,
 	updateOtaReservationPricing,
 	releaseOtaReservationToHotel,
@@ -139,6 +140,14 @@ router.get(
 	isAuth,
 	requireAdminAccess("OTAReservations"),
 	listOtaAssignableHotels
+);
+
+router.get(
+	"/admin/ota-reservations/:reservationId/room-options/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("OTAReservations"),
+	getOtaReservationRoomOptions
 );
 
 router.put(

@@ -997,6 +997,9 @@ const normalizeReservationStayPricing = async (
 	const updates = { ...updatePayload };
 	const warnings = Array.isArray(options.warnings) ? options.warnings : [];
 	const allowBlockedCalendar = Boolean(options.allowBlockedCalendar);
+	const preserveReviewedRoomPricing = Boolean(
+		options.preserveReviewedRoomPricing,
+	);
 	const hasExplicitAdminPricingIntent = Boolean(
 		options.hasExplicitAdminPricingIntent ||
 			options.hasExplicitPricingIntent ||
@@ -1156,7 +1159,7 @@ const normalizeReservationStayPricing = async (
 	const mustReprice =
 		hasRooms &&
 		(hotelChanged ||
-			roomIdentityChanged ||
+			(roomIdentityChanged && !preserveReviewedRoomPricing) ||
 			(!primaryRoomsComplete && (dateChanged || roomsTouched)));
 	const canUseProvidedPricing =
 		hasRooms && !hotelChanged && primaryRoomsComplete && roomsTouched;

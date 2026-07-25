@@ -87,6 +87,7 @@ const {
 	invalidateOtaRoomPricingForHotelAssignment,
 	isOtaSourceReservation,
 	normalizeId: normalizeOtaPricingId,
+	otaRoomMappingOptionsForHotel,
 	resolveOtaSourceClientTotal,
 	validateOtaReleaseHotelBasePrice,
 	validateOtaSourceClientPricing,
@@ -3019,6 +3020,77 @@ exports.listOtaAssignableHotels = async (req, res) => {
 	}
 };
 
+exports.getOtaReservationRoomOptions = async (req, res) => {
+	try {
+		const actor = req.profile || {};
+		const { reservationId } = req.params;
+		if (!canManageOtaReservations(actor)) {
+			return res.status(403).json({ success: false, message: "Access denied" });
+		}
+		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({
+				success: false,
+				message: "Invalid reservation ID",
+			});
+		}
+
+		const reservation = await Reservations.findOne(
+			applyPlatformOtaScope(actor, { _id: reservationId }),
+		)
+			.select("_id hotelId otaPlatformReview reservation_status state")
+			.lean();
+		if (!reservation) {
+			return res.status(404).json({
+				success: false,
+				message: "Reservation not found",
+			});
+		}
+		if (!isOtaPlatformReviewPending(reservation)) {
+			return res.status(409).json({
+				success: false,
+				message: "This OTA reservation is no longer pending platform review.",
+			});
+		}
+
+		const hotelId = normalizeOtaPricingId(reservation.hotelId);
+		if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({
+				success: false,
+				message: "Assign a valid hotel before selecting the PMS room.",
+			});
+		}
+		const hotel = await HotelDetails.findById(hotelId)
+			.select(
+				"_id hotelName hotelName_OtherLanguage roomCountDetails._id roomCountDetails.roomType roomCountDetails.room_type roomCountDetails.displayName roomCountDetails.display_name roomCountDetails.displayName_OtherLanguage roomCountDetails.activeRoom roomCountDetails.count roomCountDetails.totalRooms roomCountDetails.total_rooms",
+			)
+			.lean();
+		if (!hotel) {
+			return res.status(404).json({
+				success: false,
+				message: "The assigned hotel could not be found.",
+			});
+		}
+
+		const rooms = otaRoomMappingOptionsForHotel(hotel);
+		return res.status(200).json({
+			success: true,
+			hotel: {
+				_id: String(hotel._id),
+				hotelName: hotel.hotelName || "",
+				hotelNameOtherLanguage: hotel.hotelName_OtherLanguage || "",
+			},
+			rooms,
+		});
+	} catch (error) {
+		console.error("Error loading OTA reservation room options:", error);
+		return res.status(500).json({
+			success: false,
+			message: "Failed to load active PMS rooms for this OTA reservation",
+			error: error.message,
+		});
+	}
+};
+
 exports.paginatedOtaReservationList = async (req, res) => {
 	try {
 		const actor = req.profile || {};
@@ -3756,6 +3828,33 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			}
 			return acc;
 		}, {});
+		const requestedPricingRooms =
+			Array.isArray(updatePayload.pickedRoomsPricing) &&
+			updatePayload.pickedRoomsPricing.length
+				? updatePayload.pickedRoomsPricing
+				: Array.isArray(updatePayload.pickedRoomsType) &&
+				  updatePayload.pickedRoomsType.length
+				? updatePayload.pickedRoomsType
+				: Array.isArray(reservation.pickedRoomsPricing) &&
+				  reservation.pickedRoomsPricing.length
+				? reservation.pickedRoomsPricing
+				: reservation.pickedRoomsType;
+		const requestedCanonicalRoomMapping = canonicalizeOtaReviewedRooms(
+			requestedPricingRooms,
+			assignedHotel,
+		);
+		if (!requestedCanonicalRoomMapping.ready) {
+			throw new ReservationPricingError(
+				requestedCanonicalRoomMapping.message,
+				400,
+				requestedCanonicalRoomMapping.code,
+				{ roomIndex: requestedCanonicalRoomMapping.roomIndex },
+			);
+		}
+		// The dedicated OTA review is allowed to preserve complete administrator-entered
+		// nightly prices only after every room ID has been validated against this hotel.
+		updatePayload.pickedRoomsType = requestedCanonicalRoomMapping.rooms;
+		updatePayload.pickedRoomsPricing = requestedCanonicalRoomMapping.rooms;
 		const requestedAdminPricing = req.body?.adminPricing || {};
 		let requestedCommissionAmount = null;
 		if (hasExplicitMoneyField(req.body || {}, "commission")) {
@@ -3767,7 +3866,11 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		}
 		const normalizedUpdate = await normalizeReservationStayPricing(
 			reservation,
-			updatePayload
+			updatePayload,
+			{
+				hasExplicitAdminPricingIntent: true,
+				preserveReviewedRoomPricing: true,
+			},
 		);
 		delete normalizedUpdate.__commissionAssignmentReset;
 

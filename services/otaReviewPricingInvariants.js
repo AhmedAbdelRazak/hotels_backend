@@ -365,6 +365,33 @@ const activeRoomConfigs = (hotel = {}) =>
 		(room) => room && room.activeRoom !== false,
 	);
 
+const otaRoomMappingOptionsForHotel = (hotel = {}) =>
+	activeRoomConfigs(hotel)
+		.map((room) => ({
+			hotelRoomConfigId: normalizeId(room._id),
+			room_type: String(room.roomType || room.room_type || "").trim(),
+			displayName: String(
+				room.displayName ||
+					room.display_name ||
+					room.roomType ||
+					room.room_type ||
+					"",
+			).trim(),
+			displayNameOtherLanguage: String(
+				room.displayName_OtherLanguage ||
+					room.displayNameOtherLanguage ||
+					"",
+			).trim(),
+			configuredCount: Math.max(
+				0,
+				Number(room.count || room.totalRooms || room.total_rooms || 0) || 0,
+			),
+		}))
+		.filter(
+			(room) =>
+				room.hotelRoomConfigId && (room.room_type || room.displayName),
+		);
+
 const exactRoomConfig = (selection = {}, hotel = {}) => {
 	const configs = activeRoomConfigs(hotel);
 	const selectedId = configIdForRoom(selection);
@@ -680,6 +707,7 @@ module.exports = {
 	isOtaSourceReservation,
 	isOtaSyncReservation,
 	normalizeId,
+	otaRoomMappingOptionsForHotel,
 	otaReleaseBlockingStatus,
 	resolvePersistedOtaClientTotalOverride,
 	resolveOtaSourceClientTotal,

@@ -74,3 +74,56 @@ test("admin-managed checkout extension preserves client and hotel pricing separa
 	assert.equal(updates.adminPricing.clientTotal, 171);
 	assert.equal(updates.adminPricing.rootTotal, 225);
 });
+
+test("validated OTA room remapping preserves reviewed nightly prices and room count", async () => {
+	const existingRoom = {
+		...adminManagedRoom(),
+		displayName: "Triple Bed Room With Air Conditioning",
+	};
+	const reviewedRoom = {
+		...adminManagedRoom(),
+		hotelRoomConfigId: "6a40e0981a6d1850eb25c27c",
+		displayName: "Triple Room - Premium Comfort",
+		count: 2,
+		pricingByDay: adminManagedRoom().pricingByDay.map((day) => ({
+			...day,
+			price: 67.67,
+			totalPriceWithCommission: 67.67,
+			clientPrice: 67.67,
+			rootPrice: 40,
+			totalPriceWithoutCommission: 40,
+			netAfterExpenses: 50,
+		})),
+	};
+	const existing = {
+		hotelId: "6a40b6a1a6efe70450536038",
+		checkin_date: "2026-07-24",
+		checkout_date: "2026-07-26",
+		adminPricing: { mode: "ota_assignment_pending_pricing" },
+		adminPricingVisibility: { rootOnlyForHotelManagement: true },
+		pickedRoomsType: [existingRoom],
+		pickedRoomsPricing: [existingRoom],
+	};
+
+	const updates = await normalizeReservationStayPricing(
+		existing,
+		{
+			pickedRoomsType: [reviewedRoom],
+			pickedRoomsPricing: [reviewedRoom],
+			adminPricing: { mode: "ota_review" },
+		},
+		{
+			hasExplicitAdminPricingIntent: true,
+			preserveReviewedRoomPricing: true,
+		},
+	);
+
+	assert.equal(updates.total_rooms, 2);
+	assert.equal(updates.total_amount, 270.68);
+	assert.equal(updates.sub_total, 160);
+	assert.equal(updates.pickedRoomsPricing[0].hotelRoomConfigId, reviewedRoom.hotelRoomConfigId);
+	assert.deepEqual(
+		updates.pickedRoomsPricing[0].pricingByDay.map((day) => day.clientPrice),
+		[67.67, 67.67],
+	);
+});
