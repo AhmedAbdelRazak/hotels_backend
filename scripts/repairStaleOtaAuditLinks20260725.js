@@ -9,7 +9,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const mongoose = require("mongoose");
 const InboundEmail = require("../models/inbound_email");
+const Reservations = require("../models/reservations");
 const {
+	buildOtaIdentityKey,
 	detectConfirmationMatchFields,
 	extractNormalizedReservation,
 	findReservationByOtaConfirmation,
@@ -29,6 +31,11 @@ const SUPPORTED_PROVIDERS = [
 ];
 const HISTORIC_SOURCE_ERROR =
 	"Reservation confirmation number is not source-backed.";
+const SYSTEM_ACTOR = {
+	name: "OTA audit-link repair 2026-07-25",
+	email: "system@jannatbooking.com",
+	role: "system",
+};
 
 const id = (value) => String(value || "");
 
@@ -53,6 +60,7 @@ function safePlanSummary(plan) {
 		confirmationNumber: plan.audit.confirmationNumber,
 		processingStatus: plan.audit.processingStatus,
 		reservationId: id(plan.reservation._id),
+		previousReservationId: id(plan.previousReservationMongoId),
 		pmsConfirmationNumber: plan.reservation.confirmation_number,
 		hotelId: id(plan.reservation.hotelId),
 		matchedReservationBy: plan.matchedReservationBy,
@@ -73,7 +81,7 @@ function writeSnapshot(stage, value) {
 }
 
 async function buildPlans() {
-	const audits = await InboundEmail.find({
+	const unconnectedAudits = await InboundEmail.find({
 		receivedAt: { $gte: INCIDENT_START },
 		provider: { $in: SUPPORTED_PROVIDERS },
 		confirmationNumber: { $type: "string", $ne: "" },
@@ -85,8 +93,36 @@ async function buildPlans() {
 	})
 		.sort({ receivedAt: 1, _id: 1 })
 		.lean();
+	const connectedAudits = await InboundEmail.find({
+		provider: { $in: SUPPORTED_PROVIDERS },
+		confirmationNumber: { $type: "string", $ne: "" },
+		hasReservationConnection: true,
+		reservationMongoId: { $ne: null },
+	})
+		.sort({ receivedAt: 1, _id: 1 })
+		.lean();
+	const connectedReservationIds = Array.from(
+		new Set(connectedAudits.map((audit) => id(audit.reservationMongoId)).filter(Boolean))
+	);
+	const liveLinkedReservations = connectedReservationIds.length
+		? await Reservations.find({ _id: { $in: connectedReservationIds } })
+				.select("_id")
+				.lean()
+		: [];
+	const liveLinkedIds = new Set(
+		liveLinkedReservations.map((reservation) => id(reservation._id))
+	);
+	const staleAudits = connectedAudits.filter(
+		(audit) => !liveLinkedIds.has(id(audit.reservationMongoId))
+	);
+	const audits = Array.from(
+		new Map(
+			[...unconnectedAudits, ...staleAudits].map((audit) => [id(audit._id), audit])
+		).values()
+	);
 
 	const plans = [];
+	const identityPlansByReservation = new Map();
 	for (const audit of audits) {
 		// Exact provider + confirmation identity is required before any audit link.
 		// eslint-disable-next-line no-await-in-loop
@@ -122,9 +158,53 @@ async function buildPlans() {
 			matchedReservationBy.length,
 			`reservation identity fields did not match audit ${id(audit._id)}`
 		);
-		plans.push({ audit, reparsed, reservation, matchedReservationBy });
+		const otaIdentityKey = buildOtaIdentityKey(
+			audit.provider,
+			audit.confirmationNumber
+		);
+		assert.ok(otaIdentityKey, `canonical identity missing for audit ${id(audit._id)}`);
+		const previousIdentityKey = String(reservation.otaIdentityKey || "").toLowerCase();
+		if (previousIdentityKey !== otaIdentityKey) {
+			assert.ok(
+				!previousIdentityKey ||
+					previousIdentityKey === normalizeConfirmation(audit.confirmationNumber),
+				`reservation ${id(reservation._id)} has a conflicting OTA identity`
+			);
+			// eslint-disable-next-line no-await-in-loop
+			const competingOwner = await Reservations.findOne({
+				_id: { $ne: reservation._id },
+				otaIdentityKey,
+			})
+				.select("_id")
+				.lean();
+			assert.equal(
+				competingOwner,
+				null,
+				`canonical identity ${otaIdentityKey} already has another owner`
+			);
+			identityPlansByReservation.set(id(reservation._id), {
+				reservation,
+				previousIdentityKey,
+				otaIdentityKey,
+				evidenceAuditIds: [
+					...(identityPlansByReservation.get(id(reservation._id))?.evidenceAuditIds || []),
+					id(audit._id),
+				],
+			});
+		}
+		plans.push({
+			audit,
+			reparsed,
+			reservation,
+			matchedReservationBy,
+			previousReservationMongoId: audit.reservationMongoId || null,
+		});
 	}
-	return plans;
+	return {
+		plans,
+		identityPlans: [...identityPlansByReservation.values()],
+		staleAuditCount: staleAudits.length,
+	};
 }
 
 function connectionUpdate(plan, now) {
@@ -170,6 +250,12 @@ function connectionUpdate(plan, now) {
 
 async function applyPlan(plan) {
 	const now = new Date();
+	const staleLinkFilter = plan.previousReservationMongoId
+		? {
+				hasReservationConnection: true,
+				reservationMongoId: plan.previousReservationMongoId,
+		  }
+		: null;
 	const result = await InboundEmail.updateOne(
 		{
 			_id: plan.audit._id,
@@ -178,6 +264,7 @@ async function applyPlan(plan) {
 			$or: [
 				{ reservationMongoId: null },
 				{ reservationMongoId: { $exists: false } },
+				...(staleLinkFilter ? [staleLinkFilter] : []),
 				{
 					$and: [
 						{ hasReservationConnection: { $ne: true } },
@@ -207,12 +294,20 @@ async function main() {
 	if (!database) throw new Error("Missing DATABASE/MONGO connection string.");
 	await mongoose.connect(database, { autoIndex: false });
 
-	const plans = await buildPlans();
+	const { plans, identityPlans, staleAuditCount } = await buildPlans();
 	console.log(
 		JSON.stringify(
 			{
 				mode: APPLY ? "apply" : "dry-run",
 				exactSourceBackedLinks: plans.length,
+				staleAuditLinks: staleAuditCount,
+				canonicalIdentitiesToAdd: identityPlans.length,
+				identityPlans: identityPlans.map((plan) => ({
+					reservationId: id(plan.reservation._id),
+					previousIdentityKey: plan.previousIdentityKey,
+					otaIdentityKey: plan.otaIdentityKey,
+					evidenceAuditIds: plan.evidenceAuditIds,
+				})),
 				audits: plans.map(safePlanSummary),
 			},
 			null,
@@ -225,8 +320,55 @@ async function main() {
 	const beforeSnapshot = writeSnapshot("before", {
 		createdAt: new Date(),
 		audits: await InboundEmail.find({ _id: { $in: auditIds } }).lean(),
+		reservations: identityPlans.map((plan) => plan.reservation),
 	});
 	console.log(`Before snapshot: ${beforeSnapshot}`);
+
+	for (const plan of identityPlans) {
+		const identityFilter = plan.previousIdentityKey
+			? { otaIdentityKey: plan.previousIdentityKey }
+			: {
+					$or: [
+						{ otaIdentityKey: { $exists: false } },
+						{ otaIdentityKey: null },
+						{ otaIdentityKey: "" },
+					],
+			  };
+		// eslint-disable-next-line no-await-in-loop
+		const identityResult = await Reservations.updateOne(
+			{
+				_id: plan.reservation._id,
+				__v: Number(plan.reservation.__v || 0),
+				...identityFilter,
+			},
+			{
+				$set: { otaIdentityKey: plan.otaIdentityKey },
+				$inc: { __v: 1 },
+				$push: {
+					reservationAuditLog: {
+						at: new Date(),
+						source: "ota-audit-link-repair",
+						action: "canonical-ota-identity-added",
+						by: SYSTEM_ACTOR,
+						from: { otaIdentityKey: plan.previousIdentityKey },
+						to: { otaIdentityKey: plan.otaIdentityKey },
+						evidenceAuditIds: plan.evidenceAuditIds,
+					},
+				},
+			}
+		);
+		if (identityResult.modifiedCount !== 1) {
+			// eslint-disable-next-line no-await-in-loop
+			const current = await Reservations.findById(plan.reservation._id)
+				.select("otaIdentityKey")
+				.lean();
+			assert.equal(
+				current?.otaIdentityKey,
+				plan.otaIdentityKey,
+				"reservation identity was concurrently changed"
+			);
+		}
+	}
 
 	for (const plan of plans) {
 		// Every update uses an immutable audit _id and exact stored OTA identity.
@@ -235,6 +377,11 @@ async function main() {
 	}
 
 	const afterAudits = await InboundEmail.find({ _id: { $in: auditIds } }).lean();
+	const afterReservations = identityPlans.length
+		? await Reservations.find({
+				_id: { $in: identityPlans.map((plan) => plan.reservation._id) },
+		  }).lean()
+		: [];
 	for (const plan of plans) {
 		const audit = afterAudits.find((candidate) => id(candidate._id) === id(plan.audit._id));
 		assert.equal(audit?.hasReservationConnection, true, "linked flag missing");
@@ -244,13 +391,34 @@ async function main() {
 			"linked reservation mismatch"
 		);
 	}
+	for (const plan of identityPlans) {
+		const reservation = afterReservations.find(
+			(candidate) => id(candidate._id) === id(plan.reservation._id)
+		);
+		assert.equal(
+			reservation?.otaIdentityKey,
+			plan.otaIdentityKey,
+			"canonical reservation identity missing after repair"
+		);
+	}
 	const afterSnapshot = writeSnapshot("after", {
 		createdAt: new Date(),
 		beforeSnapshot,
 		audits: afterAudits,
+		reservations: afterReservations,
 	});
 	console.log(`After snapshot: ${afterSnapshot}`);
-	console.log(JSON.stringify({ success: true, linkedAudits: plans.length }, null, 2));
+	console.log(
+		JSON.stringify(
+			{
+				success: true,
+				linkedAudits: plans.length,
+				canonicalIdentitiesAdded: identityPlans.length,
+			},
+			null,
+			2
+		)
+	);
 }
 
 main()
