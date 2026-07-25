@@ -99,6 +99,13 @@ const SYSTEM_ACTOR = {
 
 const round2 = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const id = (value) => String(value?._id || value || "");
+const ymd = (value) => {
+	if (!value) return "";
+	if (value instanceof Date && !Number.isNaN(value.getTime())) {
+		return value.toISOString().slice(0, 10);
+	}
+	return String(value).slice(0, 10);
+};
 
 function emailFromAudit(audit) {
 	return {
@@ -224,8 +231,8 @@ function assertReservationIntegrity(reservation, repair) {
 	);
 	assert.equal(id(reservation.hotelId), AJYAD_HOTEL_ID, "hotel mismatch");
 	assert.match(reservation.customer_details?.name || "", repair.guestName, "guest mismatch");
-	assert.equal(reservation.checkin_date, repair.checkinDate, "check-in mismatch");
-	assert.equal(reservation.checkout_date, repair.checkoutDate, "check-out mismatch");
+	assert.equal(ymd(reservation.checkin_date), repair.checkinDate, "check-in mismatch");
+	assert.equal(ymd(reservation.checkout_date), repair.checkoutDate, "check-out mismatch");
 	assert.equal(Number(reservation.total_rooms), repair.roomCount, "room-count mismatch");
 	assert.equal(Number(reservation.total_guests), repair.totalGuests, "guest-count mismatch");
 	assertMoney(reservation.total_amount, repair.totalAmountSar, "guest-total mismatch");
