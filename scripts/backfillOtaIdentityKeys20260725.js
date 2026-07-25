@@ -34,6 +34,14 @@ function normalizedProvider(value = "") {
 	return normalizeComparable(value).replace(/\s+/g, "");
 }
 
+function plausibleProviderConfirmation(provider, confirmationNumber) {
+	const value = normalizeConfirmation(confirmationNumber);
+	if (!value || value.length < 6 || value.length > 30) return false;
+	if (["agoda", "expedia"].includes(provider)) return /^\d{8,18}$/.test(value);
+	if (provider === "airbnb") return /^hm[a-z0-9]{6,20}$/i.test(value);
+	return /^[a-z0-9][a-z0-9-]{5,29}$/i.test(value);
+}
+
 function reservationProviderValues(reservation = {}) {
 	return new Set(
 		[
@@ -115,11 +123,21 @@ async function main() {
 		.lean();
 
 	const evidenceByReservation = new Map();
+	const invalidAuditEvidence = [];
 	for (const audit of audits) {
 		const reservationId = id(audit.reservationMongoId);
 		const confirmationNumber = normalizeConfirmation(audit.confirmationNumber);
 		const otaIdentityKey = buildOtaIdentityKey(audit.provider, confirmationNumber);
 		if (!reservationId || !otaIdentityKey) continue;
+		if (!plausibleProviderConfirmation(audit.provider, confirmationNumber)) {
+			invalidAuditEvidence.push({
+				auditId: id(audit._id),
+				reservationId,
+				provider: audit.provider,
+				confirmationNumber,
+			});
+			continue;
+		}
 		const current = evidenceByReservation.get(reservationId) || {
 			auditIds: [],
 			evidence: [],
@@ -146,13 +164,14 @@ async function main() {
 	);
 
 	const conflicts = [];
+	const staleLinks = [];
 	const alreadyProtected = [];
 	const preliminary = [];
 	for (const [reservationId, evidenceGroup] of evidenceByReservation) {
 		const reservation = reservationsById.get(reservationId);
 		const identityKeys = [...evidenceGroup.identityKeys];
 		if (!reservation) {
-			conflicts.push({ reservationId, reason: "linked reservation is missing" });
+			staleLinks.push({ reservationId, reason: "linked reservation is missing" });
 			continue;
 		}
 		if (identityKeys.length !== 1) {
@@ -178,6 +197,21 @@ async function main() {
 		if (reservation.otaIdentityKey) {
 			if (String(reservation.otaIdentityKey).toLowerCase() === otaIdentityKey) {
 				alreadyProtected.push({ reservationId, otaIdentityKey });
+			} else if (
+				!String(reservation.otaIdentityKey).includes(":") &&
+				matchingEvidence.some(
+					(evidence) =>
+						normalizeConfirmation(reservation.otaIdentityKey) ===
+						evidence.confirmationNumber
+				)
+			) {
+				preliminary.push({
+					reservation,
+					reservationId,
+					otaIdentityKey,
+					previousIdentityKey: reservation.otaIdentityKey,
+					auditIds: evidenceGroup.auditIds,
+				});
 			} else {
 				conflicts.push({
 					reservationId,
@@ -191,6 +225,7 @@ async function main() {
 			reservation,
 			reservationId,
 			otaIdentityKey,
+			previousIdentityKey: "",
 			auditIds: evidenceGroup.auditIds,
 		});
 	}
@@ -243,12 +278,17 @@ async function main() {
 		uniqueIdentityIndex: uniqueIdentityIndex.name,
 		linkedAuditCount: audits.length,
 		linkedReservationCount: evidenceByReservation.size,
+		invalidAuditEvidenceCount: invalidAuditEvidence.length,
+		invalidAuditEvidence,
+		staleLinkCount: staleLinks.length,
+		staleLinks,
 		alreadyProtectedCount: alreadyProtected.length,
 		candidateCount: candidates.length,
 		conflictCount: conflicts.length,
 		conflicts,
 		candidates: candidates.map((candidate) => ({
 			reservationId: candidate.reservationId,
+			previousIdentityKey: candidate.previousIdentityKey,
 			otaIdentityKey: candidate.otaIdentityKey,
 			auditIds: candidate.auditIds,
 		})),
@@ -267,15 +307,20 @@ async function main() {
 	console.log(`Before snapshot: ${beforeSnapshot}`);
 
 	for (const candidate of candidates) {
+		const identityFilter = candidate.previousIdentityKey
+			? { otaIdentityKey: candidate.previousIdentityKey }
+			: {
+					$or: [
+						{ otaIdentityKey: { $exists: false } },
+						{ otaIdentityKey: null },
+						{ otaIdentityKey: "" },
+					],
+			  };
 		const result = await Reservations.updateOne(
 			{
 				_id: candidate.reservation._id,
 				__v: Number(candidate.reservation.__v || 0),
-				$or: [
-					{ otaIdentityKey: { $exists: false } },
-					{ otaIdentityKey: null },
-					{ otaIdentityKey: "" },
-				],
+				...identityFilter,
 			},
 			{
 				$set: { otaIdentityKey: candidate.otaIdentityKey },
@@ -286,6 +331,7 @@ async function main() {
 						source: "ota-identity-backfill",
 						action: "canonical-ota-identity-added",
 						by: SYSTEM_ACTOR,
+						from: { otaIdentityKey: candidate.previousIdentityKey },
 						to: { otaIdentityKey: candidate.otaIdentityKey },
 						evidenceAuditIds: candidate.auditIds,
 					},
