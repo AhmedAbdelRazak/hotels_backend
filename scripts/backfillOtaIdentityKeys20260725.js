@@ -14,8 +14,10 @@ const Reservations = require("../models/reservations");
 const {
 	PROVIDER_LABELS,
 	buildOtaIdentityKey,
+	extractNormalizedReservation,
 	normalizeComparable,
 	normalizeConfirmation,
+	requiredNewReservationMissing,
 } = require("../services/otaReservationMapper");
 
 const APPLY = process.argv.includes("--apply");
@@ -29,6 +31,21 @@ const SYSTEM_ACTOR = {
 };
 
 const id = (value) => String(value?._id || value || "");
+
+function emailFromAudit(audit) {
+	return {
+		from: audit.from || "",
+		to: audit.to || "",
+		cc: audit.cc || "",
+		bcc: audit.bcc || "",
+		subject: audit.subject || "",
+		text: audit.bodyText || "",
+		html: audit.bodyHtml || "",
+		messageId: audit.messageId || "",
+		date: audit.receivedAt,
+		receivedAt: audit.receivedAt,
+	};
+}
 
 function normalizedProvider(value = "") {
 	return normalizeComparable(value).replace(/\s+/g, "");
@@ -118,7 +135,9 @@ async function main() {
 		provider: { $in: PROVIDERS },
 		confirmationNumber: { $type: "string", $ne: "" },
 	})
-		.select("_id provider confirmationNumber reservationMongoId receivedAt")
+		.select(
+			"_id provider confirmationNumber reservationMongoId receivedAt from to cc bcc subject bodyText bodyHtml messageId processingStatus"
+		)
 		.sort({ receivedAt: 1, _id: 1 })
 		.lean();
 
@@ -130,11 +149,19 @@ async function main() {
 		const otaIdentityKey = buildOtaIdentityKey(audit.provider, confirmationNumber);
 		if (!reservationId || !otaIdentityKey) continue;
 		if (!plausibleProviderConfirmation(audit.provider, confirmationNumber)) {
+			const current = extractNormalizedReservation(emailFromAudit(audit));
 			invalidAuditEvidence.push({
 				auditId: id(audit._id),
 				reservationId,
 				provider: audit.provider,
 				confirmationNumber,
+				currentParse: {
+					provider: current.provider || "",
+					intent: current.intent || "",
+					eventType: current.eventType || "",
+					confirmationNumber: current.confirmationNumber || "",
+					missing: requiredNewReservationMissing(current),
+				},
 			});
 			continue;
 		}
