@@ -1274,15 +1274,60 @@ function cleanAgodaValue(value = "") {
 function extractHotelRunnerArabicRoomBlocks(text = "") {
 	const blocks = [];
 	const source = String(text || "").replace(/\r/g, "");
-	const pattern =
-		/(?:^|\n)\s*([^\n]{2,180}?)\s*\n+\s*نوع\s+الغرفة\s+([\s\S]{2,220}?)\s+تاريخ\s+تسجيل\s+الوصول\s+([\s\S]{2,80}?)\s+تاريخ\s+تسجيل\s+المغادرة\s+([\s\S]{2,80}?)\s+عدد\s+الضيوف\s+(\d{1,2})\b([\s\S]{0,420}?)(?=(?:\n\s*[^\n]{2,180}?\s*\n+\s*نوع\s+الغرفة)|(?:\n\s*اذهب\s+إلى\s+الحجز)|$)/gi;
-	for (const match of source.matchAll(pattern)) {
-		const heading = cleanFieldValue(match[1] || "");
-		const roomType = cleanFieldValue(match[2] || "");
-		const checkinDate = parseDate(match[3] || "");
-		const checkoutDate = parseDate(match[4] || "");
-		const totalGuests = Number(match[5] || 0);
-		const tail = String(match[6] || "");
+	const markers = Array.from(source.matchAll(/نوع\s+الغرفة/gu));
+	const locate = (value, pattern, offset = 0) => {
+		const match = String(value || "").slice(offset).match(pattern);
+		return match
+			? { index: offset + match.index, length: match[0].length }
+			: null;
+	};
+	for (let index = 0; index < markers.length; index += 1) {
+		const marker = markers[index];
+		const start = Number(marker.index || 0);
+		const end =
+			index + 1 < markers.length
+				? Number(markers[index + 1].index || source.length)
+				: source.length;
+		const before = source.slice(0, start).trimEnd();
+		const heading = cleanFieldValue(
+			before.slice(before.lastIndexOf("\n") + 1)
+		);
+		const segment = source.slice(start + marker[0].length, end);
+		const checkinLabel = locate(segment, /تاريخ\s+تسجيل\s+الوصول/u);
+		const checkoutLabel = checkinLabel
+			? locate(
+					segment,
+					/تاريخ\s+تسجيل\s+المغادرة/u,
+					checkinLabel.index + checkinLabel.length
+			  )
+			: null;
+		const guestsLabel = checkoutLabel
+			? locate(
+					segment,
+					/عدد\s+الضيوف/u,
+					checkoutLabel.index + checkoutLabel.length
+			  )
+			: null;
+		if (!checkinLabel || !checkoutLabel || !guestsLabel) continue;
+		const roomType = cleanFieldValue(segment.slice(0, checkinLabel.index));
+		const checkinDate = parseDate(
+			segment.slice(
+				checkinLabel.index + checkinLabel.length,
+				checkoutLabel.index
+			)
+		);
+		const checkoutDate = parseDate(
+			segment.slice(
+				checkoutLabel.index + checkoutLabel.length,
+				guestsLabel.index
+			)
+		);
+		const afterGuests = segment.slice(guestsLabel.index + guestsLabel.length);
+		const guestMatch = afterGuests.match(/^\s*(\d{1,2})\b/u);
+		const totalGuests = Number(guestMatch?.[1] || 0);
+		const tail = guestMatch
+			? afterGuests.slice(Number(guestMatch.index || 0) + guestMatch[0].length)
+			: "";
 		const total = parseMoney(
 			findFirstPattern(tail, [
 				/الإجمالي\s*[:#-]?\s*((?:SAR|SR|﷼)?\s*[0-9][0-9,.]*)/i,
