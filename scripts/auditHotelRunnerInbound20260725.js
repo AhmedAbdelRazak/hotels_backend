@@ -17,6 +17,7 @@ const {
 } = require("../services/otaReservationMapper");
 
 const DETAILS = process.argv.includes("--details");
+const RESERVATION_SUBJECTS = process.argv.includes("--reservation-subjects");
 const sinceArgument = process.argv.find((argument) => argument.startsWith("--since="));
 const skipArgument = process.argv.find((argument) => argument.startsWith("--skip="));
 const limitArgument = process.argv.find((argument) => argument.startsWith("--limit="));
@@ -77,6 +78,9 @@ function summarizeEntry(entry) {
 		totalGuests: Number(normalized.totalGuests || 0),
 		roomCount: Number(normalized.roomCount || 0),
 		paymentCollectionModel: normalized.paymentCollectionModel || "",
+		requiresManualReview: normalized.requiresManualReview === true,
+		warnings: normalized.warnings || [],
+		errors: normalized.errors || [],
 		missing,
 	};
 }
@@ -159,10 +163,15 @@ async function main() {
 	if (!database) throw new Error("Missing DATABASE/MONGO connection string.");
 	await mongoose.connect(database, { autoIndex: false });
 
-	let auditQuery = InboundEmail.find({
+	const auditFilter = {
 		from: /hotelrunner\.com/i,
 		receivedAt: { $gte: since },
-	})
+		...(RESERVATION_SUBJECTS
+			? { subject: /(?:new|updated?|cancel(?:led|ation)?|modified?)\s+reservation|reservation\s+(?:new|updated?|cancel(?:led|ation)?|modified?)|حجز\s+جديد|تحديث\s+الحجز|إلغاء\s+الحجز/i }
+			: {}),
+	};
+	const totalMatchingAudits = await InboundEmail.countDocuments(auditFilter);
+	let auditQuery = InboundEmail.find(auditFilter)
 		.sort({ receivedAt: 1, _id: 1 })
 		.skip(skip);
 	if (limit) auditQuery = auditQuery.limit(limit);
@@ -292,6 +301,8 @@ async function main() {
 	const report = {
 		readOnly: true,
 		since: since.toISOString(),
+		reservationSubjectsOnly: RESERVATION_SUBJECTS,
+		totalMatchingAudits,
 		skip,
 		limit: limit || null,
 		hotelRunnerAudits: audits.length,
