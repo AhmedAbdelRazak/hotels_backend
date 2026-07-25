@@ -104,6 +104,8 @@ const REPAIRS = [
 		expectedRoomId: "6a40e0981a6d1850eb25c27c",
 		minimumRelatedAudits: 1,
 		allowHomogeneousMultiRoom: true,
+		multiRoomWarning:
+			"Two homogeneous triple-room rows, matching stay dates, aggregate occupancy, and payout were verified during the 2026-07-25 incident repair.",
 	},
 	{
 		provider: "expedia",
@@ -242,7 +244,8 @@ function applyVerifiedOverrides(normalized, repair) {
 		next.requiresManualReview = false;
 		next.manualReviewReasons = [];
 		next.warnings.push(
-			"Two homogeneous five-bed room blocks, matching stay dates, aggregate occupancy, and payout were verified during the 2026-07-25 incident repair."
+			repair.multiRoomWarning ||
+				"Two homogeneous five-bed room blocks, matching stay dates, aggregate occupancy, and payout were verified during the 2026-07-25 incident repair."
 		);
 	}
 	return next;
