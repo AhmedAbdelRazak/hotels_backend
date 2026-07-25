@@ -30,6 +30,7 @@ const {
 	reconcileOtaReservation,
 	resolvePaymentMapping,
 	resolveRoomMatch,
+	roomCapacityFromLabels,
 } = require("./otaReservationMapper");
 
 const HOTEL_ROOMS = [
@@ -295,6 +296,28 @@ test("OTA inbound totals above the safety limit require review", () => {
 			inboundEmailId: "",
 		}),
 		false
+	);
+});
+
+test("PMS capacity is derived from room descriptions when bedsCount contains a misleading default", () => {
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "familyRooms",
+			displayName: "Deluxe Family Accommodation",
+			description:
+				"Accommodates up to 5 guests and features 5 comfortable beds.",
+			bedsCount: 1,
+		}),
+		5
+	);
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "suite",
+			displayName: "City Suite",
+			description: "A suite with 4 beds and a private bathroom.",
+			bedsCount: 1,
+		}),
+		4
 	);
 });
 
@@ -573,6 +596,22 @@ test("repeated HotelRunner room blocks require manual review", () => {
 			.join(""),
 	});
 	assert.equal(mirroredMimeParts.requiresManualReview, false);
+
+	const verifiedMirroredText = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - New Reservation #R523378333",
+		text: [
+			"EXPEDIA (EXPEDIA)",
+			"Confirmation Number 2517494424 Guest Name Test Guest Country ~Not available Order Total $ 280.08 Booked Date Friday, July 24, 2026 12:40 Note Payment Method:HotelCollect",
+			roomBlock.replace("Total SAR 100", "Total $ 280.08"),
+			roomBlock.replace("Total SAR 100", "Total $ 280.08"),
+			"Go to reservation",
+		].join("\n"),
+	});
+	assert.equal(verifiedMirroredText.confirmationNumber, "2517494424");
+	assert.equal(verifiedMirroredText.sourcePresence.confirmationNumber, true);
+	assert.equal(verifiedMirroredText.requiresManualReview, false);
+	assert.equal(verifiedMirroredText.paymentCollectionModel, "hotel_collect");
 });
 
 test("ambiguous broad room categories and occupancy-only guesses fail closed", () => {
@@ -665,6 +704,43 @@ test("source-backed alphabetic Airbnb confirmation codes remain valid identities
 	assert.equal(normalized.provider, "airbnb");
 	assert.equal(normalized.confirmationNumber, "hmhbhjdjjm");
 	assert.equal(normalized.sourcePresence.confirmationNumber, true);
+});
+
+test("Airbnb two-column stay dates and guest totals remain source-backed", () => {
+	const normalized = extractNormalizedReservation({
+		from: "automated@airbnb.com",
+		receivedAt: "2026-07-25T11:26:06Z",
+		subject: "Reservation confirmed - Muhammad Alhassan arrives Jul 25",
+		text: [
+			"Muhammad Alhassan",
+			"Identity verified",
+			"PRIVATE ROOM-3BEDS - AJYAD HOTEL-15 MINS TO HARAM",
+			"Room",
+			"Check-in Checkout",
+			"Sat, Jul 25 Mon, Jul 27",
+			"2:00 PM 10:00 AM",
+			"Guests",
+			"1 adult",
+			"Confirmation code",
+			"HM9N2QZQWJ",
+			"Total (SAR) SAR 145.70",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.checkinDate, "2026-07-25");
+	assert.equal(normalized.checkoutDate, "2026-07-27");
+	assert.equal(normalized.totalGuests, 1);
+	assert.equal(normalized.sourcePresence.checkinDate, true);
+	assert.equal(normalized.sourcePresence.checkoutDate, true);
+	assert.equal(normalized.sourcePresence.totalGuests, true);
+	assert.equal(normalized.totalAmountSar, 145.7);
+	assert.equal(normalized.sourcePresence.amount, true);
+	assert.equal(
+		requiredNewReservationMissing(normalized).some((item) =>
+			/source-backed check-in|source-backed check-out|guest total/i.test(item)
+		),
+		false
+	);
 });
 
 test("Arabic HotelRunner Airbnb messages expose deterministic reservation fields", () => {

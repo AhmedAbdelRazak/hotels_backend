@@ -89,6 +89,55 @@ const REPAIRS = [
 		minimumRelatedAudits: 2,
 		allowHomogeneousMultiRoom: true,
 	},
+	{
+		provider: "agoda",
+		confirmationNumber: "2035375448",
+		primaryAuditId: "6a62f640dc48d4ba0af0b807",
+		guestName: /abdullah alamoudi/i,
+		checkinDate: "2026-07-24",
+		checkoutDate: "2026-07-25",
+		totalAmountSar: 100,
+		totalPayoutSar: 72.12,
+		roomCount: 2,
+		totalGuests: 2,
+		roomName: /Triple Bed Room/i,
+		expectedRoomId: "6a40e0981a6d1850eb25c27c",
+		minimumRelatedAudits: 1,
+		allowHomogeneousMultiRoom: true,
+	},
+	{
+		provider: "expedia",
+		confirmationNumber: "2517494424",
+		primaryAuditId: "6a633308eb7d2463d72fb63a",
+		guestName: /Shoaib Malik/i,
+		checkinDate: "2026-09-12",
+		checkoutDate: "2026-09-24",
+		totalAmountSar: 1050.3,
+		totalPayoutSar: 0,
+		roomCount: 1,
+		totalGuests: 1,
+		roomName: /Comfort Double Room/i,
+		expectedRoomId: "6a40df5f1a6d1850eb25c183",
+		minimumRelatedAudits: 1,
+	},
+	{
+		provider: "agoda",
+		confirmationNumber: "2035466459",
+		primaryAuditId: "6a634901eb7d2463d72fbd4a",
+		guestName: /Aukhil Uddin/i,
+		checkinDate: "2026-07-27",
+		checkoutDate: "2026-07-30",
+		totalAmountSar: 230.01,
+		totalPayoutSar: 165.87,
+		roomCount: 1,
+		totalGuests: 4,
+		roomName: /Deluxe Family Room 2/i,
+		expectedRoomId: "6a40e4ec1a6d1850eb25c635",
+		minimumRelatedAudits: 2,
+		overrideRoomName: "Deluxe Family Room - 5 beds",
+		overrideWarning:
+			"The guarded semantic matcher selected the closest active family-room PMS inventory during the verified incident repair.",
+	},
 ];
 
 const SYSTEM_ACTOR = {
@@ -185,7 +234,8 @@ function applyVerifiedOverrides(normalized, repair) {
 		next.roomName = repair.overrideRoomName;
 		next.sourcePresence = { ...next.sourcePresence, roomName: true };
 		next.warnings.push(
-			"Room capacity was corroborated by the matching HotelRunner copy during the 2026-07-25 incident repair."
+			repair.overrideWarning ||
+				"Room capacity was corroborated by the matching HotelRunner copy during the 2026-07-25 incident repair."
 		);
 	}
 	if (repair.allowHomogeneousMultiRoom) {

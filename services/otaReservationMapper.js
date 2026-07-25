@@ -1891,6 +1891,29 @@ function parseAirbnbMonthDay(value = "", year) {
 	return null;
 }
 
+function extractAirbnbPairedStayLabels(text = "") {
+	const lines = normalizedLines(text);
+	const headingIndex = lines.findIndex((line) =>
+		/^check[ -]?in\s+check[ -]?out$/i.test(line)
+	);
+	if (headingIndex < 0) return { checkinRaw: "", checkoutRaw: "" };
+	const monthDayPattern =
+		/(?:(?:mon|tue|wed|thu|fri|sat|sun)(?:day)?[,]?\s+)?([a-z]{3,9}\s+\d{1,2})(?!\d)/gi;
+	for (
+		let index = headingIndex + 1;
+		index < Math.min(lines.length, headingIndex + 4);
+		index += 1
+	) {
+		const matches = Array.from(lines[index].matchAll(monthDayPattern)).map(
+			(match) => normalizeWhitespace(match[1])
+		);
+		if (matches.length >= 2) {
+			return { checkinRaw: matches[0], checkoutRaw: matches[1] };
+		}
+	}
+	return { checkinRaw: "", checkoutRaw: "" };
+}
+
 function airbnbReferenceDate(email = {}, text = "") {
 	const forwardedDate = findFirstPattern(text, [
 		/(?:^|\n)\s*Date:\s*([^\n]{5,160})/i,
@@ -1902,8 +1925,15 @@ function airbnbReferenceDate(email = {}, text = "") {
 }
 
 function extractAirbnbStayDates(email = {}, text = "") {
-	const checkinRaw = findNextLineAfterExactLabel(text, "Check-in", 5);
-	const checkoutRaw = findNextLineAfterExactLabel(text, "Checkout", 5);
+	const pairedStayLabels = extractAirbnbPairedStayLabels(text);
+	const checkinRaw = firstNonEmpty(
+		findNextLineAfterExactLabel(text, "Check-in", 5),
+		pairedStayLabels.checkinRaw
+	);
+	const checkoutRaw = firstNonEmpty(
+		findNextLineAfterExactLabel(text, "Checkout", 5),
+		pairedStayLabels.checkoutRaw
+	);
 	const reference = airbnbReferenceDate(email, text);
 	let checkin = /\b\d{4}\b/.test(checkinRaw) ? parseDate(checkinRaw) : null;
 	let checkout = /\b\d{4}\b/.test(checkoutRaw) ? parseDate(checkoutRaw) : null;
@@ -1949,7 +1979,10 @@ function extractAirbnbMoneyAfterLabel(text = "", label = "") {
 	if (parsed.amount) return parsed;
 	const patternLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
 	const match = String(text || "").match(
-		new RegExp(`${patternLabel}\\s*\\n\\s*((?:SR|SAR|USD|US\\$|\\$)\\s*[0-9][0-9,.]*)`, "i")
+		new RegExp(
+			`${patternLabel}[ \\t]*(?:\\n[ \\t]*|[ \\t]+)((?:SR|SAR|USD|US\\$|\\$)\\s*[0-9][0-9,.]*)`,
+			"i"
+		)
 	);
 	return parseMoney(match?.[1] || "");
 }
@@ -2908,7 +2941,7 @@ function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
 		!!vcc.cardLast4;
 	if (hasVirtualCard) return "virtual_card";
 	if (
-		/(hotel\s+collect|hotel\s+collects|pay\s+at\s+(?:the\s+)?property|pay\s+at\s+(?:the\s+)?hotel|pay\s+on\s+arrival|guest\s+pays|traveler\s+pays|collect\s+from\s+guest)/i.test(
+		/(hotel\s*collect|hotel\s+collects|pay\s+at\s+(?:the\s+)?property|pay\s+at\s+(?:the\s+)?hotel|pay\s+on\s+arrival|guest\s+pays|traveler\s+pays|collect\s+from\s+guest)/i.test(
 			haystack
 		)
 	) {
@@ -3077,7 +3110,32 @@ function extractHotelRunnerRoomBlocks(text = "") {
 		).amount;
 		if (room) blocks.push(`${room}|${checkin}|${checkout}|${total || 0}`);
 	}
+	const uniqueBlocks = Array.from(new Set(blocks));
+	if (blocks.length > 1 && uniqueBlocks.length === 1) {
+		const orderTotal = parseMoney(
+			findFirstPattern(text, [
+				/\bOrder\s+Total\s*[:#-]?\s*((?:[A-Z]{3}|US\$|\$|ï·¼)?\s*[0-9][0-9,.]*)/i,
+			])
+		).amount;
+		const repeatedBlockTotal = Number(uniqueBlocks[0].split("|").at(-1) || 0);
+		if (
+			orderTotal > 0 &&
+			repeatedBlockTotal > 0 &&
+			Math.abs(orderTotal - repeatedBlockTotal) <= 0.01
+		) {
+			return uniqueBlocks;
+		}
+	}
 	return blocks;
+}
+
+function extractHotelRunnerConfirmationNumber(text = "") {
+	return cleanConfirmationCandidate(
+		findFirstPattern(text, [
+			/\bConfirmation\s*(?:Number|Code|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
+			/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
+		])
+	);
 }
 
 function extractNormalizedReservation(email) {
@@ -3097,11 +3155,15 @@ function extractNormalizedReservation(email) {
 	const isHotelRunnerSender = /@(?:[a-z0-9.-]+\.)?hotelrunner\.com\b/i.test(
 		String(email.from || "")
 	);
+	const rawHotelRunnerText = isHotelRunnerSender
+		? String(email.text || "") || htmlToText(email.html || "")
+		: "";
 	const hotelRunnerArabicFields = isHotelRunnerSender
-		? extractHotelRunnerArabicFields(
-				String(email.text || "") || htmlToText(email.html || "")
-		  )
+		? extractHotelRunnerArabicFields(rawHotelRunnerText)
 		: {};
+	const hotelRunnerConfirmationNumber = isHotelRunnerSender
+		? extractHotelRunnerConfirmationNumber(rawHotelRunnerText)
+		: "";
 	const hotelRunnerRoomBlocks = isHotelRunnerSender
 		? [
 				extractHotelRunnerRoomBlocks(email.text || ""),
@@ -3141,7 +3203,8 @@ function extractNormalizedReservation(email) {
 	const explicitProviderConfirmation = firstNonEmpty(
 		airbnbFields.confirmationNumber,
 		agodaFields.confirmationNumber,
-		hotelRunnerArabicFields.confirmationNumber
+		hotelRunnerArabicFields.confirmationNumber,
+		hotelRunnerConfirmationNumber
 	);
 	const reservationCandidate = firstNonEmpty(
 		explicitProviderConfirmation,
@@ -3705,15 +3768,18 @@ function extractNormalizedReservation(email) {
 			adults:
 				!!adultsField ||
 				!!agodaFields.sourcePresence?.adults ||
+				airbnbFields.adults > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.adults > 0,
 			children:
 				!!childrenField ||
 				!!agodaFields.sourcePresence?.children ||
+				airbnbFields.children > 0 ||
 				tableOccupancy.children > 0,
 			totalGuests:
 				!!totalGuestsField ||
 				!!agodaFields.sourcePresence?.totalGuests ||
+				airbnbFields.totalGuests > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.totalGuests > 0,
 			roomCount:
@@ -3907,12 +3973,24 @@ function roomCapacityFromLabels(room = {}) {
 			room.displayName_OtherLanguage,
 			roomTypeLabel(room.roomType),
 			room.roomType,
+			room.description,
+			room.description_OtherLanguage,
 		]
 			.filter(Boolean)
 			.join(" ");
 	const explicitCapacity = explicitRoomCapacity(rawLabel);
 	if (explicitCapacity) return explicitCapacity;
 	const label = normalizeComparable(rawLabel);
+	const describedNumericCapacity = Number(
+		label.match(
+			/\b(?:accommodat(?:es|ing)?(?: up to)?|capacity(?: of)?|up to) ([1-9]\d?) (?:guests?|people|persons?)\b/
+		)?.[1] ||
+			label.match(/\b(?:features?|with) ([1-9]\d?)(?: comfortable)? beds?\b/)?.[1] ||
+			0
+	);
+	if (describedNumericCapacity) return describedNumericCapacity;
+	const configuredBedsCount = Number(room.bedsCount || 0);
+	if (configuredBedsCount > 1) return configuredBedsCount;
 	if (/\b(single|individual)\b/.test(label)) return 1;
 	if (/\b(double|twin|king|queen)\b/.test(label)) return 2;
 	if (/\btriple\b/.test(label)) return 3;
@@ -4142,6 +4220,10 @@ async function resolveRoomMatchWithAi(hotelDetails, normalized = {}) {
 		normalized,
 		deterministicMatch,
 		sourceCapacity: explicitRoomCapacity(normalized.roomName),
+		minimumCapacity:
+			Number(normalized.roomCount || 1) === 1
+				? Number(normalized.totalGuests || 0)
+				: 0,
 		candidateCapacities,
 	});
 	if (!aiMatch.usedAI) {
@@ -7377,6 +7459,7 @@ module.exports = {
 	buildUnmappedOtaReviewReservationDocument,
 	buildExistingReservationUpdateSet,
 	explicitRoomCapacity,
+	roomCapacityFromLabels,
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
 	otaSourceAuthority,
