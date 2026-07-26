@@ -65,8 +65,8 @@ const reservation = () => ({
 	paid_amount_breakdown: {
 		paid_online_via_link: 0,
 		paid_at_hotel_cash: 0,
-		paid_online_other_platforms: 0,
-		payment_comments: "",
+		paid_online_other_platforms: 114,
+		payment_comments: "Agoda collected by platform",
 	},
 	updatedAt: new Date("2026-07-25T20:00:00.000Z"),
 });
@@ -178,21 +178,35 @@ test("builds a capture record that the UI summary recognizes without changing pr
 	assert.equal(saved.paypal_details.external_virtual_terminal.transaction_fee_usd, 1.25);
 	assert.equal(saved.paypal_details.external_virtual_terminal.net_amount_usd, 27.21);
 	assert.equal(saved.paypal_details.external_virtual_terminal.metadata.hotel_name, "Zad Ajyad");
-	assert.equal(saved.paid_amount_breakdown.paid_online_other_platforms, 28.46);
+	assert.deepEqual(saved.paid_amount_breakdown, original.paid_amount_breakdown);
+	assert.equal(
+		Object.keys(set).some((path) => path.startsWith("paid_amount_breakdown.")),
+		false,
+	);
 	assert.equal(audit.backupId, "backup-1");
 });
 
-test("detects any existing money and builds an updatedAt compare-and-set guard", () => {
+test("distinguishes structured capture state from existing SAR reservation accounting", () => {
 	const original = reservation();
 	assert.equal(hasAnyCaptureState(original), false);
 	original.paid_amount_breakdown.paid_online_via_link = 0.01;
+	assert.equal(hasAnyCaptureState(original), false);
+	original.payment_details.vccCharged = true;
+	assert.equal(hasAnyCaptureState(original), true);
+	original.payment_details.vccCharged = false;
+	original.paypal_details.captured_total_usd = 0.01;
+	assert.equal(hasAnyCaptureState(original), true);
+	original.paypal_details.captured_total_usd = 0;
+	original.bofa_payment = { vcc: { charged: true } };
 	assert.equal(hasAnyCaptureState(original), true);
 
 	const filter = buildConcurrencyFilter(reservation());
 	assert.equal(filter.reservation_id, "681965411");
 	assert.deepEqual(filter.updatedAt, new Date("2026-07-25T20:00:00.000Z"));
 	assert.deepEqual(filter["payment_details.captured"], { $ne: true });
+	assert.deepEqual(filter["payment_details.bofaVccCharged"], { $ne: true });
 	assert.deepEqual(filter["vcc_payment.charged"], { $ne: true });
+	assert.deepEqual(filter["bofa_payment.vcc.charged"], { $ne: true });
 });
 
 test("an idempotent rerun requires every sanitized evidence field to agree", () => {

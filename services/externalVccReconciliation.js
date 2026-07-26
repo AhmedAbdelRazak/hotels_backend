@@ -238,9 +238,10 @@ const paymentBreakdownTotalCents = (breakdown = {}) =>
 const hasAnyCaptureState = (reservation = {}) =>
 	reservation.payment_details?.captured === true ||
 	reservation.payment_details?.vccCharged === true ||
+	reservation.payment_details?.bofaVccCharged === true ||
 	reservation.vcc_payment?.charged === true ||
-	Number(reservation.paypal_details?.captured_total_usd || 0) > 0 ||
-	paymentBreakdownTotalCents(reservation.paid_amount_breakdown) > 0;
+	reservation.bofa_payment?.vcc?.charged === true ||
+	Number(reservation.paypal_details?.captured_total_usd || 0) > 0;
 
 const isSameCompletedCapture = (reservation = {}, evidence = {}) => {
 	const summary = getReservationVccCaptureSummary(reservation);
@@ -279,13 +280,6 @@ const buildExternalCaptureSet = ({
 		checkin_date: formatDateOnly(reservation.checkin_date),
 		checkout_date: formatDateOnly(reservation.checkout_date),
 	};
-	const paymentComment = [
-		`OTA virtual card captured externally through PayPal Virtual Terminal: USD ${centsToFixed(
-			evidence.grossCents,
-		)}.`,
-		`Transaction ${evidence.transactionId}; invoice/OTA confirmation ${evidence.invoiceId}.`,
-	].join(" ");
-
 	return {
 		"payment_details.captured": true,
 		"payment_details.vccCharged": true,
@@ -344,9 +338,6 @@ const buildExternalCaptureSet = ({
 			captured_at: transactionAt,
 			metadata,
 		},
-		"paid_amount_breakdown.paid_online_other_platforms":
-			evidence.grossAmountUsd,
-		"paid_amount_breakdown.payment_comments": paymentComment,
 		updatedAt: new Date(recordedAt),
 		__audit: {
 			at: new Date(recordedAt),
@@ -377,7 +368,9 @@ const buildConcurrencyFilter = (reservation) => {
 		reservation_id: reservation.reservation_id,
 		"payment_details.captured": { $ne: true },
 		"payment_details.vccCharged": { $ne: true },
+		"payment_details.bofaVccCharged": { $ne: true },
 		"vcc_payment.charged": { $ne: true },
+		"bofa_payment.vcc.charged": { $ne: true },
 	};
 	if (reservation.updatedAt) filter.updatedAt = reservation.updatedAt;
 	else filter.updatedAt = { $exists: false };
@@ -399,6 +392,7 @@ const protectedReservationSnapshot = (reservation = {}) => ({
 	total_amount: reservation.total_amount,
 	sub_total: reservation.sub_total,
 	paid_amount: reservation.paid_amount,
+	paid_amount_breakdown: reservation.paid_amount_breakdown,
 	adminPricing: reservation.adminPricing,
 	financial_cycle: reservation.financial_cycle,
 	reservation_status: reservation.reservation_status,

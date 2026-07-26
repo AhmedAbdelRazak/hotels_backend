@@ -20,7 +20,7 @@ It is read-only unless `--apply` is supplied. Every run must start without `--ap
 - Require currency `USD`.
 - Use the PayPal Invoice ID as the OTA confirmation number. It must equal the reservation's authoritative `reservation_id` exactly.
 - Require the external transaction ID to be unique across all reservations.
-- Refuse any target that already contains captured or paid money, unless the exact same transaction is already fully reconciled. This protects against double recording and overcharging.
+- Refuse any target that already contains structured captured-card evidence, unless the exact same transaction is already fully reconciled. Existing reservation accounting in `paid_amount` or `paid_amount_breakdown` is not capture evidence: those fields are SAR business records and must remain unchanged.
 - Require gross amount to equal transaction fee plus net amount, to the cent.
 - Require an ISO-8601 transaction timestamp with an explicit timezone/UTC offset.
 - Never accept or store the full card number, CVV/CVC, expiry, billing street address, credentials, screenshots, or secret keys in the evidence JSON.
@@ -141,7 +141,7 @@ The dry run independently checks:
 4. Check-in and check-out exist.
 5. Hotel name resolves.
 6. Transaction ID is not linked to another reservation.
-7. No captured/paid money already exists.
+7. No structured captured-card state already exists. Ordinary SAR reservation payment accounting may exist and is protected rather than overwritten.
 8. Existing same-transaction data, if any, is internally complete and matches the evidence.
 
 ## Step 3: apply the identical evidence
@@ -187,9 +187,6 @@ The workflow writes capture evidence only under these top-level areas:
   - charged state/count
   - USD captured total
   - last success, transaction, and sanitized capture metadata
-- `paid_amount_breakdown`
-  - `paid_online_other_platforms` set to the externally captured gross USD amount
-  - a concise reconciliation comment
 - `reservationAuditLog`
   - one appended reconciliation entry with invoice, transaction, amount, source, timestamp, and backup ID
 - `updatedAt`
@@ -214,6 +211,7 @@ The post-write hash check verifies that these facts remain identical:
 - `total_amount`
 - `sub_total`
 - `paid_amount`
+- `paid_amount_breakdown`
 - `adminPricing`
 - `financial_cycle`
 - `reservation_status`
@@ -221,7 +219,7 @@ The post-write hash check verifies that these facts remain identical:
 - `pendingConfirmation`
 - `customer_details`
 
-This separation is intentional. The external capture amount is USD evidence; it must not overwrite SAR guest price, OTA payout, hotel cost, platform margin, commission, room inventory, or lifecycle state.
+This separation is intentional. The external capture amount is USD evidence; it must not overwrite SAR guest price, existing payment breakdowns/comments, OTA payout, hotel cost, platform margin, commission, room inventory, or lifecycle state.
 
 ## Step 4: verify the application and database
 
