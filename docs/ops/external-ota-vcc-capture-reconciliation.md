@@ -129,6 +129,8 @@ The report must say:
 - the expected invoice, transaction, exact amount, provider, hotel, check-in, check-out, and reservation Mongo ID
 - `"protectedFields": "unchanged"`
 
+If the exact capture was already saved correctly, the dry run instead reports `"action": "existing_reconciliation_verified"` and says that no apply is needed.
+
 Stop if any field differs from the processor evidence or the intended reservation. Do not edit the script to bypass a rejection.
 
 The dry run independently checks:

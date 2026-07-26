@@ -251,7 +251,9 @@ const preflightReport = (plan) => ({
 	hotelName: plan.hotelName,
 	checkinDate: new Date(plan.reservation.checkin_date).toISOString().slice(0, 10),
 	checkoutDate: new Date(plan.reservation.checkout_date).toISOString().slice(0, 10),
-	action: plan.alreadyRecorded ? "verify_existing_reconciliation" : "would_reconcile",
+	action: plan.alreadyRecorded
+		? "existing_reconciliation_verified"
+		: "would_reconcile",
 	protectedFields: "unchanged",
 });
 
@@ -346,13 +348,17 @@ const main = async () => {
 	const plans = [];
 	for (const evidence of evidenceBatch) plans.push(await buildPlan(evidence));
 	if (!APPLY) {
+		const hasPendingReconciliation = plans.some(
+			(plan) => !plan.alreadyRecorded,
+		);
 		return {
 			ok: true,
 			mode: "dry-run",
 			writesPerformed: false,
 			results: plans.map(preflightReport),
-			nextStep:
-				"Re-check the source evidence and run the identical input with --apply only if every row is correct.",
+			nextStep: hasPendingReconciliation
+				? "Re-check the source evidence and run the identical input with --apply only if every would_reconcile row is correct."
+				: "No apply is needed. Every supplied capture is already reconciled and verified.",
 		};
 	}
 

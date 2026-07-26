@@ -16,6 +16,7 @@ const {
 } = require("./externalVccReconciliation");
 const {
 	existingCaptureMatchesEvidence,
+	preflightReport,
 } = require("../scripts/reconcileExternalVccCapture");
 
 const evidence = (overrides = {}) => ({
@@ -215,4 +216,19 @@ test("an idempotent rerun requires every sanitized evidence field to agree", () 
 	saved.paypal_details.external_virtual_terminal.net_amount_usd = 27.21;
 	saved.paypal_details.external_virtual_terminal.card_last4 = "9999";
 	assert.equal(existingCaptureMatchesEvidence(saved, normalized), false);
+});
+
+test("dry-run wording clearly distinguishes new work from an existing verified capture", () => {
+	const plan = {
+		evidence: normalizeEvidence(evidence()),
+		reservation: reservation(),
+		hotelName: "Zad Ajyad",
+		alreadyRecorded: false,
+	};
+	assert.equal(preflightReport(plan).action, "would_reconcile");
+	plan.alreadyRecorded = true;
+	assert.equal(
+		preflightReport(plan).action,
+		"existing_reconciliation_verified",
+	);
 });
