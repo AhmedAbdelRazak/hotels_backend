@@ -79,7 +79,7 @@ test("generic reservation edits cannot bypass the dedicated OTA pricing workflow
 			status: 409,
 			code: "ota_pricing_dedicated_route_required",
 			message:
-				"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, PMS room mapping, nightly prices, and hotel base total remain validated together.",
+				"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, saved OTA room identity, nightly prices, and hotel base total remain validated together.",
 		}
 	);
 	assert.equal(
@@ -324,6 +324,58 @@ test("hotel assignment invalidates room ids and hotel-specific root pricing only
 	assert.equal(invalidated[0].pricingByDay[0].netAfterExpenses, 150);
 });
 
+test("pricing review preserves saved OTA room identity and accepts only pricing changes", () => {
+	const persistedRooms = [
+		reviewedRoom("", {
+			hotelRoomConfigId: undefined,
+			room_type: "familyRooms",
+			displayName: "Family - 6 Persons",
+			roomMappingStatus: "unreviewed",
+		}),
+	];
+	const requestedRooms = [
+		{
+			...persistedRooms[0],
+			chosenPrice: "88.00",
+			pricingByDay: persistedRooms[0].pricingByDay.map((day) => ({
+				...day,
+				rootPrice: 55,
+			})),
+		},
+	];
+
+	const preserved = otaPricing.preservePersistedOtaRoomIdentity(
+		requestedRooms,
+		persistedRooms,
+	);
+	assert.equal(preserved.ready, true);
+	assert.equal(preserved.rooms[0].room_type, "familyRooms");
+	assert.equal(preserved.rooms[0].displayName, "Family - 6 Persons");
+	assert.equal(preserved.rooms[0].count, 1);
+	assert.equal(preserved.rooms[0].hotelRoomConfigId, undefined);
+	assert.equal(preserved.rooms[0].chosenPrice, "88.00");
+	assert.equal(preserved.rooms[0].pricingByDay[0].rootPrice, 55);
+	const changedIdentity = otaPricing.preservePersistedOtaRoomIdentity(
+		[
+			{
+				...requestedRooms[0],
+				displayName: "Different PMS room",
+			},
+		],
+		persistedRooms,
+	);
+	assert.equal(changedIdentity.ready, false);
+	assert.equal(changedIdentity.code, "ota_room_structure_changed");
+	assert.equal(changedIdentity.roomIndex, 0);
+
+	const changedStructure = otaPricing.preservePersistedOtaRoomIdentity(
+		[],
+		persistedRooms,
+	);
+	assert.equal(changedStructure.ready, false);
+	assert.equal(changedStructure.code, "ota_room_structure_changed");
+});
+
 test("pricing review stamps only an exact unambiguous current hotel room id", () => {
 	const doubleObjectId = new mongoose.Types.ObjectId();
 	const doubleId = String(doubleObjectId);
@@ -410,7 +462,7 @@ test("room mapping options expose only active canonical PMS room identities", ()
 	assert.equal(Object.hasOwn(options[0], "pricingRate"), false);
 });
 
-test("release validates the current room identity and both root/client totals", () => {
+test("release preserves saved OTA room identity and validates root/client totals", () => {
 	const configId = roomId();
 	const hotel = {
 		roomCountDetails: [
@@ -431,20 +483,32 @@ test("release validates the current room identity and both root/client totals", 
 	assert.equal(valid.dailyClientTotal, 200);
 	assert.equal(valid.hotelBaseTotal, 120);
 
-	const legacyWithoutConfigId = otaEmailReservation(configId, {
+	const sourceRoomWithoutConfigId = otaEmailReservation(configId, {
 		pickedRoomsType: [
-			reviewedRoom(configId, { hotelRoomConfigId: undefined }),
+			reviewedRoom(configId, {
+				hotelRoomConfigId: undefined,
+				room_type: "familyRooms",
+				displayName: "Family - 6 Persons",
+			}),
 		],
 		pickedRoomsPricing: [
-			reviewedRoom(configId, { hotelRoomConfigId: undefined }),
+			reviewedRoom(configId, {
+				hotelRoomConfigId: undefined,
+				room_type: "familyRooms",
+				displayName: "Family - 6 Persons",
+			}),
 		],
 	});
-	const migratedAtRelease = otaPricing.validateOtaReleaseHotelBasePrice(
-		legacyWithoutConfigId,
+	const preservedAtRelease = otaPricing.validateOtaReleaseHotelBasePrice(
+		sourceRoomWithoutConfigId,
 		{ hotel },
 	);
-	assert.equal(migratedAtRelease.ready, true);
-	assert.equal(migratedAtRelease.canonicalRooms[0].hotelRoomConfigId, configId);
+	assert.equal(preservedAtRelease.ready, true);
+	assert.equal(preservedAtRelease.canonicalRooms[0].hotelRoomConfigId, undefined);
+	assert.equal(
+		preservedAtRelease.canonicalRooms[0].displayName,
+		"Family - 6 Persons",
+	);
 
 	const renamedHotel = {
 		roomCountDetails: [
@@ -457,8 +521,8 @@ test("release validates the current room identity and both root/client totals", 
 	const stale = otaPricing.validateOtaReleaseHotelBasePrice(reservation, {
 		hotel: renamedHotel,
 	});
-	assert.equal(stale.ready, false);
-	assert.equal(stale.code, "ota_room_mapping_stale");
+	assert.equal(stale.ready, true);
+	assert.equal(stale.canonicalRooms[0].displayName, "Deluxe Double");
 });
 
 test("matching totals cannot hide a missing nightly stay date", () => {
