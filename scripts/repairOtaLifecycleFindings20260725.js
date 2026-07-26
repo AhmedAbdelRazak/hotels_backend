@@ -11,6 +11,8 @@ const os = require("node:os");
 const path = require("node:path");
 const mongoose = require("mongoose");
 
+mongoose.set("strictQuery", true);
+
 const HotelDetails = require("../models/hotel_details");
 const InboundEmail = require("../models/inbound_email");
 const Reservations = require("../models/reservations");
