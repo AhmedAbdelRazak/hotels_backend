@@ -115,13 +115,27 @@ const cleanStatusWarnings = (warnings = []) =>
 const hasStrongNewReservationSubject = (subject = "") => {
 	const value = normalizeWhitespace(subject);
 	if (!value) return false;
-	if (/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(value)) {
+	if (
+		/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(
+			value
+		) ||
+		/(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621)\s+(?:\u0627\u0644)?\u062d\u062c\u0632/i.test(
+			value
+		)
+	) {
 		return false;
 	}
-	if (/(modified|modification|changed|updated|amended|amendment)/i.test(value)) {
+	if (
+		/(modified|modification|changed|updated|amended|amendment)/i.test(
+			value
+		) ||
+		/(?:\u062a\u062d\u062f\u064a\u062b|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631)\s+(?:\u0627\u0644)?\u062d\u062c\u0632/i.test(
+			value
+		)
+	) {
 		return false;
 	}
-	return /(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed)/i.test(
+	return /(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed|\u062d\u062c\u0632\s+\u062c\u062f\u064a\u062f)/i.test(
 		value
 	);
 };

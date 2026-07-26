@@ -2854,12 +2854,41 @@ function resolveBookingSource({ provider = "", providerLabel = "", from = "", su
 	return cleanBookingSourceCandidate(domainRoot) || "OTA Email";
 }
 
+function hasArabicCancellationSignal(value = "") {
+	const source = String(value || "");
+	const requestOrPolicy =
+		/(?:\u0637\u0644\u0628|\u0633\u064a\u0627\u0633\u0629|\u0631\u0633\u0648\u0645|\u0627\u0633\u062a\u0641\u0633\u0627\u0631)\s+(?:\u0627\u0644)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621)/i.test(
+			source
+		);
+	if (requestOrPolicy) return false;
+	return /(?:^|[\n\r\-:\s])(?:\u062a\u0645\s+)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621)\s+(?:\u0627\u0644)?\u062d\u062c\u0632(?:\s|#|$)|(?:\u0627\u0644)?\u062d\u062c\u0632\s+(?:\u0645\u0644\u063a\u064a|\u0645\u0644\u063a\u0649|\u0623\u0644\u063a\u064a)/i.test(
+		source
+	);
+}
+
+function hasArabicModificationSignal(value = "") {
+	const source = String(value || "");
+	return /(?:^|[\n\r\-:\s])(?:\u062a\u0645\s+)?(?:\u062a\u062d\u062f\u064a\u062b|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631)\s+(?:\u0627\u0644)?\u062d\u062c\u0632(?:\s|#|$)/i.test(
+		source
+	);
+}
+
 function hasStrongNewReservationSignal(value = "") {
 	const subjectOnly = String(value || "").toLowerCase();
-	if (/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(subjectOnly)) {
+	if (
+		/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(
+			subjectOnly
+		) ||
+		hasArabicCancellationSignal(subjectOnly)
+	) {
 		return false;
 	}
-	if (/(modified|modification|changed|updated|amended|amendment)/i.test(subjectOnly)) {
+	if (
+		/(modified|modification|changed|updated|amended|amendment)/i.test(
+			subjectOnly
+		) ||
+		hasArabicModificationSignal(subjectOnly)
+	) {
 		return false;
 	}
 	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed|حجز\s+جديد)/i.test(
@@ -2870,6 +2899,14 @@ function hasStrongNewReservationSignal(value = "") {
 function hasActionableCancellationSignal(subject = "", text = "") {
 	const subjectOnly = String(subject || "").toLowerCase();
 	const body = String(text || "").toLowerCase();
+	if (hasArabicCancellationSignal(subjectOnly)) return true;
+	if (
+		/(?:^|\n)\s*(?:\u062a\u0645\s+)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621)\s+(?:\u0627\u0644)?\u062d\u062c\u0632(?:\s|#|$)/i.test(
+			body
+		)
+	) {
+		return true;
+	}
 	const isRequestOrPolicy =
 		/\b(waiver|request|inquiry|question|message|refund|policy|fee)\b/i.test(
 			subjectOnly
@@ -2901,7 +2938,12 @@ function detectEventType({ subject = "", text = "" } = {}) {
 	}
 	if (hasActionableCancellationSignal(subject, text)) return "cancelled";
 	if (hasActionableNoShowSignal(subject, text)) return "no_show";
-	if (/(modified|modification|changed|updated|amended|amendment)/i.test(haystack)) {
+	if (
+		/(modified|modification|changed|updated|amended|amendment)/i.test(
+			haystack
+		) ||
+		hasArabicModificationSignal(subjectOnly)
+	) {
 		return "modified";
 	}
 	if (/(?:^|\n)\s*status\s+booked\b/i.test(String(text || ""))) {
@@ -3973,6 +4015,7 @@ function extractNormalizedReservation(email) {
 			to: email.to || "",
 			subject: email.subject || "",
 			messageId: email.messageId || "",
+			receivedAt: email.receivedAt || email.date || null,
 			textHash: hashText(text),
 			safeSnippet: safeSnippet(text),
 		},
@@ -4840,6 +4883,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 				otaPaymentInstructions: normalized.paymentInstructions || "",
 				otaLastInboundEmailId: normalized.inboundEmailId || "",
 				otaLastEmailAt: new Date(),
+				otaLastSourceReceivedAt: otaSourceReceivedAt(normalized),
 				otaLastEventType: normalized.eventType,
 			},
 		},
@@ -5265,16 +5309,66 @@ function buildExistingReservationUpdateSet({
 	}
 
 	if (incomingStatus) {
+		const statusUpdatedAt = new Date();
 		set.reservation_status = incomingStatus;
 		if (statusOnlyUpdate) set.state = incomingStatus;
+		if (statusOnlyUpdate) {
+			const existingPending =
+				existing?.pendingConfirmation &&
+				typeof existing.pendingConfirmation === "object"
+					? existing.pendingConfirmation
+					: {};
+			const providerName = normalized.providerLabel || providerLabel || "OTA";
+			const pendingConfirmation = {
+				...existingPending,
+				status: incomingStatus,
+				lastUpdatedAt: statusUpdatedAt,
+				lastUpdatedBy: {
+					name: "OTA inbound automation",
+					role: "system",
+				},
+				source: "ota_email_status",
+			};
+			if (["cancelled", "no_show"].includes(incomingStatus)) {
+				pendingConfirmation.rejectionReason = `${providerName} ${
+					incomingStatus === "cancelled" ? "cancellation" : "no-show"
+				} email received.`;
+				pendingConfirmation.confirmationReason = "";
+				pendingConfirmation.confirmedAt = null;
+				pendingConfirmation.rejectedAt = null;
+				pendingConfirmation.cancelledAt =
+					incomingStatus === "cancelled" ? statusUpdatedAt : null;
+				pendingConfirmation.noShowAt =
+					incomingStatus === "no_show" ? statusUpdatedAt : null;
+			} else if (incomingStatus === "confirmed") {
+				pendingConfirmation.rejectionReason = "";
+				pendingConfirmation.confirmationReason = `${providerName} status email`;
+				pendingConfirmation.confirmedAt = statusUpdatedAt;
+				pendingConfirmation.rejectedAt = null;
+				pendingConfirmation.cancelledAt = null;
+				pendingConfirmation.noShowAt = null;
+			}
+			set.pendingConfirmation = pendingConfirmation;
+			set.agentDecisionSnapshot = {
+				...(existing?.agentDecisionSnapshot || {}),
+				status: incomingStatus,
+				reason: `${providerName} status email`,
+				decidedAt: statusUpdatedAt,
+				decidedBy: {
+					name: "OTA inbound automation",
+					role: "system",
+				},
+				source: "ota_email_status",
+			};
+		}
 		if (["cancelled", "no_show"].includes(incomingStatus)) {
 			set.cancel_reason = `${normalized.providerLabel || "OTA"} status email`;
 		}
 		if (["cancelled", "no_show", "inhouse", "checked_out"].includes(incomingStatus)) {
 			set["otaPlatformReview.status"] = "closed";
-			set["otaPlatformReview.closedAt"] = new Date();
+			set["otaPlatformReview.closedAt"] = statusUpdatedAt;
 			set["otaPlatformReview.closedReason"] = `ota_status_${incomingStatus}`;
-			set["otaPlatformReview.lastUpdatedAt"] = new Date();
+			set["otaPlatformReview.lastUpdatedAt"] = statusUpdatedAt;
 		}
 	}
 
@@ -5457,6 +5551,10 @@ function buildExistingReservationUpdateSet({
 		normalized.inboundEmailId
 	);
 	set["supplierData.otaLastEmailAt"] = new Date();
+	const sourceReceivedAt = otaSourceReceivedAt(normalized);
+	if (sourceReceivedAt) {
+		set["supplierData.otaLastSourceReceivedAt"] = sourceReceivedAt;
+	}
 	if (normalized.eventType && normalized.eventType !== "unknown") {
 		setIfOtaValue(set, "supplierData.otaLastEventType", normalized.eventType);
 	}
@@ -5857,6 +5955,26 @@ function normalizeStatusToApply(value) {
 	}
 	if (s.includes("confirm") || s.includes("active")) return "confirmed";
 	return "";
+}
+
+function validOtaEventDate(value) {
+	if (!value) return null;
+	const parsed = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function otaSourceReceivedAt(normalized = {}) {
+	return validOtaEventDate(normalized?.source?.receivedAt);
+}
+
+function isStaleOtaLifecycleEvent(normalized = {}, existing = {}) {
+	const incomingAt = otaSourceReceivedAt(normalized);
+	const lastAppliedAt = validOtaEventDate(
+		existing?.supplierData?.otaLastSourceReceivedAt
+	);
+	return Boolean(
+		incomingAt && lastAppliedAt && incomingAt.getTime() < lastAppliedAt.getTime()
+	);
 }
 
 const OTA_GUEST_NAME_METADATA_PATTERN =
@@ -6778,6 +6896,31 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				],
 			};
 		}
+		if (existing && isStaleOtaLifecycleEvent(normalized, existing)) {
+			logReconcile("status.needs_review.stale_event", {
+				confirmationNumber,
+				statusToApply,
+				incomingReceivedAt: normalized?.source?.receivedAt || null,
+				lastAppliedReceivedAt:
+					existing?.supplierData?.otaLastSourceReceivedAt || null,
+			});
+			return {
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "stale_ota_lifecycle_event",
+				automationComment:
+					"An older OTA lifecycle email was not allowed to overwrite a newer OTA email state.",
+				warnings,
+				errors: [
+					...errors,
+					"This OTA lifecycle email is older than the latest OTA event already applied to the reservation.",
+				],
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 		if (existing && !statusToApply) {
 			logReconcile("status.needs_review.unknown_status", {
 				confirmationNumber,
@@ -7549,6 +7692,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaPaymentInstructions: normalized.paymentInstructions || "",
 			otaLastInboundEmailId: normalized.inboundEmailId || "",
 			otaLastEmailAt: now,
+			otaLastSourceReceivedAt: otaSourceReceivedAt(normalized),
 			otaLastEventType: normalized.eventType,
 			otaAirbnbListingId: normalized.airbnbListingId || "",
 			otaAirbnbListingTitle: normalized.airbnbListingTitle || "",
@@ -7617,6 +7761,7 @@ module.exports = {
 	roomCapacityFromLabels,
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
+	isStaleOtaLifecycleEvent,
 	otaSourceAuthority,
 	normalizeStatusToApply,
 	calculateDaysOfResidence,

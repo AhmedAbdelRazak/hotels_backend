@@ -20,6 +20,7 @@ const {
 	extractNormalizedReservation,
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
+	isStaleOtaLifecycleEvent,
 	isOtaInboundTotalOutlier,
 	isPlausibleOtaGuestName,
 	isPlausibleOtaRoomName,
@@ -1360,8 +1361,92 @@ test("status-only OTA updates keep the applied status and close terminal review 
 	});
 	assert.equal(cancelled.reservation_status, "cancelled");
 	assert.equal(cancelled.state, "cancelled");
+	assert.equal(cancelled.pendingConfirmation.status, "cancelled");
+	assert.equal(cancelled.pendingConfirmation.source, "ota_email_status");
+	assert.equal(cancelled.pendingConfirmation.confirmedAt, null);
+	assert.match(cancelled.pendingConfirmation.rejectionReason, /Agoda cancellation/i);
+	assert.equal(cancelled.agentDecisionSnapshot.status, "cancelled");
+	assert.equal(cancelled.agentDecisionSnapshot.source, "ota_email_status");
 	assert.equal(cancelled["otaPlatformReview.status"], "closed");
 	assert.equal(cancelled["otaPlatformReview.closedReason"], "ota_status_cancelled");
+
+	const cancelledAfterManualConfirmation = buildExistingReservationUpdateSet({
+		existing: {
+			reservation_status: "confirmed",
+			state: "confirmed",
+			pendingConfirmation: { status: "confirmed" },
+			adminChangeLog: [
+				{ field: "reservation_status", from: "pending", to: "confirmed" },
+			],
+		},
+		statusToApply: "cancelled",
+		normalized: {
+			intent: "reservation_status",
+			eventType: "cancelled",
+			statusToApply: "cancelled",
+			confirmationNumber: "12345678",
+			providerLabel: "Agoda",
+		},
+	});
+	assert.equal(cancelledAfterManualConfirmation.reservation_status, "cancelled");
+	assert.equal(cancelledAfterManualConfirmation.state, "cancelled");
+	assert.equal(
+		cancelledAfterManualConfirmation.pendingConfirmation.status,
+		"cancelled"
+	);
+});
+
+test("HotelRunner Arabic cancellation and modification subjects are deterministic", () => {
+	const commonText = [
+		"EXPEDIA (EXPEDIA)",
+		"رقم التأكيد 2518668243 اسم الضيف Saim Abbas الدولة ~غير متاح إجمالي الطلب $ 47.16",
+		"نوع الغرفة غرفة عائلية -6 أفراد- أجياد- أتوبيس مجانى تاريخ تسجيل الوصول يوليو 26، 2026 تاريخ تسجيل المغادرة يوليو 28، 2026 عدد الضيوف 6",
+	].join("\n");
+	const cancellation = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - إلغاء الحجز #R819575565",
+		text: `إلغاء الحجز\n${commonText}`,
+		receivedAt: "2026-07-25T22:58:49.464Z",
+	});
+	assert.equal(cancellation.eventType, "cancelled");
+	assert.equal(cancellation.intent, "reservation_status");
+	assert.equal(cancellation.statusToApply, "cancelled");
+	assert.equal(cancellation.confirmationNumber, "2518668243");
+	assert.equal(
+		new Date(cancellation.source.receivedAt).toISOString(),
+		"2026-07-25T22:58:49.464Z"
+	);
+
+	const modification = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Zad AJYAD Hotel - تم تحديث الحجز #R043407511",
+		text: `تم تحديث الحجز\n${commonText.replace("2518668243", "HMEYWR4MQP")}`,
+	});
+	assert.equal(modification.eventType, "modified");
+	assert.equal(modification.intent, "reservation_update");
+	assert.equal(modification.statusToApply, "");
+
+	assert.equal(
+		detectStatusToApply({ subject: "طلب إلغاء الحجز وتنازل عن الرسوم" }),
+		""
+	);
+});
+
+test("older OTA lifecycle emails cannot overwrite a newer applied OTA event", () => {
+	assert.equal(
+		isStaleOtaLifecycleEvent(
+			{ source: { receivedAt: "2026-07-25T10:00:00.000Z" } },
+			{ supplierData: { otaLastSourceReceivedAt: "2026-07-25T11:00:00.000Z" } }
+		),
+		true
+	);
+	assert.equal(
+		isStaleOtaLifecycleEvent(
+			{ source: { receivedAt: "2026-07-25T12:00:00.000Z" } },
+			{ supplierData: { otaLastSourceReceivedAt: "2026-07-25T11:00:00.000Z" } }
+		),
+		false
+	);
 });
 
 test("authoritative refresh requires a built document and never copies placeholders", () => {

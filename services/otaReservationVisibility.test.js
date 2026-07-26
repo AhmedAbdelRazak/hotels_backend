@@ -6,10 +6,29 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const {
+	buildExcludePendingOtaReviewFilter,
+	buildPendingOtaReviewFilter,
 	canManageOtaReservations,
+	isOtaPlatformReviewPending,
 	platformOtaScopeFilter,
 	strictPlatformOtaHotelScopeFilter,
 } = require("./otaReservationVisibility");
+
+test("the OTA review queue contains pending records only, never cancelled/closed records", () => {
+	assert.deepEqual(buildPendingOtaReviewFilter(), {
+		"otaPlatformReview.status": "pending",
+	});
+	assert.deepEqual(buildExcludePendingOtaReviewFilter(), {
+		"otaPlatformReview.status": { $ne: "pending" },
+	});
+	assert.equal(
+		isOtaPlatformReviewPending({
+			reservation_status: "cancelled",
+			otaPlatformReview: { status: "closed" },
+		}),
+		false,
+	);
+});
 
 test("only active platform OTA staff receive pricing-management authority", () => {
 	assert.equal(
