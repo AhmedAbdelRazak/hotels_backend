@@ -1,5 +1,7 @@
 # Bank of America OTA VCC reservation context
 
+For the separate, controlled procedure used when an OTA virtual card was already captured through an external Virtual Terminal, see [External OTA virtual-card capture reconciliation](ops/external-ota-vcc-capture-reconciliation.md). That workflow records completed external evidence only; it does not change or bypass the Bank of America checkout flow described here.
+
 This integration uses two deliberately separate records.
 
 ## Internal payment audit snapshot
