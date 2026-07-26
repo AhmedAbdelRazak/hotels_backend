@@ -166,7 +166,7 @@ const validateGenericOtaPricingRoute = (
 		status: 409,
 		code: "ota_pricing_dedicated_route_required",
 		message:
-			"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, PMS room mapping, nightly prices, and hotel base total remain validated together.",
+			"OTA pricing must be changed through the dedicated OTA pricing workflow so the original guest total, saved OTA room identity, nightly prices, and hotel base total remain validated together.",
 	};
 };
 
@@ -475,54 +475,85 @@ const canonicalizeOtaReviewedRooms = (rooms = [], hotel = {}) => {
 	return { ready: true, rooms: canonicalRooms };
 };
 
-const validateCurrentRoomReferences = (rooms = [], hotel = null) => {
+const validatePersistedOtaRooms = (rooms = []) => {
 	if (!Array.isArray(rooms) || !rooms.length) {
 		return {
 			ready: false,
-			code: "ota_room_mapping_required",
-			message: "Reviewed OTA rooms must reference an exact current hotel room.",
+			code: "ota_room_data_required",
+			message: "At least one saved OTA room is required before pricing can be reviewed.",
 		};
 	}
-	if (!hotel) return { ready: true, canonicalRooms: rooms };
-	const canonicalRooms = [];
 	for (let index = 0; index < rooms.length; index += 1) {
-		const selection = rooms[index] || {};
-		const resolved = exactRoomConfig(selection, hotel);
-		if (!resolved.room) {
+		const room = rooms[index] || {};
+		const roomLabel = String(
+			room.room_type ||
+				room.roomType ||
+				room.displayName ||
+				room.display_name ||
+				room.sourceRoomName ||
+				"",
+		).trim();
+		if (!roomLabel) {
 			return {
 				ready: false,
-				code: resolved.code,
-				message: `${resolved.message} Save pricing again before release.`,
+				code: "ota_room_data_required",
+				message: `Saved OTA room ${index + 1} has no room identity.`,
 				roomIndex: index,
 			};
 		}
-		if (configIdForRoom(selection)) {
-			const storedType = normalizeLabel(selection.room_type || selection.roomType);
-			const storedName = normalizeLabel(
-				selection.displayName || selection.display_name,
-			);
-			const currentType = normalizeLabel(
-				resolved.room.roomType || resolved.room.room_type,
-			);
-			const currentName = normalizeLabel(
-				resolved.room.displayName ||
-					resolved.room.display_name ||
-					resolved.room.roomType ||
-					resolved.room.room_type,
-			);
-			if (storedType !== currentType || storedName !== currentName) {
-				return {
-					ready: false,
-					code: "ota_room_mapping_stale",
-					message:
-						"A reviewed OTA room no longer matches its current hotel room configuration. Save pricing again before release.",
-					roomIndex: index,
-				};
-			}
-		}
-		canonicalRooms.push(canonicalRoom(selection, resolved.room));
 	}
-	return { ready: true, canonicalRooms };
+	return { ready: true, rooms };
+};
+
+const preservePersistedOtaRoomIdentity = (
+	requestedRooms = [],
+	persistedRooms = [],
+) => {
+	const persistedValidation = validatePersistedOtaRooms(persistedRooms);
+	if (!persistedValidation.ready) return persistedValidation;
+	if (
+		!Array.isArray(requestedRooms) ||
+		requestedRooms.length !== persistedRooms.length
+	) {
+		return {
+			ready: false,
+			code: "ota_room_structure_changed",
+			message:
+				"OTA room rows cannot be added, removed, or reordered while reviewing pricing.",
+		};
+	}
+	const rooms = [];
+	for (let index = 0; index < persistedRooms.length; index += 1) {
+		const persistedRoom = persistedRooms[index] || {};
+		const requestedRoom = requestedRooms[index] || {};
+		const sameIdentity =
+			normalizeLabel(persistedRoom.room_type || persistedRoom.roomType) ===
+				normalizeLabel(requestedRoom.room_type || requestedRoom.roomType) &&
+			normalizeLabel(
+				persistedRoom.displayName || persistedRoom.display_name,
+			) ===
+				normalizeLabel(requestedRoom.displayName || requestedRoom.display_name) &&
+			roomCount(persistedRoom) === roomCount(requestedRoom) &&
+			configIdForRoom(persistedRoom) === configIdForRoom(requestedRoom);
+		if (!sameIdentity) {
+			return {
+				ready: false,
+				code: "ota_room_structure_changed",
+				message:
+					"Saved OTA room identity and quantity cannot be changed while reviewing pricing.",
+				roomIndex: index,
+			};
+		}
+		const next = { ...persistedRoom };
+		if (Object.prototype.hasOwnProperty.call(requestedRoom, "chosenPrice")) {
+			next.chosenPrice = requestedRoom.chosenPrice;
+		}
+		if (Object.prototype.hasOwnProperty.call(requestedRoom, "pricingByDay")) {
+			next.pricingByDay = requestedRoom.pricingByDay;
+		}
+		rooms.push(next);
+	}
+	return { ready: true, rooms };
 };
 
 const invalidateOtaRoomPricingForHotelAssignment = (rooms = []) =>
@@ -560,7 +591,7 @@ const dayRootPrice = (day = {}) => {
 
 const validateOtaReleaseHotelBasePrice = (
 	reservation = {},
-	{ hotel = null, allowZeroHotelBasePrice = false } = {},
+	{ allowZeroHotelBasePrice = false } = {},
 ) => {
 	const blockingStatus = otaReleaseBlockingStatus(reservation);
 	if (blockingStatus) {
@@ -611,7 +642,7 @@ const validateOtaReleaseHotelBasePrice = (
 		? reservation.pickedRoomsPricing
 		: [];
 	const rooms = pricingRooms.length ? pricingRooms : typeRooms;
-	const roomValidation = validateCurrentRoomReferences(rooms, hotel);
+	const roomValidation = validatePersistedOtaRooms(rooms);
 	if (!roomValidation.ready) return { ...roomValidation, hotelBaseTotal };
 	const clientValidation = validateOtaSourceClientPricing(reservation, rooms);
 	if (!clientValidation.ready) return { ...clientValidation, hotelBaseTotal };
@@ -663,7 +694,7 @@ const validateOtaReleaseHotelBasePrice = (
 			effectiveClientTotal: clientValidation.effectiveClientTotal,
 			clientTotalOverridden: clientValidation.clientTotalOverridden === true,
 			dailyClientTotal: clientValidation.dailyClientTotal,
-			canonicalRooms: roomValidation.canonicalRooms,
+			canonicalRooms: roomValidation.rooms,
 			missingBaseRows,
 		};
 	}
@@ -695,7 +726,7 @@ const validateOtaReleaseHotelBasePrice = (
 		effectiveClientTotal: clientValidation.effectiveClientTotal,
 		clientTotalOverridden: clientValidation.clientTotalOverridden === true,
 		dailyClientTotal: clientValidation.dailyClientTotal,
-		canonicalRooms: roomValidation.canonicalRooms,
+		canonicalRooms: roomValidation.rooms,
 		missingBaseRows: 0,
 	};
 };
@@ -709,11 +740,13 @@ module.exports = {
 	normalizeId,
 	otaRoomMappingOptionsForHotel,
 	otaReleaseBlockingStatus,
+	preservePersistedOtaRoomIdentity,
 	resolvePersistedOtaClientTotalOverride,
 	resolveOtaSourceClientTotal,
 	summarizeOtaReviewedClientPricing,
 	validateOtaStayDateCoverage,
 	validateOtaReleaseHotelBasePrice,
+	validatePersistedOtaRooms,
 	validateGenericOtaPricingRoute,
 	validateOtaSourceClientPricing,
 };

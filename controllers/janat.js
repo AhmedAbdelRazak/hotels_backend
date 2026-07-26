@@ -83,13 +83,14 @@ const {
 	normalizeId: normalizeOtaReviewId,
 } = require("../services/otaReservationVisibility");
 const {
-	canonicalizeOtaReviewedRooms,
 	invalidateOtaRoomPricingForHotelAssignment,
 	isOtaSourceReservation,
 	normalizeId: normalizeOtaPricingId,
 	otaRoomMappingOptionsForHotel,
+	preservePersistedOtaRoomIdentity,
 	resolveOtaSourceClientTotal,
 	validateOtaReleaseHotelBasePrice,
+	validatePersistedOtaRooms,
 	validateOtaSourceClientPricing,
 } = require("../services/otaReviewPricingInvariants");
 const {
@@ -3828,6 +3829,11 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			}
 			return acc;
 		}, {});
+		const persistedPricingRooms =
+			Array.isArray(reservation.pickedRoomsPricing) &&
+			reservation.pickedRoomsPricing.length
+				? reservation.pickedRoomsPricing
+				: reservation.pickedRoomsType;
 		const requestedPricingRooms =
 			Array.isArray(updatePayload.pickedRoomsPricing) &&
 			updatePayload.pickedRoomsPricing.length
@@ -3835,26 +3841,24 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				: Array.isArray(updatePayload.pickedRoomsType) &&
 				  updatePayload.pickedRoomsType.length
 				? updatePayload.pickedRoomsType
-				: Array.isArray(reservation.pickedRoomsPricing) &&
-				  reservation.pickedRoomsPricing.length
-				? reservation.pickedRoomsPricing
-				: reservation.pickedRoomsType;
-		const requestedCanonicalRoomMapping = canonicalizeOtaReviewedRooms(
+				: persistedPricingRooms;
+		const preservedRoomPricing = preservePersistedOtaRoomIdentity(
 			requestedPricingRooms,
-			assignedHotel,
+			persistedPricingRooms,
 		);
-		if (!requestedCanonicalRoomMapping.ready) {
+		if (!preservedRoomPricing.ready) {
 			throw new ReservationPricingError(
-				requestedCanonicalRoomMapping.message,
+				preservedRoomPricing.message,
 				400,
-				requestedCanonicalRoomMapping.code,
-				{ roomIndex: requestedCanonicalRoomMapping.roomIndex },
+				preservedRoomPricing.code,
+				{ roomIndex: preservedRoomPricing.roomIndex },
 			);
 		}
-		// The dedicated OTA review is allowed to preserve complete administrator-entered
-		// nightly prices only after every room ID has been validated against this hotel.
-		updatePayload.pickedRoomsType = requestedCanonicalRoomMapping.rooms;
-		updatePayload.pickedRoomsPricing = requestedCanonicalRoomMapping.rooms;
+		// OTA room identity and quantity come from the saved booking. The pricing
+		// review may edit nightly monetary fields, but cannot silently substitute a
+		// different PMS room or alter the number/order of booked room rows.
+		updatePayload.pickedRoomsType = preservedRoomPricing.rooms;
+		updatePayload.pickedRoomsPricing = preservedRoomPricing.rooms;
 		const requestedAdminPricing = req.body?.adminPricing || {};
 		let requestedCommissionAmount = null;
 		if (hasExplicitMoneyField(req.body || {}, "commission")) {
@@ -3887,20 +3891,17 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				  reservation.pickedRoomsPricing.length
 				? reservation.pickedRoomsPricing
 				: reservation.pickedRoomsType;
-		const canonicalRoomMapping = canonicalizeOtaReviewedRooms(
-			pricingRooms,
-			assignedHotel,
-		);
-		if (!canonicalRoomMapping.ready) {
+		const persistedRoomValidation = validatePersistedOtaRooms(pricingRooms);
+		if (!persistedRoomValidation.ready) {
 			throw new ReservationPricingError(
-				canonicalRoomMapping.message,
+				persistedRoomValidation.message,
 				400,
-				canonicalRoomMapping.code,
-				{ roomIndex: canonicalRoomMapping.roomIndex },
+				persistedRoomValidation.code,
+				{ roomIndex: persistedRoomValidation.roomIndex },
 			);
 		}
-		normalizedUpdate.pickedRoomsType = canonicalRoomMapping.rooms;
-		normalizedUpdate.pickedRoomsPricing = canonicalRoomMapping.rooms;
+		normalizedUpdate.pickedRoomsType = persistedRoomValidation.rooms;
+		normalizedUpdate.pickedRoomsPricing = persistedRoomValidation.rooms;
 
 		const originalSourceClientTotal = resolveOtaSourceClientTotal(reservation);
 		const existingAdminPricing = reservation.adminPricing || {};
@@ -3911,6 +3912,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			mode: "ota_review",
 			pricingReviewRequired: false,
 			roomMappingHotelId: assignedHotelId,
+			roomIdentityMode: "ota_source_preserved",
 		};
 		if (isOtaSourceReservation(reservation)) {
 			nextAdminPricing.sourceClientTotalSar = originalSourceClientTotal.amount;
@@ -3931,7 +3933,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		};
 		const clientPricingValidation = validateOtaSourceClientPricing(
 			prospectiveReservation,
-			canonicalRoomMapping.rooms,
+			persistedRoomValidation.rooms,
 			{ allowSourceClientTotalOverride },
 		);
 		if (!clientPricingValidation.ready) {
@@ -4025,7 +4027,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				status: OTA_PLATFORM_REVIEW_PENDING,
 				lastPricingUpdatedAt: now,
 				lastPricingUpdatedBy: auditActor,
-				roomMappingStatus: "reviewed",
+				roomMappingStatus: "source_preserved",
 				roomMappingHotelId: assignedHotelId,
 			},
 			adminLastUpdatedAt: now,
