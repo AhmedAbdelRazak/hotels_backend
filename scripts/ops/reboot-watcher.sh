@@ -94,12 +94,33 @@ service_active() {
 	systemctl is-active "$service" 2>/dev/null || true
 }
 
-pm2_summary() {
-	if command -v pm2 >/dev/null 2>&1; then
-		pm2 status --no-color 2>/dev/null | awk '/hotels-backend|jannat-ssr|cloudflared/ { gsub(/[[:space:]]+/, " "); print }' | paste -sd ';' -
-	else
+pm2_status() {
+	if ! command -v pm2 >/dev/null 2>&1; then
 		printf "pm2_missing"
+		return
 	fi
+
+	# A PM2 status call starts a new daemon when the systemd-owned socket is not
+	# ready. Avoid that side effect, especially during the first minute of boot.
+	if [ ! -S "$HOME/.pm2/rpc.sock" ]; then
+		printf "pm2_not_ready"
+		return
+	fi
+
+	timeout 8s pm2 status --no-color 2>/dev/null || printf "pm2_status_unavailable"
+}
+
+pm2_summary() {
+	local status
+	status="$(pm2_status)"
+	case "$status" in
+		pm2_missing|pm2_not_ready|pm2_status_unavailable)
+			printf "%s" "$status"
+			;;
+		*)
+			printf "%s\n" "$status" | awk '/hotels-backend|hotels-frontend|jannat-ssr|zad-ssr|hotel-openai-sync/ { gsub(/[[:space:]]+/, " "); print }' | paste -sd ';' -
+			;;
+	esac
 }
 
 capture_boot_evidence() {
@@ -131,7 +152,7 @@ capture_boot_evidence() {
 	append_section "$file" "disk" df -h
 	append_section "$file" "thermal sensors" bash -lc "sensors 2>/dev/null || true"
 	append_section "$file" "network summary" bash -lc "ip -brief addr 2>/dev/null; resolvectl status 2>/dev/null | sed -n '1,140p'"
-	append_section "$file" "pm2 status" bash -lc "command -v pm2 >/dev/null 2>&1 && pm2 status --no-color || true"
+	append_section "$file" "pm2 status" pm2_status
 }
 
 main() {

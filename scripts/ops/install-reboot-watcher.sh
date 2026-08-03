@@ -56,7 +56,6 @@ trap 'rm -f "$tmp"' EXIT
 crontab -l 2>/dev/null | sed "/^$CRON_BEGIN\$/,/^$CRON_END\$/d" > "$tmp" || true
 cat >> "$tmp" <<EOF
 $CRON_BEGIN
-@reboot $SCRIPT_DST >/dev/null 2>&1
 */3 * * * * $SCRIPT_DST >/dev/null 2>&1
 $CRON_END
 EOF

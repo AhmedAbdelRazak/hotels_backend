@@ -2,10 +2,9 @@
 
 Purpose: keep low-risk evidence for unexpected host reboots without touching the app runtime.
 
-The watcher is installed on the production host as the `ahmedadmin` user, using that user's crontab. It runs:
+The watcher is installed on the production host as the `ahmedadmin` user, using that user's crontab. It runs every 3 minutes with `*/3 * * * *`. The first scheduled run after startup detects the new boot ID and captures boot evidence.
 
-- once at boot with `@reboot`
-- every 3 minutes with `*/3 * * * *`
+It deliberately does not use `@reboot`: cron and `pm2-ahmedadmin.service` start concurrently, and an early `pm2 status` can otherwise create a second PM2 daemon before the systemd-owned PM2 socket is ready.
 
 It writes only under:
 
