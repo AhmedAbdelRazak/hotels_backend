@@ -88,6 +88,35 @@ const inboundEmailSchema = new mongoose.Schema(
 			messageId: { type: String, trim: true, default: "" },
 			error: { type: String, trim: true, default: "" },
 		},
+		airbnbWhatsappNotification: {
+			status: {
+				type: String,
+				trim: true,
+				lowercase: true,
+				default: "not_required",
+			},
+			message: { type: String, trim: true, default: "" },
+			recipients: { type: [String], default: [] },
+			deliveries: {
+				type: [
+					{
+						to: { type: String, trim: true, default: "" },
+						status: { type: String, trim: true, lowercase: true, default: "" },
+						messageSid: { type: String, trim: true, default: "" },
+						providerStatus: {
+							type: String,
+							trim: true,
+							lowercase: true,
+							default: "",
+						},
+						error: { type: String, trim: true, default: "" },
+					},
+				],
+				default: [],
+			},
+			attemptedAt: { type: Date, default: null },
+			completedAt: { type: Date, default: null },
+		},
 		parseWarnings: { type: [String], default: [] },
 		parseErrors: { type: [String], default: [] },
 		reconcileWarnings: { type: [String], default: [] },

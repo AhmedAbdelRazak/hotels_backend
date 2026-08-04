@@ -38,6 +38,9 @@ const {
 	INBOUND_DEDUPE_INDEX_UNAVAILABLE,
 	ensureInboundDedupeIndex,
 } = require("../services/otaInboundDedupeIndex");
+const {
+	notifyAirbnbOtaInboundWhatsapp,
+} = require("../services/airbnbOtaWhatsappNotifier");
 
 let simpleParser = null;
 try {
@@ -395,6 +398,10 @@ const emitInboundEmailUpdated = (req, record, extra = {}) => {
 			record.forwarding?.status || extra.forwardingStatus || "",
 		forwardReason:
 			record.forwardDecision?.reason || extra.forwardReason || "",
+		airbnbWhatsappNotificationStatus:
+			record.airbnbWhatsappNotification?.status ||
+			extra.airbnbWhatsappNotificationStatus ||
+			"",
 		updatedAt: new Date().toISOString(),
 	});
 };
@@ -863,7 +870,46 @@ exports.handleSendGridInbound = async (req, res) => {
 			at: new Date().toISOString(),
 		});
 
-		return res.status(200).send("OK");
+		const response = res.status(200).send("OK");
+		const airbnbWhatsappNotification = await notifyAirbnbOtaInboundWhatsapp({
+			inboundRecord: updated || inboundRecord,
+			email,
+			normalized,
+			reconciliation,
+		}).catch((error) => {
+			console.error(
+				"[SendGrid Inbound] Airbnb WhatsApp notification failed safely:",
+				error.message
+			);
+			return null;
+		});
+		if (airbnbWhatsappNotification?.attempted) {
+			logInbound("airbnb_whatsapp.completed", {
+				inboundEmailId: String(inboundRecord._id),
+				status: airbnbWhatsappNotification.status,
+				submittedCount: airbnbWhatsappNotification.submittedCount,
+				failedCount: airbnbWhatsappNotification.failedCount,
+				unknownCount: airbnbWhatsappNotification.unknownCount,
+				skippedCount: airbnbWhatsappNotification.skippedCount,
+				auditError: airbnbWhatsappNotification.auditError || "",
+			});
+			try {
+				emitInboundEmailUpdated(
+					req,
+					airbnbWhatsappNotification.record || updated || inboundRecord,
+					{
+						airbnbWhatsappNotificationStatus:
+							airbnbWhatsappNotification.status || "",
+					}
+				);
+			} catch (error) {
+				console.error(
+					"[SendGrid Inbound] Airbnb WhatsApp socket update failed safely:",
+					error.message
+				);
+			}
+		}
+		return response;
 	} catch (err) {
 		console.error("[SendGrid Inbound] error:", err.message);
 		if (err?.code === INBOUND_DEDUPE_INDEX_UNAVAILABLE && !inboundRecord) {

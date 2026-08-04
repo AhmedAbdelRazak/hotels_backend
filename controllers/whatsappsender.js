@@ -16,6 +16,7 @@
  *   TWILIO_CSID_PAYMENT_LINK
  *   TWILIO_CSID_RESERVATION_UPDATE
  *   TWILIO_CSID_ADMIN_NOTIFICATION
+ *   TWILIO_CSID_AIRBNB_OTA_NOTIFICATION
  *
  * Optional ENV:
  *   CHATGPT_API_TOKEN              // enables OpenAI fallback
@@ -58,9 +59,15 @@ function error(...args) {
 
 function redactPhone(p) {
 	if (!p || LOG_PII) return p;
-	// Keep + and last 4 digits
-	const s = String(p);
-	return s.replace(/(\+?\d{0,3})\d+(?=\d{4}$)/, "$1••••••").replace(/\s+/g, "");
+	const raw = String(p).trim();
+	const digits = raw.replace(/\D/g, "");
+	if (!digits) return "[redacted]";
+	if (digits.length <= 4) return "*".repeat(digits.length);
+	const hasPlus = raw.startsWith("+");
+	const prefixLength = Math.min(hasPlus ? 3 : 2, digits.length - 4);
+	return `${hasPlus ? "+" : ""}${digits.slice(0, prefixLength)}${"*".repeat(
+		Math.max(4, digits.length - prefixLength - 4)
+	)}${digits.slice(-4)}`;
 }
 
 function redactSid(sid) {
@@ -127,6 +134,7 @@ const TPL = {
 	PAYMENT_LINK: process.env.TWILIO_CSID_PAYMENT_LINK,
 	RESERVATION_UPDATE: process.env.TWILIO_CSID_RESERVATION_UPDATE,
 	ADMIN_NOTIFICATION: process.env.TWILIO_CSID_ADMIN_NOTIFICATION,
+	AIRBNB_OTA_NOTIFICATION: process.env.TWILIO_CSID_AIRBNB_OTA_NOTIFICATION,
 };
 
 // ---------------- OpenAI init (optional) ----------------
@@ -219,7 +227,7 @@ Example: {"e164":"+14155552671"}
 	try {
 		log("OpenAI fallback invoked.", {
 			nationality,
-			raw: cleanedDigitsMaybePlus,
+			raw: redactPhone(cleanedDigitsMaybePlus),
 		});
 		const r = await openai.chat.completions.create(buildChatCompletionBody({
 			model: pickOpenAIModel("nlu"),
@@ -231,7 +239,7 @@ Example: {"e164":"+14155552671"}
 			],
 		}));
 		const txt = r.choices?.[0]?.message?.content?.trim() || "";
-		log("OpenAI raw response:", txt);
+		log("OpenAI fallback response received.", { hasContent: !!txt });
 		const match = txt.match(/\{[\s\S]*\}/);
 		const json = JSON.parse(match ? match[0] : txt);
 		if (json && typeof json.e164 === "string" && json.e164.startsWith("+")) {
@@ -270,7 +278,10 @@ async function ensureE164Phone({
 	if (cleaned.startsWith("00")) cleaned = `+${cleaned.slice(2)}`;
 
 	const region = resolveRegion(nationality) || fallbackRegion || "SA";
-	log("ensureE164Phone: cleaned + region", { cleaned, region });
+	log("ensureE164Phone: cleaned + region", {
+		cleaned: redactPhone(cleaned),
+		region,
+	});
 
 	const candidates = [];
 	if (cleaned.startsWith("+")) candidates.push(cleaned);
@@ -285,14 +296,14 @@ async function ensureE164Phone({
 			const valid = phoneUtil.isValidNumber(parsed);
 			const formatted = valid ? phoneUtil.format(parsed, PNF.E164) : null;
 			log("ensureE164Phone: candidate", {
-				cand,
+				cand: redactPhone(cand),
 				valid,
 				formatted: redactPhone(formatted),
 			});
 			if (valid) return formatted;
 		} catch (e) {
 			log("ensureE164Phone: parse fail", {
-				cand,
+				cand: redactPhone(cand),
 				err: e?.message || String(e),
 			});
 		}
@@ -313,7 +324,7 @@ async function ensureE164Phone({
 			}
 		} catch (e) {
 			log("ensureE164Phone: OpenAI parse failed", {
-				ai,
+				ai: redactPhone(ai),
 				err: e?.message || String(e),
 			});
 		}
@@ -327,7 +338,13 @@ async function ensureE164Phone({
 }
 
 // ---------------- Twilio sender for a Content Template ----------------
-async function sendTemplate({ toE164, contentSid, variables, tag }) {
+async function sendTemplate({
+	toE164,
+	contentSid,
+	variables,
+	tag,
+	logVariables = true,
+}) {
 	const contentVariables = JSON.stringify(
 		Object.fromEntries(
 			Object.entries(variables || {}).map(([k, v]) => [
@@ -341,7 +358,12 @@ async function sendTemplate({ toE164, contentSid, variables, tag }) {
 		tag: tag || "unspecified",
 		to: redactPhone(toE164),
 		contentSid: redactSid(contentSid),
-		variables: variables, // short & clear (values are not sensitive)
+		variables:
+			logVariables || LOG_PII
+				? variables
+				: Object.fromEntries(
+						Object.keys(variables || {}).map((key) => [key, "[redacted]"])
+				  ),
 		dryRun: DRY_RUN,
 	};
 
@@ -376,7 +398,13 @@ async function sendTemplate({ toE164, contentSid, variables, tag }) {
 			to: redactPhone(toE164),
 			tag: info.tag,
 		});
-		return { sid: msg.sid, status: msg.status, to: toE164 };
+		return {
+			sid: msg.sid,
+			status: msg.status,
+			to: toE164,
+			errorCode: msg.errorCode || "",
+			errorMessage: msg.errorMessage || "",
+		};
 	} catch (err) {
 		error("sendTemplate: Twilio error", {
 			tag: info.tag,
@@ -392,6 +420,52 @@ async function sendTemplate({ toE164, contentSid, variables, tag }) {
 }
 
 // ---------------- High-level public functions ----------------
+
+/**
+ * Send one neutral Airbnb OTA inbound alert to a specific administrator.
+ * {{1}} = administrator display name
+ * {{2}} = short, non-sensitive event summary
+ */
+async function waSendAirbnbOtaNotificationToNumber({
+	toE164,
+	recipientName = "Jannat Admin",
+	summary,
+} = {}) {
+	const to = await ensureE164Phone({
+		nationality: "US",
+		rawPhone: toE164,
+		fallbackRegion: "US",
+	});
+	const cleanSummary = String(summary || "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 240);
+	if (!to) {
+		return { skipped: true, reason: "invalid admin phone" };
+	}
+	if (!cleanSummary) {
+		return { skipped: true, reason: "missing notification summary" };
+	}
+	if (!TPL.AIRBNB_OTA_NOTIFICATION) {
+		return {
+			ok: false,
+			error: "missing TWILIO_CSID_AIRBNB_OTA_NOTIFICATION",
+		};
+	}
+	return sendTemplate({
+		toE164: to,
+		contentSid: TPL.AIRBNB_OTA_NOTIFICATION,
+		variables: {
+			1: String(recipientName || "Jannat Admin")
+				.replace(/\s+/g, " ")
+				.trim()
+				.slice(0, 50),
+			2: cleanSummary,
+		},
+		tag: "airbnb_ota_notification",
+		logVariables: false,
+	});
+}
 
 /**
  * Send reservation confirmation to the guest.
@@ -805,6 +879,7 @@ module.exports = {
 	waSendReservationUpdate,
 	waNotifyNewReservation,
 	waNotifyImmediateSupportEscalation,
+	waSendAirbnbOtaNotificationToNumber,
 
 	waSendResetPasswordLink,
 };
