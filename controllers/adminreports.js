@@ -38,6 +38,10 @@ const {
 const {
 	attachAdminReservationRoomDetails,
 } = require("../services/adminReservationRoomDetails");
+const {
+	RESERVATION_OVERVIEW_PROJECTION,
+	buildReservationOverview,
+} = require("../services/adminReservationOverview");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -443,11 +447,28 @@ async function findFilteredReservations(req) {
 	const reservations = await Reservations.find(
 		withPlatformHotelScope(req, baseFilter)
 	)
+		.select(RESERVATION_OVERVIEW_PROJECTION)
 		.populate("hotelId", "hotelName")
 		.lean();
 
 	return reservations;
 }
+
+/* ------------------------------------------------------------------
+   Combined admin reservations overview
+      - Reuses the exact legacy filters and role/platform hotel scopes.
+      - Reads the projected reservation data once for all six chart payloads.
+      - Legacy endpoints remain available for hotel dashboards and compatibility.
+   ------------------------------------------------------------------ */
+exports.reservationOverview = async (req, res) => {
+	try {
+		const reservations = await findFilteredReservations(req);
+		return res.json(buildReservationOverview(reservations, req.query.limit));
+	} catch (err) {
+		console.error("Error in reservationOverview:", err);
+		return res.status(500).json({ error: err.message });
+	}
+};
 
 /* ------------------------------------------------------------------
    5) Helper to group reservations by an arbitrary "group key" function.

@@ -503,6 +503,17 @@ check("retry backoff is bounded and increasing", () => {
 	assert.equal(retryDelayMs(99, () => 0), 60 * 60_000);
 });
 
+check("PM2 keeps a bounded worker memory guard above the normal reconciliation peak", () => {
+	const ecosystem = require("../../ecosystem.hotel-openai-sync.config");
+	const worker = ecosystem.apps.find((app) => app.name === "hotel-openai-sync");
+	assert.ok(worker);
+	assert.equal(worker.instances, 1);
+	assert.equal(worker.exec_mode, "fork");
+	assert.equal(worker.autorestart, true);
+	assert.equal(worker.restart_delay, 5000);
+	assert.equal(worker.max_memory_restart, "512M");
+});
+
 check("rapid queue requests use one hotel upsert and increment a generation", async () => {
 	const calls = [];
 	const JobModel = {

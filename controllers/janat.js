@@ -107,6 +107,9 @@ const {
 	compactAdminPricingForReservationList,
 } = require("../services/adminReservationListPricing");
 const {
+	ADMIN_RESERVATION_LIST_PROJECTION,
+} = require("../services/adminReservationListProjection");
+const {
 	getReservationVccCaptureSummary,
 } = require("../services/bofaCaptureSummary");
 const {
@@ -4643,6 +4646,7 @@ exports.paginatedReservationList = async (req, res) => {
 		// 3) Fetch ALL matching docs (no skip/limit) for scorecards integrity
 		const allDocs = await Reservations.find(mongoFilter)
 			.sort({ createdAt: -1 })
+			.select(ADMIN_RESERVATION_LIST_PROJECTION)
 			.populate("belongsTo", "_id name email phone role roleDescription")
 			.populate("hotelId", "_id hotelName hotelName_OtherLanguage belongsTo")
 			.lean();

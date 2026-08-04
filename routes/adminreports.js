@@ -11,6 +11,7 @@ const {
 	requireAdminAccess,
 } = require("../controllers/auth");
 const {
+	reservationOverview,
 	reservationsByDay,
 	checkinsByDay,
 	checkoutsByDay,
@@ -50,6 +51,14 @@ router.param("userId", userById);
  */
 
 // 1) Reservations By Day
+router.get(
+	"/adminreports/reservations-overview/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
+	reservationOverview
+);
+
 router.get(
 	"/adminreports/reservations-by-day/:userId",
 	requireSignin,
