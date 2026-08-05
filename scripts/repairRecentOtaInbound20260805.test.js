@@ -341,7 +341,6 @@ const pricingAuditFixture = (expected) => {
 	}
 	const reconciliation = {
 		status: expected.processingStatus,
-		skipReason: expected.skipReason,
 		automationComment: "Original outcome",
 		warnings: [],
 		errors: expected.skipReason ? ["Original review reason"] : [],
@@ -352,6 +351,9 @@ const pricingAuditFixture = (expected) => {
 	};
 	if (expected.reconciliationActionAbsent !== true) {
 		reconciliation.actionTaken = expected.automationAction;
+	}
+	if (expected.reconciliationSkipReasonAbsent !== true) {
+		reconciliation.skipReason = expected.skipReason;
 	}
 	return {
 		_id: objectId(expected.id),

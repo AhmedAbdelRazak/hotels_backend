@@ -579,13 +579,15 @@ const auditFixture = (targetKey, expected) => {
 	}
 	const reconciliation = {
 		status: expected.processingStatus,
-		skipReason: expected.skipReason,
 		automationComment: "Original outcome",
 		warnings: [],
 		errors: expected.skipReason ? ["Original review reason"] : [],
 	};
 	if (expected.reconciliationActionAbsent !== true) {
 		reconciliation.actionTaken = expected.automationAction;
+	}
+	if (expected.reconciliationSkipReasonAbsent !== true) {
+		reconciliation.skipReason = expected.skipReason;
 	}
 	if (hasReservation) {
 		reconciliation.reservationId = oid(target.mongoId);
@@ -810,6 +812,7 @@ test("Agoda 2038686448 target is locked to the independently audited production 
 			processingStatus: "created",
 			automationAction: "created",
 			reconciliationActionAbsent: true,
+			reconciliationSkipReasonAbsent: true,
 			skipReason: "",
 		},
 		{
@@ -828,32 +831,59 @@ test("Agoda 2038686448 target is locked to the independently audited production 
 	]);
 });
 
-test("Agoda 2038686448 permits only its observed missing relay reconciliation action", () => {
-	const target = TARGETS.agoda_pricing_2038686448;
-	const relayId = target.audits.find((audit) => audit.role === "creating_relay_evidence").id;
-	const fixture = targetFixture("agoda_pricing_2038686448");
-	const relay = fixture.audits.find((audit) => String(audit._id) === relayId);
-	assert.equal(Object.hasOwn(relay.reconciliation, "actionTaken"), false);
-	assert.doesNotThrow(() => buildRecoveryPlan(fixture));
+test("only the four observed legacy audits may omit nested reconciliation outcome fields", () => {
+	const legacyAudits = [
+		["agoda_pricing_2038722839", "6a7324a939b444f30248e008"],
+		["agoda_pricing_2038686448", "6a733f4b39b444f3024905f6"],
+		["trip_pricing_1433813442496171", "6a73245c39b444f30248df47"],
+		["airbnb_cancellation_hm2w4qqrt9", "6a4bc6110b9a1247a9e5870a"],
+	];
+	const configuredLegacyAudits = Object.entries(TARGETS)
+		.flatMap(([targetKey, target]) => target.audits
+			.filter((audit) => audit.reconciliationActionAbsent === true || audit.reconciliationSkipReasonAbsent === true)
+			.map((audit) => [targetKey, audit.id]))
+		.sort(([leftTarget, leftId], [rightTarget, rightId]) =>
+			`${leftTarget}:${leftId}`.localeCompare(`${rightTarget}:${rightId}`));
+	assert.deepEqual(
+		configuredLegacyAudits,
+		[...legacyAudits].sort(([leftTarget, leftId], [rightTarget, rightId]) =>
+			`${leftTarget}:${leftId}`.localeCompare(`${rightTarget}:${rightId}`)),
+		"The exact legacy-absence allowlist changed.",
+	);
+	for (const [targetKey, auditId] of legacyAudits) {
+		const expected = TARGETS[targetKey].audits.find((audit) => audit.id === auditId);
+		assert.equal(expected.reconciliationActionAbsent, true);
+		assert.equal(expected.reconciliationSkipReasonAbsent, true);
 
-	for (const value of ["", null, false, 0, "created", "skipped"]) {
-		const unexpectedAction = targetFixture("agoda_pricing_2038686448");
-		const unexpectedRelay = unexpectedAction.audits.find((audit) => String(audit._id) === relayId);
-		unexpectedRelay.reconciliation.actionTaken = value;
-		assert.throws(
-			() => buildRecoveryPlan(unexpectedAction),
-			/reconciliation\.actionTaken must remain absent/,
-			`The target-specific absence exception accepted ${String(value)}.`,
-		);
+		const fixture = targetFixture(targetKey);
+		const historicalAudit = fixture.audits.find((audit) => String(audit._id) === auditId);
+		assert.equal(Object.hasOwn(historicalAudit.reconciliation, "actionTaken"), false);
+		assert.equal(Object.hasOwn(historicalAudit.reconciliation, "skipReason"), false);
+		assert.doesNotThrow(() => buildRecoveryPlan(fixture));
+
+		for (const field of ["actionTaken", "skipReason"]) {
+			for (const value of [undefined, "", null, false, 0, "created", "skipped"]) {
+				const unexpected = targetFixture(targetKey);
+				const unexpectedAudit = unexpected.audits.find((audit) => String(audit._id) === auditId);
+				unexpectedAudit.reconciliation[field] = value;
+				assert.throws(
+					() => buildRecoveryPlan(unexpected),
+					new RegExp(`reconciliation\\.${field} must remain absent`),
+					`${targetKey} accepted present ${field}=${String(value)}.`,
+				);
+			}
+		}
 	}
 
-	const ordinaryTarget = targetFixture("agoda_pricing_2038722839");
-	delete ordinaryTarget.audits[0].reconciliation.actionTaken;
-	assert.throws(
-		() => buildRecoveryPlan(ordinaryTarget),
-		/reconciliation\.actionTaken/,
-		"Other recovery targets must continue requiring their recorded reconciliation action.",
-	);
+	for (const field of ["actionTaken", "skipReason"]) {
+		const ordinaryTarget = targetFixture("agoda_pricing_2038722839");
+		delete ordinaryTarget.audits[1].reconciliation[field];
+		assert.throws(
+			() => buildRecoveryPlan(ordinaryTarget),
+			new RegExp(`reconciliation\\.${field}`),
+			`Ordinary audits must continue requiring reconciliation.${field}.`,
+		);
+	}
 });
 
 test("all pricing targets satisfy fixed source conversion, stay, and cent-exact arithmetic invariants", () => {
