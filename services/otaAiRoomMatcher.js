@@ -19,6 +19,16 @@ const AI_ROOM_MATCH_BASES = new Set([
 	"ambiguous",
 	"no_plausible_match",
 ]);
+const SEMANTIC_ROOM_TYPES_REQUIRING_MATCH = new Set([
+	"familyRooms",
+	"individualBed",
+	"kingRooms",
+	"masterSuite",
+	"queenRooms",
+	"standardRooms",
+	"studioRooms",
+	"suite",
+]);
 
 const normalizeId = (value) =>
 	String(value?._id || value?.id || value || "").trim();
@@ -97,6 +107,7 @@ const normalizeAiRoomDecision = (
 		sourceCapacity = 0,
 		minimumCapacity = 0,
 		candidateCapacities = {},
+		requiredRoomType = "",
 	} = {}
 ) => {
 	const selectedRoomId = normalizeId(decision.selectedRoomId);
@@ -123,13 +134,30 @@ const normalizeAiRoomDecision = (
 			rejectionCode: "below_confidence_threshold",
 		});
 	}
-	if (!basis || ["ambiguous", "no_plausible_match"].includes(basis)) {
+	if (
+		!basis ||
+		["ambiguous", "no_plausible_match", "occupancy_only"].includes(basis)
+	) {
 		return rejectedDecision({
 			decision,
 			confidence,
 			threshold,
 			marginThreshold,
 			rejectionCode: "non_match_basis",
+		});
+	}
+	const semanticRoomType = normalizeText(requiredRoomType);
+	if (
+		SEMANTIC_ROOM_TYPES_REQUIRING_MATCH.has(semanticRoomType) &&
+		candidate.roomType !== semanticRoomType
+	) {
+		return rejectedDecision({
+			decision,
+			confidence,
+			threshold,
+			marginThreshold,
+			rejectionCode: "semantic_room_type_conflict",
+			reason: `AI selection rejected because source room type ${semanticRoomType} conflicts with PMS room type ${candidate.roomType || "unknown"}.`,
 		});
 	}
 
@@ -153,6 +181,16 @@ const normalizeAiRoomDecision = (
 	const requiredOccupancy = expectedCapacity
 		? 0
 		: Math.max(0, Number(minimumCapacity || 0));
+	if (requiredOccupancy > 0 && selectedCapacity <= 0) {
+		return rejectedDecision({
+			decision,
+			confidence,
+			threshold,
+			marginThreshold,
+			rejectionCode: "pms_capacity_unknown",
+			reason: `AI selection rejected because ${requiredOccupancy} booked guests require a PMS room with a known compatible capacity.`,
+		});
+	}
 	if (
 		requiredOccupancy > 0 &&
 		selectedCapacity > 0 &&
@@ -175,6 +213,17 @@ const normalizeAiRoomDecision = (
 	const runnerUp = runnerUpRoomId
 		? candidates.find((item) => item.id === runnerUpRoomId)
 		: null;
+	if (candidates.length > 1 && !runnerUpRoomId) {
+		return rejectedDecision({
+			decision,
+			confidence,
+			threshold,
+			marginThreshold,
+			rejectionCode: "missing_runner_up",
+			reason:
+				"AI selection rejected because multiple PMS candidates require an explicit runner-up comparison.",
+		});
+	}
 	if (
 		(runnerUpRoomId && (!runnerUp || runnerUpRoomId === selectedRoomId)) ||
 		!Number.isFinite(runnerUpConfidence) ||
@@ -221,9 +270,13 @@ const normalizeAiRoomDecision = (
 	};
 };
 
-const shouldAskAiForRoomMatch = (roomMatch = {}) =>
-	!roomMatch.roomDetails ||
-	!["exact_display", "explicit_capacity"].includes(roomMatch.matchType);
+const shouldAskAiForRoomMatch = (roomMatch = {}) => {
+	if (roomMatch.aiFallbackAllowed === false) return false;
+	return (
+		!roomMatch.roomDetails ||
+		!["exact_display", "explicit_capacity"].includes(roomMatch.matchType)
+	);
+};
 
 const getOpenAiClient = () => {
 	const apiKey = process.env.CHATGPT_API_TOKEN || process.env.OPENAI_API_KEY;
@@ -239,15 +292,43 @@ async function matchOtaRoomWithOpenAi({
 	candidateCapacities = {},
 	client = null,
 } = {}) {
-	const candidates = activeRoomCandidates(hotelDetails);
-	if (!normalizeText(normalized.roomName) || !candidates.length) {
+	const allCandidates = activeRoomCandidates(hotelDetails);
+	if (!normalizeText(normalized.roomName) || !allCandidates.length) {
 		return { usedAI: false, matched: false, skipReason: "missing_room_context" };
 	}
 	if (!shouldAskAiForRoomMatch(deterministicMatch)) {
 		return {
 			usedAI: false,
 			matched: false,
-			skipReason: "deterministic_room_match_is_exact",
+			skipReason:
+				deterministicMatch.aiFallbackAllowed === false &&
+				!deterministicMatch.roomDetails
+					? "deterministic_room_signal_has_no_pms_candidate"
+					: "deterministic_room_match_is_exact",
+		};
+	}
+	const expectedCapacity = Number(sourceCapacity || 0);
+	const capacityCandidates = expectedCapacity
+		? allCandidates.filter(
+				(candidate) =>
+					Number(candidateCapacities[candidate.id] || 0) === expectedCapacity
+		  )
+		: allCandidates;
+	const deterministicAllowedIds = new Set(
+		Array.isArray(deterministicMatch.capacityCandidateIds)
+			? deterministicMatch.capacityCandidateIds.map(normalizeId).filter(Boolean)
+			: []
+	);
+	const candidates = deterministicAllowedIds.size
+		? capacityCandidates.filter((candidate) =>
+				deterministicAllowedIds.has(candidate.id)
+		  )
+		: capacityCandidates;
+	if (!candidates.length) {
+		return {
+			usedAI: false,
+			matched: false,
+			skipReason: "explicit_capacity_has_no_allowlisted_pms_candidate",
 		};
 	}
 
@@ -357,6 +438,7 @@ async function matchOtaRoomWithOpenAi({
 				sourceCapacity,
 				minimumCapacity,
 				candidateCapacities,
+				requiredRoomType: deterministicMatch.mappedRoomType,
 			});
 			console.log("[ota-room-ai] done", {
 				at: new Date().toISOString(),

@@ -29,6 +29,7 @@ const {
 	parseMoney,
 	requiredNewReservationMissing,
 	reconcileOtaReservation,
+	resolveBookingSource,
 	resolvePaymentMapping,
 	resolveRoomMatch,
 	roomCapacityFromLabels,
@@ -76,7 +77,7 @@ test("HotelRunner guest occupancy is not treated as a room count", () => {
 	assert.equal(normalized.roomCount, 1);
 });
 
-test("explicit bed capacity wins over unrelated numbers and broad family wording", () => {
+test("explicit class wins while semantic family wording cannot auto-map to a quad", () => {
 	const triple = extractNormalizedReservation(
 		hotelRunnerEmail({
 			roomName: "Comfort Triple Room - 3 beds - AJYAD Hotel- 15 Mins from Haram",
@@ -119,7 +120,525 @@ test("explicit bed capacity wins over unrelated numbers and broad family wording
 		familyFourBed.roomName,
 		{ totalGuests: familyFourBed.totalGuests, normalized: familyFourBed }
 	);
-	assert.equal(familyMatch.roomDetails.roomType, "quadRooms");
+	assert.equal(familyMatch.roomDetails, null);
+	assert.equal(familyMatch.sourceCapacity, 4);
+	assert.notEqual(familyMatch.matchType, "explicit_capacity");
+});
+
+test("named room capacity outranks rate-plan occupancy in observed OTA titles", () => {
+	const cases = [
+		["Triple Bed Room With Air Conditioning - Non-Refundable - 1 Occupancy", 3],
+		["Triple Bed Room With Air Conditioning - Non-Refundable - 2 Occupancy", 3],
+		["Comfort Double - Non-Smoking - Non-Refundable - 1 Occupancy", 2],
+		["Family - 6 Persons - Non-Refundable - 5 Occupancy", 6],
+		[
+			"Deluxe Family Room 2 - Non-Refundable - 1 Occupancy | غرفة عائلة لاربع أفراد",
+			4,
+		],
+	];
+	for (const [roomName, capacity] of cases) {
+		assert.equal(explicitRoomCapacity(roomName), capacity, roomName);
+	}
+	const conflictingClassMatch = resolveRoomMatch(
+		{ roomCountDetails: HOTEL_ROOMS },
+		"Double Room or Triple Room"
+	);
+	assert.equal(conflictingClassMatch.roomDetails, null);
+	assert.equal(conflictingClassMatch.matchType, "conflicting_room_class");
+	assert.equal(conflictingClassMatch.aiFallbackAllowed, false);
+	const conflictingPersonMatch = resolveRoomMatch(
+		{ roomCountDetails: HOTEL_ROOMS },
+		"Family Room for 2 persons | غرفة 3 افراد, 2 beds"
+	);
+	assert.equal(conflictingPersonMatch.roomDetails, null);
+	assert.equal(conflictingPersonMatch.matchType, "conflicting_person_capacity");
+	assert.equal(conflictingPersonMatch.aiFallbackAllowed, false);
+});
+
+test("room class, person capacity, and bed composition use structured precedence", () => {
+	const cases = [
+		["Triple Room with 1 double bed and 1 single bed", 3],
+		["Quadruple Room with 2 double beds", 4],
+		["Family Room with 2 double beds for 4 persons", 4],
+		["Twin Room for single use", 2],
+		["Room with 3 single beds", 3],
+		["Deluxe Triple Room with double bed", 3],
+		["Double Occupancy Triple Room", 3],
+		["Single Use Double Room", 2],
+		["Double Bed Triple Room", 3],
+		["1 Double Bed Triple Room", 3],
+		["Twin Bed Triple Room", 3],
+		["Single Guest Room", 1],
+		["غرفة ثلاثية سرير مزدوج وسرير فردي", 3],
+		["غرفة ثلاثية بسرير مزدوج وسرير فردي", 3],
+		["غرفة ثلاثية وسرير مزدوج وسرير فردي", 3],
+		["غرفة ثلاثية بالسرير مزدوج والسرير فردي", 3],
+		["ثلاثية بسرير مزدوج", 3],
+		["ثلاثية سرير مزدوج", 3],
+		["غرفة 5 أفراد سريرين مزدوجين", 5],
+		["1 double bed and 1 single bed", 3],
+		["Family Room for 5 guests", 5],
+	];
+	for (const [roomName, capacity] of cases) {
+		assert.equal(explicitRoomCapacity(roomName), capacity, roomName);
+	}
+	const ambiguousBedLayout = resolveRoomMatch(
+		{ roomCountDetails: HOTEL_ROOMS },
+		"1 king bed alternatively 2 twin beds"
+	);
+	assert.equal(ambiguousBedLayout.roomDetails, null);
+	assert.notEqual(ambiguousBedLayout.matchType, "explicit_capacity");
+	assert.notEqual(ambiguousBedLayout.aiFallbackAllowed, false);
+	const soloTravelerRate = resolveRoomMatch(
+		{ roomCountDetails: HOTEL_ROOMS },
+		"Deluxe Room for Solo Traveler"
+	);
+	assert.equal(soloTravelerRate.roomDetails, null);
+	assert.notEqual(soloTravelerRate.matchType, "explicit_capacity");
+	assert.notEqual(soloTravelerRate.aiFallbackAllowed, false);
+});
+
+test("repeated bed evidence is deduplicated and unrelated bare numbers are ignored", () => {
+	const cases = [
+		["5 Beds Room (Comfort 5 Beds Room)", 5],
+		["5 Beds Room | Comfort 5 Beds Room", 5],
+		["1 double bed and 1 single bed (1 double bed and 1 single bed)", 3],
+		["2 beds (1 double bed)", 2],
+		["Deluxe Family Room 2", 0],
+		["Room 2", 0],
+		["Two Bedroom Suite", 0],
+		["Room 4, rate 300, check-in 2026-08-10", 0],
+		["Double Room or Triple Room", 0],
+		["Double Room or Triple Room for 2 persons", 0],
+		["Double Room or Triple Room with 1 double bed", 0],
+		["1 king bed or 2 twin beds", 0],
+		["1 king bed alternatively 2 twin beds", 0],
+		["1 king bed | 2 twin beds", 0],
+		["1 king bed; 2 twin beds", 0],
+		["1 king bed, 2 twin beds", 0],
+		["1 king bed\n2 twin beds", 0],
+		["1 queen bed / 2 single beds", 0],
+		["1 double bed and 1 sofa bed", 0],
+		["1 double bed and 1 extra bed", 0],
+		["1 bunk bed and 1 single bed", 0],
+		["Bedroom 1: 1 double bed; Bedroom 2: 1 double bed", 0],
+		["1 bed and 1 bed", 0],
+		["غرفة بسرير فردي وسرير مزدوج", 0],
+		["Family Room for 2 persons | غرفة 3 افراد", 0],
+		["Family Room for 2 persons | غرفة 3 افراد, 2 beds", 0],
+		["Room for 2 adults and 1 child", 0],
+		["Family Room for 2 adults and 2 children", 0],
+		["Stay for two nights", 0],
+		["Deluxe Room for Solo Traveler", 0],
+		["Deluxe Room for Single Traveler", 0],
+		["Room for 2 nights", 0],
+		["Accommodation for three nights", 0],
+		["Room for 15 minutes", 0],
+		["غرفة لثلاث ليال", 0],
+		["لست بحاجة إلى سرير إضافي", 0],
+		["الثلاثاء", 0],
+		["الأربعاء", 0],
+		["حجز لثلاث غرف", 0],
+		["Double Room or Triple", 0],
+		["Triple Room or Double", 0],
+		["Triple Room / Double", 0],
+		["Bed in Triple Room", 0],
+		["Individual Bed in Triple Room", 0],
+		["Shared Bed in Triple Room", 0],
+		["Dorm Bed in Triple Room", 0],
+		["سرير في غرفة ثلاثية", 0],
+		["سرير فردي في غرفة ثلاثية", 0],
+	];
+	for (const [roomName, capacity] of cases) {
+		assert.equal(explicitRoomCapacity(roomName), capacity, roomName);
+	}
+});
+
+test("Arabic spelling, joined digits, and conservative transliterations map deterministically", () => {
+	const cases = [
+		["خطوات للحرم الشريف - باص خاص - غرفة ثلاثى", 3],
+		["الغرفة الثلاثية", 3],
+		["غرفة الثلاثية", 3],
+		["غرفة ثلاثيه", 3],
+		["ثلاثيه", 3],
+		["غرفة ثُلاثية", 3],
+		["غرفةثلاثية", 3],
+		["الغرفةالثلاثية", 3],
+		["غرفة لثلاث أفراد خاصة", 3],
+		["غرفة خماسى خاصة", 5],
+		["غرفة5 افراد خاصة", 5],
+		["وفر وقت وجهد غرفة 2 فرد", 2],
+		["Tholasy Room", 3],
+		["Thulathi private room", 3],
+		["Khomasy Room", 5],
+	];
+	for (const [roomName, capacity] of cases) {
+		assert.equal(explicitRoomCapacity(roomName), capacity, roomName);
+	}
+});
+
+test("PMS display class and canonical room type outrank incidental one-bed descriptions", () => {
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "tripleRooms",
+			displayName: "Spacious Triple Room with City View",
+			description: "Includes one large bed and one sofa.",
+			bedsCount: 1,
+		}),
+		3
+	);
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "tripleRooms",
+			displayName: "Premium Accommodation",
+			description: "Includes one large bed.",
+			bedsCount: 1,
+		}),
+		3
+	);
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "doubleRooms",
+			displayName: "Triple Room",
+			activeRoom: true,
+		}),
+		2
+	);
+	assert.equal(
+		roomCapacityFromLabels({
+			roomType: "tripleRooms",
+			displayName: "Double Room",
+			activeRoom: true,
+		}),
+		3
+	);
+	const contradictoryLabels = resolveRoomMatch(
+		{
+			roomCountDetails: [
+				{
+					_id: "canonical-double",
+					roomType: "doubleRooms",
+					displayName: "Triple Room",
+					activeRoom: true,
+				},
+				{
+					_id: "canonical-triple",
+					roomType: "tripleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+				},
+			],
+		},
+		"Triple Room"
+	);
+	assert.equal(contradictoryLabels.roomDetails?._id, "canonical-triple");
+	assert.equal(contradictoryLabels.aiFallbackAllowed, false);
+});
+
+test("named room classes map only to their exact canonical PMS class", () => {
+	const rooms = [
+		{
+			_id: "canonical-single",
+			roomType: "singleRooms",
+			displayName: "Shared Bed",
+			activeRoom: true,
+		},
+		{
+			_id: "canonical-double",
+			roomType: "doubleRooms",
+			displayName: "Twin Room",
+			activeRoom: true,
+		},
+		{
+			_id: "canonical-twin",
+			roomType: "twinRooms",
+			displayName: "Double Room",
+			activeRoom: true,
+		},
+		{
+			_id: "canonical-triple",
+			roomType: "tripleRooms",
+			displayName: "Double Room",
+			activeRoom: true,
+		},
+		{
+			_id: "family-displayed-triple",
+			roomType: "familyRooms",
+			displayName: "Triple Room",
+			activeRoom: true,
+		},
+		{
+			_id: "shared-displayed-single",
+			roomType: "individualBed",
+			displayName: "Single Room",
+			activeRoom: true,
+		},
+	];
+	for (const [sourceName, expectedId] of [
+		["Single Room", "canonical-single"],
+		["Double Room", "canonical-double"],
+		["Twin Room", "canonical-twin"],
+		["Triple Room", "canonical-triple"],
+	]) {
+		const match = resolveRoomMatch({ roomCountDetails: rooms }, sourceName);
+		assert.equal(match.roomDetails?._id, expectedId, sourceName);
+		assert.equal(match.matchType, "explicit_capacity", sourceName);
+		assert.equal(match.aiFallbackAllowed, false, sourceName);
+	}
+
+	const withoutCanonicalTriple = resolveRoomMatch(
+		{
+			roomCountDetails: rooms.filter(
+				(room) => room._id !== "canonical-triple"
+			),
+		},
+		"Triple Room"
+	);
+	assert.equal(withoutCanonicalTriple.roomDetails, null);
+	assert.equal(withoutCanonicalTriple.matchType, "explicit_capacity_unavailable");
+	assert.equal(withoutCanonicalTriple.aiFallbackAllowed, false);
+});
+
+test("semantic king, queen, suite, studio, and family names are not reduced to bed capacity", () => {
+	const hotel = {
+		roomCountDetails: [
+			{
+				_id: "double-only",
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				activeRoom: true,
+			},
+			{
+				_id: "quad-only",
+				roomType: "quadRooms",
+				displayName: "Quad Room",
+				activeRoom: true,
+			},
+		],
+	};
+	for (const sourceName of [
+		"King Room with 1 king bed",
+		"Queen Room with 1 queen bed",
+		"Junior Suite with 1 king bed",
+		"Studio with 1 queen bed",
+		"Family Room with 4 beds",
+	]) {
+		const match = resolveRoomMatch(hotel, sourceName);
+		assert.equal(match.roomDetails, null, sourceName);
+		assert.notEqual(match.matchType, "explicit_capacity", sourceName);
+	}
+});
+
+test("bed-in-room wording maps to individual-bed inventory, never the containing room class", () => {
+	const rooms = [
+		{
+			_id: "individual-bed",
+			roomType: "individualBed",
+			displayName: "Bed in Shared Room",
+			activeRoom: true,
+		},
+		{
+			_id: "triple-room",
+			roomType: "tripleRooms",
+			displayName: "Triple Room",
+			activeRoom: true,
+		},
+	];
+	for (const sourceName of [
+		"Bed in Triple Room",
+		"Individual Bed in Triple Room",
+		"Shared Bed in Triple Room",
+		"Dorm Bed in Triple Room",
+		"سرير في غرفة ثلاثية",
+		"سرير فردي في غرفة ثلاثية",
+	]) {
+		const match = resolveRoomMatch({ roomCountDetails: rooms }, sourceName);
+		assert.equal(match.roomDetails?._id, "individual-bed", sourceName);
+		assert.equal(match.matchType, "explicit_room_semantic", sourceName);
+		assert.equal(match.aiFallbackAllowed, false, sourceName);
+	}
+
+	const withoutIndividualBed = resolveRoomMatch(
+		{ roomCountDetails: [rooms[1]] },
+		"Bed in Triple Room"
+	);
+	assert.equal(withoutIndividualBed.roomDetails, null);
+	assert.equal(
+		withoutIndividualBed.matchType,
+		"explicit_semantic_unavailable"
+	);
+	assert.equal(withoutIndividualBed.aiFallbackAllowed, false);
+});
+
+test("explicit triple maps without AI only when a triple-capacity PMS room exists", () => {
+	const sourceRoomName = "Triple Room - 1 Occupancy";
+	const withTriple = resolveRoomMatch(
+		{
+			roomCountDetails: [
+				{
+					_id: "triple-room",
+					roomType: "tripleRooms",
+					displayName: "Premium Accommodation",
+					description: "Includes one large bed.",
+					activeRoom: true,
+				},
+			],
+		},
+		sourceRoomName
+	);
+	assert.equal(withTriple.roomDetails?._id, "triple-room");
+	assert.equal(withTriple.matchType, "explicit_capacity");
+	assert.equal(withTriple.aiFallbackAllowed, false);
+
+	const withoutTriple = resolveRoomMatch(
+		{
+			roomCountDetails: [
+				{
+					_id: "family-three",
+					roomType: "familyRooms",
+					displayName: "Family Room for 3 guests",
+					activeRoom: true,
+				},
+			],
+		},
+		sourceRoomName
+	);
+	assert.equal(withoutTriple.roomDetails, null);
+	assert.equal(withoutTriple.matchType, "explicit_capacity_unavailable");
+	assert.equal(withoutTriple.sourceCapacity, 3);
+	assert.equal(withoutTriple.capacityCandidateCount, 0);
+	assert.equal(withoutTriple.aiFallbackAllowed, false);
+	for (const arabicVariant of ["الغرفة الثلاثية", "غرفة ثُلاثية", "غرفةثلاثية"]) {
+		const variantMatch = resolveRoomMatch(
+			{
+				roomCountDetails: [
+					{
+						_id: "double-room",
+						roomType: "doubleRooms",
+						displayName: "Double Room",
+						activeRoom: true,
+					},
+				],
+			},
+			arabicVariant
+		);
+		assert.equal(variantMatch.roomDetails, null, arabicVariant);
+		assert.equal(
+			variantMatch.matchType,
+			"explicit_capacity_unavailable",
+			arabicVariant
+		);
+		assert.equal(variantMatch.aiFallbackAllowed, false, arabicVariant);
+	}
+
+	const review = buildUnmappedOtaReviewReservationDocument({
+		provider: "hotelrunner",
+		providerLabel: "HotelRunner",
+		bookingSource: "Trip.com",
+		confirmationNumber: "test-triple-unmapped",
+		reservationId: "test-triple-unmapped",
+		roomName: sourceRoomName,
+		roomCount: 1,
+		checkinDate: "2026-08-10",
+		checkoutDate: "2026-08-11",
+		totalAmountSar: 100,
+		totalGuests: 3,
+	});
+	assert.equal(review.pickedRoomsType[0].displayName, sourceRoomName);
+	assert.equal(review.pickedRoomsType[0].room_type, "tripleRooms");
+	const arabicSourceRoomName = "غرفة ثلاثية بسرير مزدوج وسرير فردي";
+	const arabicReview = buildUnmappedOtaReviewReservationDocument({
+		provider: "hotelrunner",
+		providerLabel: "HotelRunner",
+		confirmationNumber: "test-arabic-triple-unmapped",
+		reservationId: "test-arabic-triple-unmapped",
+		roomName: arabicSourceRoomName,
+		roomCount: 1,
+		checkinDate: "2026-08-10",
+		checkoutDate: "2026-08-11",
+		totalAmountSar: 100,
+		totalGuests: 3,
+	});
+	assert.equal(
+		arabicReview.pickedRoomsType[0].displayName,
+		arabicSourceRoomName
+	);
+	assert.equal(arabicReview.pickedRoomsType[0].room_type, "tripleRooms");
+	const bedOnlyReview = buildUnmappedOtaReviewReservationDocument({
+		provider: "hotelrunner",
+		providerLabel: "HotelRunner",
+		confirmationNumber: "test-arabic-bed-layout-unmapped",
+		reservationId: "test-arabic-bed-layout-unmapped",
+		roomName: "غرفة بسرير فردي وسرير مزدوج",
+		roomCount: 1,
+		checkinDate: "2026-08-10",
+		checkoutDate: "2026-08-11",
+		totalAmountSar: 100,
+	});
+	assert.equal(bedOnlyReview.pickedRoomsType[0].room_type, "");
+});
+
+test("HotelRunner Trip.com relays preserve transport identity and persist the actual booking source", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		to: "ota@example.com",
+		subject: "Zad Ajyad - New Reservation #RTESTTRIP",
+		text: [
+			"TRIP.COM XY",
+			"Confirmation Number 123456789",
+			"Hotel Name Zad Ajyad",
+			"Room Type Triple Room",
+			"Check-in Date Aug 10, 2026",
+			"Check-out Date Aug 11, 2026",
+			"Guest Count 3",
+			"This booking was made through Trip.com, a Ctrip Group brand",
+			"Guest proxy: synthetic@guest.trip.com",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.provider, "hotelrunner");
+	assert.equal(normalized.bookingSource, "Trip.com");
+	assert.equal(normalized.sourcePresence.bookingSource, true);
+
+	const document = buildUnmappedOtaReviewReservationDocument({
+		...normalized,
+		guestName: "Synthetic Guest",
+		totalAmountSar: 100,
+	});
+	assert.equal(document.booking_source, "Trip.com");
+	assert.equal(document.customer_details.booking_source, "Trip.com");
+	assert.equal(document.supplierData.otaProvider, "hotelrunner");
+});
+
+test("unstructured Trip.com mentions do not override a HotelRunner booking source", () => {
+	const normalized = extractNormalizedReservation({
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		subject: "Reservation message",
+		text: "Guest note: please compare the public Trip.com price before replying.",
+	});
+	assert.equal(normalized.provider, "hotelrunner");
+	assert.equal(normalized.bookingSource, "HotelRunner");
+});
+
+test("booking-source conflicts fail closed while direct OTA senders remain authoritative", () => {
+	assert.equal(
+		resolveBookingSource({
+			provider: "hotelrunner",
+			providerLabel: "HotelRunner",
+			from: "HotelRunner <noreply@hotelrunner.com>",
+			text: "TRIP.COM XY\nAGODA",
+		}),
+		"HotelRunner"
+	);
+	assert.equal(
+		resolveBookingSource({
+			provider: "trip",
+			providerLabel: "Trip.com",
+			from: "Trip.com <reservations@trip.com>",
+			text: "Footer partner: Agoda",
+		}),
+		"Trip.com"
+	);
 });
 
 test("explicit Agoda room-count labels remain supported", () => {

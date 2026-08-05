@@ -2834,7 +2834,84 @@ function cleanBookingSourceCandidate(value = "") {
 	return candidate.slice(0, 40);
 }
 
-function resolveBookingSource({ provider = "", providerLabel = "", from = "", subject = "" } = {}) {
+const BOOKING_SOURCE_EVIDENCE_PATTERNS = [
+	[
+		"expedia",
+		/(?:^|\n)\s*expedia(?:\s*\([^\n)]{0,100}\))?\s*(?:\n|$)|\bexpedia\s+collects?\s+payment\b|\bpayment\s+method\s*:\s*expedia\s*collect\b/i,
+	],
+	[
+		"hotels",
+		/(?:^|\n)\s*hotels\.com(?:\s*\([^\n)]{0,100}\))?\s*(?:\n|$)/i,
+	],
+	[
+		"booking",
+		/(?:^|\n)\s*booking\.com(?:\s*\([^\n)]{0,100}\))?\s*(?:\n|$)/i,
+	],
+	[
+		"agoda",
+		/(?:^|\n)\s*agoda(?:\s*\([^\n)]{0,100}\))?\s*(?:\n|$)|\bpayment\s*:\s*(?:merchant|merchance)\s+booking\s*\(\s*agoda\s+collect\s*\)/i,
+	],
+	[
+		"airbnb",
+		/(?:^|\n)\s*airbnb(?:\s*\([^\n)]{0,100}\))?\s*(?:\n|$)|\bairbnb\s+(?:confirmation|reservation)\s+code\b/i,
+	],
+	[
+		"trip",
+		/(?:^|\n)\s*trip\.com(?:\s+(?:v\d+|[a-z]{2}))?\s*(?:\n|$)|\bthis\s+booking\s+was\s+made\s+through\s+trip\.com\b|@guest\.trip\.com\b|\bctrip\s+group\s+brand\b/i,
+	],
+];
+
+function knownBookingSourceProvider(value = "") {
+	const source = normalizeWhitespace(value);
+	if (!source) return "";
+	const providers = new Set();
+	if (/\bexpedia(?:\s+group)?\b|expediapartnercentral/i.test(source)) {
+		providers.add("expedia");
+	}
+	if (/\bhotels\.com\b/i.test(source)) providers.add("hotels");
+	if (/\bbooking\.com\b/i.test(source)) providers.add("booking");
+	if (/\bagoda\b/i.test(source)) providers.add("agoda");
+	if (/\bairbnb\b/i.test(source)) providers.add("airbnb");
+	if (/\btrip\.com\b|\bctrip\b/i.test(source)) providers.add("trip");
+	if (/\bhotel\s*runner\b/i.test(source)) providers.add("hotelrunner");
+	return providers.size === 1 ? [...providers][0] : "";
+}
+
+function embeddedBookingSourceProvider(value = "") {
+	const source = String(value || "").replace(/\r/g, "");
+	if (!source) return "";
+	const providers = BOOKING_SOURCE_EVIDENCE_PATTERNS.filter(([, pattern]) =>
+		pattern.test(source)
+	).map(([provider]) => provider);
+	return providers.length === 1 ? providers[0] : "";
+}
+
+function resolveBookingSource({
+	provider = "",
+	providerLabel = "",
+	from = "",
+	subject = "",
+	text = "",
+	explicitSource = "",
+} = {}) {
+	// A direct OTA sender is authoritative. HotelRunner is a relay, so its
+	// envelope must not hide a source explicitly embedded in the reservation.
+	const envelopeProvider = detectProvider({ from });
+	if (envelopeProvider && !["unknown", "hotelrunner"].includes(envelopeProvider)) {
+		return PROVIDER_LABELS[envelopeProvider] || envelopeProvider;
+	}
+
+	const explicitProvider = knownBookingSourceProvider(explicitSource);
+	if (explicitProvider) return PROVIDER_LABELS[explicitProvider] || explicitProvider;
+	if (normalizeWhitespace(explicitSource)) {
+		return normalizeWhitespace(explicitSource).slice(0, 80);
+	}
+
+	const embeddedProvider = embeddedBookingSourceProvider(
+		`${subject || ""}\n${text || ""}`
+	);
+	if (embeddedProvider) return PROVIDER_LABELS[embeddedProvider] || embeddedProvider;
+
 	if (provider && provider !== "unknown") {
 		return PROVIDER_LABELS[provider] || providerLabel || provider;
 	}
@@ -3370,14 +3447,19 @@ function extractNormalizedReservation(email) {
 		"Travel agency",
 		"Agency",
 	]);
-	const bookingSource =
-		sourceField ||
-		resolveBookingSource({
-			provider,
-			providerLabel,
-			from: email.from,
-			subject: email.subject,
-		});
+	const bookingSource = resolveBookingSource({
+		provider,
+		providerLabel,
+		from: email.from,
+		subject: email.subject,
+		text,
+		explicitSource: sourceField,
+	});
+	const bookingSourceIsSourceBacked = !!(
+		normalizeWhitespace(sourceField) ||
+		knownBookingSourceProvider(email.from) ||
+		embeddedBookingSourceProvider(`${email.subject || ""}\n${text}`)
+	);
 
 	const explicitProviderConfirmation = firstNonEmpty(
 		airbnbFields.confirmationNumber,
@@ -3938,7 +4020,7 @@ function extractNormalizedReservation(email) {
 		sourcePresence: {
 			reservationId: !!reservationId,
 			confirmationNumber: !!reservationId,
-			bookingSource: !!sourceField,
+			bookingSource: bookingSourceIsSourceBacked,
 			hotelName: !!hotelName || !!hotelId,
 			airbnbListingId: !!airbnbFields.airbnbListingId,
 			airbnbListingTitle: !!airbnbFields.airbnbListingTitle,
@@ -4024,26 +4106,429 @@ function extractNormalizedReservation(email) {
 	};
 }
 
+function normalizeRoomSignalText(value = "") {
+	return normalizeWhitespace(value)
+		.toLowerCase()
+		.normalize("NFKD")
+		.replace(/[\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g, "")
+		.replace(/[أإآٱ]/g, "ا")
+		.replace(/ى/g, "ي")
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+const ROOM_NUMBER_WORD_CAPACITIES = {
+	one: 1,
+	two: 2,
+	three: 3,
+	four: 4,
+	five: 5,
+	six: 6,
+	seven: 7,
+	eight: 8,
+};
+
+const ENGLISH_ROOM_CLASS_TOKENS = Object.freeze({
+	single: { roomType: "singleRooms", capacity: 1 },
+	solo: { roomType: "singleRooms", capacity: 1 },
+	double: { roomType: "doubleRooms", capacity: 2 },
+	twin: { roomType: "twinRooms", capacity: 2 },
+	triple: { roomType: "tripleRooms", capacity: 3 },
+	tholasy: { roomType: "tripleRooms", capacity: 3 },
+	tholasi: { roomType: "tripleRooms", capacity: 3 },
+	tholathy: { roomType: "tripleRooms", capacity: 3 },
+	tholathi: { roomType: "tripleRooms", capacity: 3 },
+	thalathy: { roomType: "tripleRooms", capacity: 3 },
+	thalasi: { roomType: "tripleRooms", capacity: 3 },
+	thalathi: { roomType: "tripleRooms", capacity: 3 },
+	thulathi: { roomType: "tripleRooms", capacity: 3 },
+	thulathy: { roomType: "tripleRooms", capacity: 3 },
+	thoulathy: { roomType: "tripleRooms", capacity: 3 },
+	thoulathi: { roomType: "tripleRooms", capacity: 3 },
+	solasy: { roomType: "tripleRooms", capacity: 3 },
+	sulasi: { roomType: "tripleRooms", capacity: 3 },
+	quad: { roomType: "quadRooms", capacity: 4 },
+	quadruple: { roomType: "quadRooms", capacity: 4 },
+	quint: { roomType: "familyRooms", capacity: 5 },
+	quintuple: { roomType: "familyRooms", capacity: 5 },
+	khomasy: { roomType: "familyRooms", capacity: 5 },
+	khomasi: { roomType: "familyRooms", capacity: 5 },
+	khamasy: { roomType: "familyRooms", capacity: 5 },
+	khamasi: { roomType: "familyRooms", capacity: 5 },
+	sextuple: { roomType: "familyRooms", capacity: 6 },
+	septuple: { roomType: "familyRooms", capacity: 7 },
+	octuple: { roomType: "familyRooms", capacity: 8 },
+});
+
+const ARABIC_ROOM_CLASS_TOKENS = Object.freeze({
+	فردي: { roomType: "singleRooms", capacity: 1 },
+	فردية: { roomType: "singleRooms", capacity: 1 },
+	ثنائي: { roomType: "doubleRooms", capacity: 2 },
+	ثنائية: { roomType: "doubleRooms", capacity: 2 },
+	زوجي: { roomType: "doubleRooms", capacity: 2 },
+	زوجية: { roomType: "doubleRooms", capacity: 2 },
+	مزدوج: { roomType: "doubleRooms", capacity: 2 },
+	مزدوجة: { roomType: "doubleRooms", capacity: 2 },
+	ثلاثي: { roomType: "tripleRooms", capacity: 3 },
+	ثلاثية: { roomType: "tripleRooms", capacity: 3 },
+	رباعي: { roomType: "quadRooms", capacity: 4 },
+	رباعية: { roomType: "quadRooms", capacity: 4 },
+	خماسي: { roomType: "familyRooms", capacity: 5 },
+	خماسية: { roomType: "familyRooms", capacity: 5 },
+	سداسي: { roomType: "familyRooms", capacity: 6 },
+	سداسية: { roomType: "familyRooms", capacity: 6 },
+	سباعي: { roomType: "familyRooms", capacity: 7 },
+	سباعية: { roomType: "familyRooms", capacity: 7 },
+	ثماني: { roomType: "familyRooms", capacity: 8 },
+	ثمانية: { roomType: "familyRooms", capacity: 8 },
+});
+
+const ARABIC_ROOM_WORDS = new Set(["غرفة", "غرفه", "الغرفة", "الغرفه"]);
+
+function roomClassToken(token = "") {
+	let arabicToken = token;
+	if (arabicToken.startsWith("ال")) arabicToken = arabicToken.slice(2);
+	if (arabicToken.endsWith("ه")) {
+		const feminineCandidate = `${arabicToken.slice(0, -1)}ة`;
+		if (ARABIC_ROOM_CLASS_TOKENS[feminineCandidate]) {
+			arabicToken = feminineCandidate;
+		}
+	}
+	return (
+		ENGLISH_ROOM_CLASS_TOKENS[token] ||
+		ARABIC_ROOM_CLASS_TOKENS[arabicToken] ||
+		null
+	);
+}
+
+function isArabicBedNounToken(token = "") {
+	return /^(?:و?ب?(?:ال)?)?(?:سرير(?:ين|ان|ات)?|اسر(?:ة|ه|تين|تان|ات)?)$/u.test(
+		token
+	);
+}
+
+function isIncidentalEnglishClassToken(words = [], index = -1) {
+	const next = words[index + 1] || "";
+	const afterNext = words[index + 2] || "";
+	if (["occupancy", "use"].includes(next)) return true;
+	if (
+		["guest", "guests", "person", "persons", "traveler", "travelers", "traveller", "travellers"].includes(
+			next
+		) &&
+		!["room", "rooms"].includes(afterNext)
+	) {
+		return true;
+	}
+	return ["bed", "beds"].includes(next) &&
+		!["room", "rooms"].includes(afterNext);
+}
+
+function isIndividualBedAccommodation(value = "") {
+	const source = normalizeRoomSignalText(value);
+	if (!source) return false;
+	return (
+		/\b(?:(?:individual|shared|dorm|dormitory)\s+)?bed\s+in\s+(?:an?\s+)?(?:[a-z]+\s+){0,3}rooms?\b/i.test(
+			source
+		) ||
+		/(?:سرير|السرير)(?:\s+(?:فردي|مشترك))?\s+في\s+(?:ال)?(?:غرفة|غرفه)/u.test(
+			source
+		)
+	);
+}
+
+function roomClassEvidence(value = "") {
+	const rawValue = String(value || "");
+	if (isIndividualBedAccommodation(value)) {
+		return { matches: [], roomTypes: [], capacities: [] };
+	}
+	const source = normalizeRoomSignalText(value).replace(
+		/(الغرفة|الغرفه|غرفة|غرفه)(?=(?:ال)?(?:فردي(?:ة|ه)?|ثنائي(?:ة|ه)?|زوجي(?:ة|ه)?|مزدوج(?:ة|ه)?|ثلاثي(?:ة|ه)?|رباعي(?:ة|ه)?|خماسي(?:ة|ه)?|سداسي(?:ة|ه)?|سباعي(?:ة|ه)?|ثماني(?:ة|ه)?))/gu,
+		"$1 "
+	);
+	if (!source) return { matches: [], roomTypes: [], capacities: [] };
+	const words = source.split(" ").filter(Boolean);
+	const tokenHits = words
+		.map((token, index) => ({ token, index, evidence: roomClassToken(token) }))
+		.filter(({ evidence, index, token }) => {
+			if (!evidence) return false;
+			if (ENGLISH_ROOM_CLASS_TOKENS[token]) {
+				return !isIncidentalEnglishClassToken(words, index);
+			}
+			const precedingStart = Math.max(0, index - 3);
+			const nearbyArabicRoomIndex = words
+				.slice(precedingStart, index)
+				.map((word) => ARABIC_ROOM_WORDS.has(word))
+				.lastIndexOf(true);
+			if (nearbyArabicRoomIndex >= 0) {
+				const absoluteRoomIndex = precedingStart + nearbyArabicRoomIndex;
+				const betweenRoomAndClass = words.slice(absoluteRoomIndex + 1, index);
+				if (!betweenRoomAndClass.some(isArabicBedNounToken)) return true;
+			}
+			return !isArabicBedNounToken(words[index - 1] || "");
+		});
+
+	const selected = [];
+	for (let roomIndex = 0; roomIndex < words.length; roomIndex += 1) {
+		if (["room", "rooms"].includes(words[roomIndex])) {
+			const nearby = tokenHits.filter(
+				(hit) => hit.index < roomIndex && hit.index >= roomIndex - 3
+			);
+			if (nearby.length) selected.push(nearby[nearby.length - 1]);
+		}
+		if (ARABIC_ROOM_WORDS.has(words[roomIndex])) {
+			const nearby = tokenHits.filter(
+				(hit) => hit.index > roomIndex && hit.index <= roomIndex + 3
+			);
+			if (nearby.length) selected.push(nearby[0]);
+		}
+	}
+
+	// An explicit alternative remains a conflict even when only one side is
+	// adjacent to the word "room" (for example, "Double Room or Triple").
+	for (let index = 0; index < tokenHits.length - 1; index += 1) {
+		const left = tokenHits[index];
+		const right = tokenHits[index + 1];
+		const between = words.slice(left.index + 1, right.index);
+		if (
+			left.evidence.roomType !== right.evidence.roomType &&
+			between.some((token) => ["or", "او"].includes(token))
+		) {
+			selected.push(left, right);
+		}
+	}
+	if (
+		/[\/／|]/u.test(rawValue) &&
+		new Set(tokenHits.map((hit) => hit.evidence.roomType)).size > 1
+	) {
+		selected.push(...tokenHits);
+	}
+
+	const chosen = selected.length ? selected : tokenHits;
+	const matches = Array.from(
+		new Map(
+			chosen.map(({ evidence }) => [
+				`${evidence.roomType}:${evidence.capacity}`,
+				evidence,
+			])
+		).values()
+	);
+	return {
+		matches,
+		roomTypes: [...new Set(matches.map((match) => match.roomType))],
+		capacities: [...new Set(matches.map((match) => match.capacity))],
+	};
+}
+
+const CANONICAL_ROOM_TYPE_CAPACITIES = {
+	singleRooms: 1,
+	doubleRooms: 2,
+	twinRooms: 2,
+	tripleRooms: 3,
+	quadRooms: 4,
+};
+
+const SEMANTIC_ROOM_TYPES_REQUIRING_NAME_EVIDENCE = new Set([
+	"familyRooms",
+	"individualBed",
+	"kingRooms",
+	"masterSuite",
+	"queenRooms",
+	"standardRooms",
+	"studioRooms",
+	"suite",
+]);
+
+function explicitRoomClassCapacities(value = "") {
+	return roomClassEvidence(value).capacities;
+}
+
+function explicitRoomClassCapacity(value = "") {
+	const capacities = explicitRoomClassCapacities(value);
+	return capacities.length === 1 ? capacities[0] : 0;
+}
+
+function explicitPersonCapacityEvidence(value = "") {
+	const rawValue = String(value || "");
+	const source = normalizeRoomSignalText(value);
+	if (!source) return { capacities: [], conflicting: false };
+	const capacities = [];
+	const hasAdultChildComposition =
+		/\badults?\b/i.test(source) &&
+		/\b(?:children|child|kids?)\b/i.test(source);
+	const numericPattern = /\b([1-9]\d?)\s*(?:persons?|people|guests?|افراد|اشخاص|فرد)(?=$|\s)/giu;
+	let match;
+	while ((match = numericPattern.exec(source))) {
+		capacities.push(Number(match[1]));
+	}
+	const terminalRoomForNumber = source.match(
+		/\b(?:room|accommodation)\s+for\s+([1-9]\d?)$/iu
+	);
+	if (terminalRoomForNumber) capacities.push(Number(terminalRoomForNumber[1]));
+	const delimitedRoomForNumber = rawValue.match(
+		/\b(?:room|accommodation)\s+for\s+([1-9]\d?)(?=\s*(?:[-–—|()]|$))/i
+	);
+	if (delimitedRoomForNumber) {
+		capacities.push(Number(delimitedRoomForNumber[1]));
+	}
+
+	const englishWordPattern = /\bfor\s+(one|two|three|four|five|six|seven|eight)\s+(?:persons?|people|guests?)\b|\b(one|two|three|four|five|six|seven|eight)\s+(?:persons?|people|guests?)\b/gi;
+	while ((match = englishWordPattern.exec(source))) {
+		const word = String(match[1] || match[2]).toLowerCase();
+		capacities.push(ROOM_NUMBER_WORD_CAPACITIES[word] || 0);
+	}
+	const terminalRoomForWord = source.match(
+		/\b(?:room|accommodation)\s+for\s+(one|two|three|four|five|six|seven|eight)$/i
+	);
+	if (terminalRoomForWord) {
+		capacities.push(
+			ROOM_NUMBER_WORD_CAPACITIES[terminalRoomForWord[1].toLowerCase()] || 0
+		);
+	}
+	const delimitedRoomForWord = rawValue.match(
+		/\b(?:room|accommodation)\s+for\s+(one|two|three|four|five|six|seven|eight)(?=\s*(?:[-–—|()]|$))/i
+	);
+	if (delimitedRoomForWord) {
+		capacities.push(
+			ROOM_NUMBER_WORD_CAPACITIES[delimitedRoomForWord[1].toLowerCase()] || 0
+		);
+	}
+
+	const arabicWordCapacities = [
+		[1, /(?:شخص واحد|فرد واحد)/u],
+		[2, /(?:شخصين|فردين|اثنين افراد|اثنان افراد)/u],
+		[3, /ثلاثة?\s*(?:افراد|اشخاص)/u],
+		[4, /اربعة?\s*(?:افراد|اشخاص)/u],
+		[5, /خمسة?\s*(?:افراد|اشخاص)/u],
+		[6, /ستة?\s*(?:افراد|اشخاص)/u],
+		[7, /سبعة?\s*(?:افراد|اشخاص)/u],
+		[8, /ثمانية?\s*(?:افراد|اشخاص)/u],
+	];
+	for (const [capacity, pattern] of arabicWordCapacities) {
+		if (pattern.test(source)) capacities.push(capacity);
+	}
+	const unique = [...new Set(capacities.filter((capacity) => capacity > 0))];
+	return {
+		capacities: unique,
+		conflicting: hasAdultChildComposition || unique.length > 1,
+	};
+}
+
+function explicitBedCapacity(value = "") {
+	const rawValue = String(value || "");
+	const source = normalizeRoomSignalText(value);
+	if (!source) return 0;
+	if (
+		/\b(?:sofa\s+beds?|sofabeds?|bunk\s+beds?|extra\s+beds?|rollaway\s+beds?|futons?|cribs?|cots?|murphy\s+beds?|couch\s+beds?)\b/i.test(
+			source
+		)
+	) {
+		return 0;
+	}
+	if ((rawValue.match(/\bbedrooms?\s*(?:no\.?\s*)?\d+\b/gi) || []).length > 1) {
+		return 0;
+	}
+	const genericCounts = [];
+	const typedCapacityEvidence = new Map();
+	const typedEvidenceOccurrences = [];
+	const addTypedCapacity = (count, bedType) => {
+		const normalizedBedType = String(bedType || "").toLowerCase();
+		const capacity =
+			count *
+			(["double", "queen", "king"].includes(normalizedBedType) ? 2 : 1);
+		// Mirrored OTA titles often repeat the same bed phrase in parentheses or
+		// after a language separator. Count each typed fact once, while still
+		// adding distinct composition facts such as one double plus one single.
+		const evidenceKey = `${count}:${normalizedBedType}`;
+		typedEvidenceOccurrences.push(evidenceKey);
+		typedCapacityEvidence.set(evidenceKey, capacity);
+	};
+	const numericBeds = /([1-9]\d?)\s*(?:(single|double|queen|king|twin)\s+)?beds?\b/gi;
+	let match;
+	while ((match = numericBeds.exec(source))) {
+		const count = Number(match[1]);
+		const bedType = String(match[2] || "").toLowerCase();
+		if (bedType) {
+			addTypedCapacity(count, bedType);
+		} else {
+			genericCounts.push(count);
+		}
+	}
+
+	const wordBeds = /\b(one|two|three|four|five|six|seven|eight)\s+(?:(single|double|queen|king|twin)\s+)?beds?\b/gi;
+	while ((match = wordBeds.exec(source))) {
+		const count = ROOM_NUMBER_WORD_CAPACITIES[match[1].toLowerCase()] || 0;
+		const bedType = String(match[2] || "").toLowerCase();
+		if (bedType) {
+			addTypedCapacity(count, bedType);
+		} else {
+			genericCounts.push(count);
+		}
+	}
+
+	const arabicBeds = source.match(/([1-9]\d?)\s*(?:اسرة|سرير)(?=$|\s)/u);
+	if (arabicBeds) genericCounts.push(Number(arabicBeds[1]));
+
+	const repeatedGenericCountsAreAmbiguous =
+		genericCounts.length > 1 &&
+		(/\b(?:or|either|alternatively|instead|and|plus)\b/i.test(source) ||
+			/(?:^|\s)(?:او|و)(?:$|\s)/u.test(source) ||
+			/[+&\/／;,\r\n]/u.test(rawValue));
+	if (repeatedGenericCountsAreAmbiguous) return 0;
+	const uniqueGenericCounts = [...new Set(genericCounts)];
+	const typedCapacities = [...typedCapacityEvidence.values()];
+	if (typedCapacities.length) {
+		const hasAlternativeConnector =
+			/\b(?:or|either|alternatively|instead)\b/i.test(source) ||
+			/(?:^|\s)او(?:$|\s)/u.test(source) ||
+			/[\/／|;,\r\n]/u.test(rawValue);
+		const hasAdditiveConnector =
+			/\b(?:and|plus)\b/i.test(source) ||
+			/(?:^|\s)و(?:$|\s)/u.test(source) ||
+			/[+&]/u.test(rawValue);
+		if (
+			(typedCapacities.length > 1 &&
+				(hasAlternativeConnector || !hasAdditiveConnector)) ||
+			(typedCapacities.length === 1 &&
+				typedEvidenceOccurrences.length > 1 &&
+				hasAdditiveConnector)
+		) {
+			return 0;
+		}
+		const typedTotal = typedCapacities.reduce(
+			(sum, capacity) => sum + capacity,
+			0
+		);
+		if (typedTotal <= 0 || typedTotal > 20) return 0;
+		if (!uniqueGenericCounts.length) return typedTotal;
+		return uniqueGenericCounts.length === 1 &&
+			uniqueGenericCounts[0] === typedTotal
+			? typedTotal
+			: 0;
+	}
+
+	return uniqueGenericCounts.length === 1 ? uniqueGenericCounts[0] : 0;
+}
+
 function mapArabicRoomType(roomNameRaw) {
-	const s = normalizeIntlComparable(roomNameRaw);
+	const s = normalizeRoomSignalText(roomNameRaw);
 	if (!s) return null;
 	if (!/[\u0600-\u06FF]/.test(String(roomNameRaw || ""))) return null;
-	if (/(مشترك|مشتركة|سرير|اسرة مشتركة|أسرّة مشتركة)/.test(s)) {
+	if (/(مشترك|مشتركة|سرير في غرفة مشتركة|اسرة مشتركة)/.test(s)) {
 		return "individualBed";
 	}
 	if (/(جناح بثلاث|ثلاث غرف|3 غرف)/.test(s)) return "masterSuite";
 	if (/(جناح بغرفتين|غرفتين|2 غرف)/.test(s)) return "suite";
 	if (/(استوديو|studio)/.test(s)) return "studioRooms";
-	if (/(فردية|فردي|شخص واحد|\b1\b)/.test(s)) return "singleRooms";
-	if (/(ثنائية|ثنائي|زوجية|زوجي|دبل|شخصين|فردين|\b2\b)/.test(s)) {
-		return "doubleRooms";
-	}
-	if (/(ثلاثية|ثلاثي|ثلاث|3 افراد|\b3\b)/.test(s)) return "tripleRooms";
-	if (/(رباعية|رباعي|اربع|أربع|4 افراد|\b4\b)/.test(s)) return "quadRooms";
-	if (/(خماسية|خماسي|خمسة|5 افراد|\b5\b)/.test(s)) return "familyRooms";
-	if (/(سداسية|سداسي|ستة|6 افراد|\b6\b|سباعية|سباعي|سبعة|7 افراد|\b7\b|عائلية|عائلي)/.test(
-		s
-	)) {
+	const withoutBedDescriptions = s
+		.replace(
+			/(?:^|\s)(?:و?ب?(?:ال)?)?(?:سرير(?:ين|ان|ات)?|اسر(?:ة|ه|تين|تان|ات)?)\s+(?:فردي(?:ة|ين)?|مزدوج(?:ة|ين|تين)?|ثنائي(?:ة|ين)?|دبل)(?=$|\s)/gu,
+			" "
+		)
+		.replace(/\s+/g, " ")
+		.trim();
+	if (/(?:^|\s)دبل(?=$|\s)/u.test(withoutBedDescriptions)) return "doubleRooms";
+	if (/(?:^|\s)(?:عائلية|عائلي)(?=$|\s)/u.test(withoutBedDescriptions)) {
 		return "familyRooms";
 	}
 	return null;
@@ -4051,8 +4536,17 @@ function mapArabicRoomType(roomNameRaw) {
 
 function mapRoomType(roomNameRaw) {
 	if (!roomNameRaw) return null;
-	const arabicMapped = mapArabicRoomType(roomNameRaw);
-	if (arabicMapped) return arabicMapped;
+	if (isIndividualBedAccommodation(roomNameRaw)) return "individualBed";
+	const classEvidence = roomClassEvidence(roomNameRaw);
+	if (
+		classEvidence.roomTypes.length > 1 ||
+		classEvidence.capacities.length > 1
+	) {
+		return null;
+	}
+	if (classEvidence.matches.length === 1) {
+		return classEvidence.matches[0].roomType;
+	}
 	const s = normalizeComparable(roomNameRaw);
 	const hasKeyword = (keyword) =>
 		s.split(" ").some(
@@ -4063,15 +4557,27 @@ function mapRoomType(roomNameRaw) {
 						(word.length >= 4 && keyword.includes(word)) ||
 						bigramSimilarity(word, keyword) >= 0.6))
 		);
-	const explicitBedCapacity = Number(
-		s.match(/\b([1-9])\s+(?:beds?|persons?|guests?)\b/i)?.[1] || 0
-	);
+	const arabicMapped = mapArabicRoomType(roomNameRaw);
 	if (hasKeyword("master") && hasKeyword("suite")) return "masterSuite";
-	if (explicitBedCapacity === 1) return "singleRooms";
-	if (explicitBedCapacity === 2) return "doubleRooms";
-	if (explicitBedCapacity === 3) return "tripleRooms";
-	if (explicitBedCapacity === 4) return "quadRooms";
-	if (explicitBedCapacity >= 5) return "familyRooms";
+	if (["individualBed", "masterSuite", "suite", "studioRooms"].includes(arabicMapped)) {
+		return arabicMapped;
+	}
+	if (hasKeyword("family")) return "familyRooms";
+	if (hasKeyword("studio")) return "studioRooms";
+	if (hasKeyword("suite")) return "suite";
+	if (hasKeyword("standard")) return "standardRooms";
+	if (hasKeyword("shared") || hasKeyword("individual")) return "individualBed";
+	if (/\bking(?:\s+[a-z]+){0,2}\s+room\b/i.test(s)) return "kingRooms";
+	if (/\bqueen(?:\s+[a-z]+){0,2}\s+room\b/i.test(s)) return "queenRooms";
+	if (explicitPersonCapacityEvidence(roomNameRaw).conflicting) return null;
+	const explicitCapacity = explicitRoomCapacity(roomNameRaw);
+	if (explicitCapacity === 1) return "singleRooms";
+	if (explicitCapacity === 2 && hasKeyword("twin")) return "twinRooms";
+	if (explicitCapacity === 2) return "doubleRooms";
+	if (explicitCapacity === 3) return "tripleRooms";
+	if (explicitCapacity === 4) return "quadRooms";
+	if (explicitCapacity >= 5) return "familyRooms";
+	if (arabicMapped) return arabicMapped;
 	if (hasKeyword("quadruple") || hasKeyword("quad")) return "quadRooms";
 	if (hasKeyword("quintuple") || hasKeyword("five") || hasKeyword("5")) return "familyRooms";
 	if (hasKeyword("triple")) return "tripleRooms";
@@ -4089,26 +4595,57 @@ function mapRoomType(roomNameRaw) {
 }
 
 function explicitRoomCapacity(value = "") {
-	const s = normalizeIntlComparable(value);
-	if (!s) return 0;
-	const roomForCapacity = s.match(
-		/\b(?:room|accommodation)\s+for\s+([1-9]\d?)\b/i
-	);
-	if (roomForCapacity) return Number(roomForCapacity[1]);
-	const numeric = s.match(
-		/(?:^|\s)([1-9]\d?)\s*(?:beds?|persons?|people|guests?|occupancy|افراد|أفراد|اشخاص|أشخاص|اسرة|أسرة)(?=$|\s)/i
-	);
-	if (numeric) return Number(numeric[1]);
-	const capacityPatterns = [
-		[1, /\b(single|one[ -]?bed)\b|فردي|فردية|شخص واحد/i],
-		[2, /\b(double|twin|two[ -]?bed)\b|ثنائي|ثنائية|شخصين|فردين/i],
-		[3, /\b(triple|three[ -]?bed)\b|ثلاثي|ثلاثية|ثلاثة افراد/i],
-		[4, /\b(quad(?:ruple)?|four[ -]?bed)\b|رباعي|رباعية|اربعة افراد|أربعة أفراد/i],
-		[5, /\b(quint(?:uple)?|five[ -]?bed)\b|خماسي|خماسية|خمسة افراد|خمسة أفراد/i],
-		[6, /\b(sextuple|six[ -]?bed)\b|سداسي|سداسية|ستة افراد|ستة أفراد/i],
-		[7, /\b(septuple|seven[ -]?bed)\b|سباعي|سباعية|سبعة افراد|سبعة أفراد/i],
-	];
-	return capacityPatterns.find(([, pattern]) => pattern.test(s))?.[0] || 0;
+	return explicitRoomCapacityEvidence(value).capacity;
+}
+
+function explicitRoomCapacityEvidence(value = "") {
+	if (!normalizeRoomSignalText(value)) {
+		return { capacity: 0, kind: "none", conflicting: false };
+	}
+	const classEvidence = roomClassEvidence(value);
+	if (
+		classEvidence.roomTypes.length > 1 ||
+		classEvidence.capacities.length > 1
+	) {
+		return {
+			capacity: 0,
+			kind: "room_class",
+			conflicting: true,
+			classEvidence,
+		};
+	}
+	if (classEvidence.matches.length === 1) {
+		return {
+			capacity: classEvidence.matches[0].capacity,
+			kind: "room_class",
+			conflicting: false,
+			classEvidence,
+		};
+	}
+	const personEvidence = explicitPersonCapacityEvidence(value);
+	if (personEvidence.conflicting) {
+		return {
+			capacity: 0,
+			kind: "person_capacity",
+			conflicting: true,
+			personEvidence,
+		};
+	}
+	if (personEvidence.capacities.length === 1) {
+		return {
+			capacity: personEvidence.capacities[0],
+			kind: "person_capacity",
+			conflicting: false,
+			personEvidence,
+		};
+	}
+
+	const bedCapacity = explicitBedCapacity(value);
+	return {
+		capacity: bedCapacity,
+		kind: bedCapacity ? "bed_capacity" : "none",
+		conflicting: false,
+	};
 }
 
 function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
@@ -4165,20 +4702,34 @@ function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 }
 
 function roomCapacityFromLabels(room = {}) {
-	const rawLabel =
-		[
-			room.displayName,
-			room.displayName_OtherLanguage,
-			roomTypeLabel(room.roomType),
-			room.roomType,
-			room.description,
-			room.description_OtherLanguage,
-		]
-			.filter(Boolean)
-			.join(" ");
-	const explicitCapacity = explicitRoomCapacity(rawLabel);
-	if (explicitCapacity) return explicitCapacity;
-	const label = normalizeComparable(rawLabel);
+	// Fixed PMS room types are configuration authority. Display text can be
+	// translated, stale, or accidentally copied from another room.
+	const canonicalRoomTypeCapacity =
+		CANONICAL_ROOM_TYPE_CAPACITIES[String(room.roomType || "")];
+	if (canonicalRoomTypeCapacity) return canonicalRoomTypeCapacity;
+
+	const displayClassCapacities = [room.displayName, room.displayName_OtherLanguage]
+		.map(explicitRoomClassCapacity)
+		.filter((capacity) => capacity > 0);
+	const uniqueDisplayClassCapacities = [...new Set(displayClassCapacities)];
+	if (uniqueDisplayClassCapacities.length === 1) {
+		return uniqueDisplayClassCapacities[0];
+	}
+	if (uniqueDisplayClassCapacities.length > 1) return 0;
+
+	const displayCapacities = [room.displayName, room.displayName_OtherLanguage]
+		.map(explicitRoomCapacity)
+		.filter((capacity) => capacity > 0);
+	const uniqueDisplayCapacities = [...new Set(displayCapacities)];
+	if (uniqueDisplayCapacities.length === 1) return uniqueDisplayCapacities[0];
+	if (uniqueDisplayCapacities.length > 1) return 0;
+
+	const descriptions = [room.description, room.description_OtherLanguage]
+		.filter(Boolean)
+		.join(" ");
+	const descriptionCapacity = explicitRoomCapacity(descriptions);
+	if (descriptionCapacity) return descriptionCapacity;
+	const label = normalizeComparable(descriptions);
 	const describedNumericCapacity = Number(
 		label.match(
 			/\b(?:accommodat(?:es|ing)?(?: up to)?|capacity(?: of)?|up to) ([1-9]\d?) (?:guests?|people|persons?)\b/
@@ -4265,32 +4816,145 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 	const rooms = (hotelDetails?.roomCountDetails || []).filter(
 		(room) => room && room.roomType && room.activeRoom !== false
 	);
+	const individualBedSignal = isIndividualBedAccommodation(roomName);
 	const mappedRoomType = mapRoomType(roomName);
-	const sourceCapacity = explicitRoomCapacity(roomName);
+	const capacityEvidence = explicitRoomCapacityEvidence(roomName);
+	const sourceCapacity = capacityEvidence.capacity;
+	const sourceClassEvidence = roomClassEvidence(roomName);
+	const sourceClassCapacities = sourceClassEvidence.capacities;
+	const sourceClassCapacity =
+		sourceClassCapacities.length === 1 ? sourceClassCapacities[0] : 0;
+	const sourceClassType =
+		sourceClassEvidence.roomTypes.length === 1
+			? sourceClassEvidence.roomTypes[0]
+			: "";
+	const sourcePersonEvidence = explicitPersonCapacityEvidence(roomName);
+	const sourcePersonCapacities = sourcePersonEvidence.capacities;
 	if (!rooms.length || !normalizeWhitespace(roomName)) {
 		return {
 			roomDetails: null,
 			score: 0,
+			matchType: "missing_room_context",
+			aiFallbackAllowed: false,
 			warnings: ["Room type/name is missing or this hotel has no room details."],
 		};
 	}
-
-	const capacityMatchedRooms = sourceCapacity
-		? rooms.filter((room) => roomCapacityFromLabels(room) === sourceCapacity)
-		: rooms;
-	if (sourceCapacity && !capacityMatchedRooms.length) {
+	if (
+		sourceClassEvidence.roomTypes.length > 1 ||
+		sourceClassCapacities.length > 1
+	) {
 		return {
 			roomDetails: null,
 			score: 0,
-			mappedRoomType,
-			sourceCapacity,
+			matchType: "conflicting_room_class",
+			mappedRoomType: null,
+			sourceCapacity: 0,
+			sourceClassCapacity: 0,
+			sourceClassCapacities,
+			capacityCandidateCount: 0,
+			capacityCandidateIds: [],
+			aiFallbackAllowed: false,
 			warnings: [
-				`Room "${roomName}" requires capacity ${sourceCapacity}, but no active PMS room has that configured capacity.`,
+				`Room "${roomName}" contains conflicting explicit room classes; it must remain unmapped as received for manual review.`,
+			],
+		};
+	}
+	if (!sourceClassCapacity && sourcePersonEvidence.conflicting) {
+		return {
+			roomDetails: null,
+			score: 0,
+			matchType: "conflicting_person_capacity",
+			mappedRoomType: null,
+			sourceCapacity: 0,
+			sourceClassCapacity: 0,
+			sourcePersonCapacities,
+			capacityCandidateCount: 0,
+			capacityCandidateIds: [],
+			aiFallbackAllowed: false,
+			warnings: [
+				`Room "${roomName}" contains conflicting explicit person capacities; it must remain unmapped as received for manual review.`,
 			],
 		};
 	}
 
-	if (sourceCapacity && capacityMatchedRooms.length === 1) {
+	const individualBedRooms = individualBedSignal
+		? rooms.filter((room) => room.roomType === "individualBed")
+		: [];
+	if (individualBedSignal && !individualBedRooms.length) {
+		return {
+			roomDetails: null,
+			score: 0,
+			matchType: "explicit_semantic_unavailable",
+			mappedRoomType: "individualBed",
+			sourceCapacity: 0,
+			capacityCandidateCount: 0,
+			capacityCandidateIds: [],
+			aiFallbackAllowed: false,
+			warnings: [
+				`Room "${roomName}" explicitly sells an individual bed, but this hotel has no active individual-bed PMS room; it must remain unmapped as received.`,
+			],
+		};
+	}
+	if (individualBedSignal && individualBedRooms.length === 1) {
+		return {
+			roomDetails: individualBedRooms[0],
+			score: 0.98,
+			displayScore: scoreRoomCandidate(
+				individualBedRooms[0],
+				roomName,
+				"individualBed"
+			).displayScore,
+			matchType: "explicit_room_semantic",
+			mappedRoomType: "individualBed",
+			sourceCapacity: 0,
+			capacityCandidateCount: 1,
+			capacityCandidateIds: [String(individualBedRooms[0]?._id || "")].filter(
+				Boolean
+			),
+			aiFallbackAllowed: false,
+			warnings: [],
+		};
+	}
+
+	const capacityMatchedRooms = individualBedSignal
+		? individualBedRooms
+		: sourceCapacity
+		? rooms.filter((room) => {
+				if (roomCapacityFromLabels(room) !== sourceCapacity) return false;
+				return !sourceClassType || room.roomType === sourceClassType;
+		  })
+		: rooms;
+	const capacityCandidateIds = capacityMatchedRooms
+		.map((room) => String(room?._id || "").trim())
+		.filter(Boolean);
+	if (sourceCapacity && !capacityMatchedRooms.length) {
+		return {
+			roomDetails: null,
+			score: 0,
+			matchType: "explicit_capacity_unavailable",
+			mappedRoomType,
+			sourceCapacity,
+			sourceClassCapacity,
+			sourceClassType,
+			capacityCandidateCount: 0,
+			capacityCandidateIds,
+			aiFallbackAllowed: false,
+			warnings: [
+				`Room "${roomName}" explicitly requires capacity ${sourceCapacity}, but no active PMS room has a compatible configured class and capacity; the OTA room must remain unmapped as received.`,
+			],
+		};
+	}
+
+	const requiresSemanticNameEvidence =
+		capacityEvidence.kind !== "room_class" &&
+		SEMANTIC_ROOM_TYPES_REQUIRING_NAME_EVIDENCE.has(mappedRoomType) &&
+		capacityMatchedRooms.length === 1 &&
+		capacityMatchedRooms[0].roomType !== mappedRoomType;
+	if (
+		sourceCapacity &&
+		capacityMatchedRooms.length === 1 &&
+		!requiresSemanticNameEvidence
+	) {
 		return {
 			roomDetails: capacityMatchedRooms[0],
 			score: 0.98,
@@ -4303,6 +4967,11 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			threshold: 0.75,
 			mappedRoomType,
 			sourceCapacity,
+			sourceClassCapacity,
+			sourceClassType,
+			capacityCandidateCount: 1,
+			capacityCandidateIds,
+			aiFallbackAllowed: false,
 			warnings: [],
 		};
 	}
@@ -4333,10 +5002,24 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			options.normalized,
 			mappedRoomType
 		);
-		if (semanticFallback) return semanticFallback;
+		if (semanticFallback) {
+			return {
+				...semanticFallback,
+				sourceCapacity,
+				sourceClassCapacity,
+				capacityCandidateCount: capacityMatchedRooms.length,
+				capacityCandidateIds,
+			};
+		}
 		return {
 			roomDetails: null,
 			score: 0,
+			matchType: "no_deterministic_match",
+			mappedRoomType,
+			sourceCapacity,
+			sourceClassCapacity,
+			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateIds,
 			warnings: [
 				`No hotel room matched "${roomName}" at the required 75% confidence.`,
 			],
@@ -4357,6 +5040,9 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			threshold: 0.75,
 			mappedRoomType,
 			sourceCapacity,
+			sourceClassCapacity,
+			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateIds,
 			warnings: [
 				`Multiple active PMS rooms are equally plausible for "${roomName}"; manual room mapping is required.`,
 			],
@@ -4374,6 +5060,9 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			threshold: 0.75,
 			mappedRoomType,
 			sourceCapacity,
+			sourceClassCapacity,
+			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateIds,
 			warnings: [
 				`Room "${roomName}" only matched a broad PMS room category; manual room mapping is required.`,
 			],
@@ -4388,6 +5077,9 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		threshold: 0.75,
 		mappedRoomType,
 		sourceCapacity,
+		sourceClassCapacity,
+		capacityCandidateCount: capacityMatchedRooms.length,
+		capacityCandidateIds,
 		warnings,
 	};
 }
@@ -4427,6 +5119,12 @@ async function resolveRoomMatchWithAi(hotelDetails, normalized = {}) {
 	if (!aiMatch.usedAI) {
 		if (["exact_display", "explicit_capacity"].includes(deterministicMatch.matchType)) {
 			return deterministicMatch;
+		}
+		if (deterministicMatch.aiFallbackAllowed === false) {
+			return {
+				...deterministicMatch,
+				aiRoomMatch: aiMatch,
+			};
 		}
 		return {
 			...deterministicMatch,

@@ -78,6 +78,50 @@ test("exact and uniquely capacity-backed PMS matches avoid a second AI charge", 
 		true
 	);
 	assert.equal(shouldAskAiForRoomMatch({ roomDetails: null }), true);
+	assert.equal(
+		shouldAskAiForRoomMatch({
+			roomDetails: null,
+			matchType: "explicit_capacity_unavailable",
+			sourceCapacity: 3,
+			aiFallbackAllowed: false,
+		}),
+		false
+	);
+});
+
+test("a hard room capacity with no PMS candidate never invokes OpenAI", async () => {
+	let calls = 0;
+	const client = {
+		chat: {
+			completions: {
+				create: async () => {
+					calls += 1;
+					throw new Error("must not be called");
+				},
+			},
+		},
+	};
+	const result = await matchOtaRoomWithOpenAi({
+		hotelDetails: hotel,
+		normalized: { roomName: "Triple Room" },
+		deterministicMatch: {
+			roomDetails: null,
+			matchType: "explicit_capacity_unavailable",
+			sourceCapacity: 3,
+			aiFallbackAllowed: false,
+		},
+		sourceCapacity: 3,
+		candidateCapacities: { "room-five": 5, "room-six": 6 },
+		client,
+	});
+
+	assert.equal(calls, 0);
+	assert.equal(result.usedAI, false);
+	assert.equal(result.matched, false);
+	assert.equal(
+		result.skipReason,
+		"deterministic_room_signal_has_no_pms_candidate"
+	);
 });
 
 test("AI room decisions must use an allowlisted PMS ID and pass confidence, ambiguity, and capacity gates", () => {
@@ -144,6 +188,57 @@ test("AI room decisions must use an allowlisted PMS ID and pass confidence, ambi
 		).rejectionCode,
 		"occupancy_exceeds_pms_capacity"
 	);
+	assert.equal(
+		normalizeAiRoomDecision(
+			aiDecision({
+				selectedRoomId: "room-six",
+				confidence: 0.95,
+				runnerUpRoomId: "room-five",
+				runnerUpConfidence: 0.4,
+				basis: "occupancy_only",
+			}),
+			candidates,
+			{ candidateCapacities: capacities }
+		).rejectionCode,
+		"non_match_basis"
+	);
+	assert.equal(
+		normalizeAiRoomDecision(
+			aiDecision({
+				selectedRoomId: "room-six",
+				confidence: 0.95,
+				runnerUpRoomId: "room-five",
+				runnerUpConfidence: 0.4,
+			}),
+			candidates,
+			{ minimumCapacity: 4, candidateCapacities: {} }
+		).rejectionCode,
+		"pms_capacity_unknown"
+	);
+	assert.equal(
+		normalizeAiRoomDecision(
+			aiDecision({ selectedRoomId: "room-six", confidence: 0.95 }),
+			candidates,
+			{ candidateCapacities: capacities }
+		).rejectionCode,
+		"missing_runner_up"
+	);
+	assert.equal(
+		normalizeAiRoomDecision(
+			aiDecision({
+				selectedRoomId: "room-six",
+				confidence: 0.95,
+				runnerUpRoomId: "room-five",
+				runnerUpConfidence: 0.4,
+			}),
+			candidates,
+			{
+				candidateCapacities: capacities,
+				requiredRoomType: "suite",
+			}
+		).rejectionCode,
+		"semantic_room_type_conflict"
+	);
 });
 
 test("semantic room matching sends the resolved hotel's allowlist using strict structured output", async () => {
@@ -209,6 +304,77 @@ test("semantic room matching sends the resolved hotel's allowlist using strict s
 	assert.equal("bedsCount" in userPayload.pmsRooms[0], false);
 	assert.match(request.messages[0].content, /Room 2.*not two beds/i);
 	assert.equal(request.messages[1].content.includes("This Guest Must Never Be Sent"), false);
+});
+
+test("explicit capacity limits AI to capacity-compatible PMS candidates", async () => {
+	let request;
+	const client = {
+		chat: {
+			completions: {
+				create: async (body) => {
+					request = body;
+					return {
+						choices: [
+							{
+								message: {
+									content: JSON.stringify(
+										aiDecision({
+											selectedRoomId: "triple-deluxe",
+											confidence: 0.91,
+											runnerUpRoomId: "triple-city",
+											runnerUpConfidence: 0.7,
+											basis: "explicit_capacity",
+										})
+									),
+								},
+							},
+						],
+					};
+				},
+			},
+		},
+	};
+	const capacityHotel = {
+		_id: "capacity-hotel",
+		roomCountDetails: [
+			{ _id: "double", roomType: "doubleRooms", activeRoom: true },
+			{ _id: "triple-deluxe", roomType: "tripleRooms", activeRoom: true },
+			{ _id: "triple-city", roomType: "tripleRooms", activeRoom: true },
+			{
+				_id: "family-three",
+				roomType: "familyRooms",
+				displayName: "Family Room for 3 guests",
+				activeRoom: true,
+			},
+		],
+	};
+	const result = await matchOtaRoomWithOpenAi({
+		hotelDetails: capacityHotel,
+		normalized: { roomName: "Tholasy premium room" },
+		deterministicMatch: {
+			roomDetails: null,
+			matchType: "ambiguous",
+			capacityCandidateIds: ["triple-deluxe", "triple-city"],
+		},
+		sourceCapacity: 3,
+		candidateCapacities: {
+			double: 2,
+			"triple-deluxe": 3,
+			"triple-city": 3,
+			"family-three": 3,
+		},
+		client,
+	});
+
+	assert.equal(result.matched, true);
+	assert.deepEqual(
+		request.response_format.json_schema.schema.properties.selectedRoomId.enum,
+		["triple-deluxe", "triple-city", null]
+	);
+	assert.deepEqual(
+		JSON.parse(request.messages[1].content).pmsRooms.map((room) => room.id),
+		["triple-deluxe", "triple-city"]
+	);
 });
 
 test("transient OpenAI failures are retried once without widening the PMS allowlist", async () => {

@@ -790,6 +790,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 			providerLabel: merged.providerLabel,
 			from: emailContext.fromForClassification || email.from || "",
 			subject: emailContext.subjectForClassification || email.subject || "",
+			text: emailText,
 		});
 	}
 
