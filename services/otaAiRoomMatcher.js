@@ -308,27 +308,54 @@ async function matchOtaRoomWithOpenAi({
 		};
 	}
 	const expectedCapacity = Number(sourceCapacity || 0);
+	const requiredOccupancy = expectedCapacity
+		? 0
+		: Math.max(0, Number(minimumCapacity || 0));
 	const capacityCandidates = expectedCapacity
 		? allCandidates.filter(
 				(candidate) =>
 					Number(candidateCapacities[candidate.id] || 0) === expectedCapacity
 		  )
+		: requiredOccupancy
+		? allCandidates.filter(
+				(candidate) =>
+					Number(candidateCapacities[candidate.id] || 0) >= requiredOccupancy
+		  )
 		: allCandidates;
+	const requiredSemanticRoomType = normalizeText(
+		deterministicMatch.mappedRoomType
+	);
+	const requiresSemanticRoomType =
+		SEMANTIC_ROOM_TYPES_REQUIRING_MATCH.has(requiredSemanticRoomType);
+	// The response validator rejects semantic substitutions (for example,
+	// Family -> Quad or King -> Double). Apply the same constraint before the
+	// request so OpenAI is never called when every possible answer is known to
+	// be invalid, and never receives incompatible PMS rooms to rank.
+	const semanticCandidates = requiresSemanticRoomType
+		? capacityCandidates.filter(
+				(candidate) => candidate.roomType === requiredSemanticRoomType
+		  )
+		: capacityCandidates;
 	const deterministicAllowedIds = new Set(
 		Array.isArray(deterministicMatch.capacityCandidateIds)
 			? deterministicMatch.capacityCandidateIds.map(normalizeId).filter(Boolean)
 			: []
 	);
 	const candidates = deterministicAllowedIds.size
-		? capacityCandidates.filter((candidate) =>
+		? semanticCandidates.filter((candidate) =>
 				deterministicAllowedIds.has(candidate.id)
 		  )
-		: capacityCandidates;
+		: semanticCandidates;
 	if (!candidates.length) {
 		return {
 			usedAI: false,
 			matched: false,
-			skipReason: "explicit_capacity_has_no_allowlisted_pms_candidate",
+			skipReason:
+				requiresSemanticRoomType && !semanticCandidates.length
+					? "required_semantic_room_type_has_no_pms_candidate"
+					: requiredOccupancy && !capacityCandidates.length
+					? "occupancy_has_no_compatible_pms_candidate"
+					: "explicit_capacity_has_no_allowlisted_pms_candidate",
 		};
 	}
 

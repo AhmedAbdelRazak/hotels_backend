@@ -22,6 +22,7 @@ const {
 	detectStatusToApply,
 	detectProvider,
 	resolveBookingSource,
+	requiredNewReservationMissing,
 } = require("./otaReservationMapper");
 
 const ALLOWED_INTENTS = new Set([
@@ -168,6 +169,7 @@ const isWeakOtaConfirmationValue = (value = "") => {
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!normalized) return true;
+	if (/^card\s+\d{4}$/.test(normalized)) return true;
 	if (!hasReliableOtaConfirmation(normalized)) return true;
 	if (/\d{5,}/.test(normalized)) return false;
 	return normalized
@@ -228,6 +230,14 @@ const getDeterministicStatusSkipReason = (heuristic = {}, emailContext = {}) => 
 	if (!hasTrustedContext) return "";
 
 	return "Deterministic status email: clear status, exact confirmation number, and trusted OTA/forwarded context were already extracted.";
+};
+
+const getDeterministicExtractionSkipReason = (heuristic = {}) => {
+	if (normalizeIntent(heuristic.intent) !== "new_reservation") return "";
+	if (!heuristic.provider || heuristic.provider === "unknown") return "";
+	if (heuristic.requiresManualReview === true) return "";
+	if (requiredNewReservationMissing(heuristic).length > 0) return "";
+	return "Deterministic new reservation: every creation-critical field is source-backed; extraction AI cannot add authority and was skipped.";
 };
 
 const stripSubjectPrefixes = (subject = "") => {
@@ -467,6 +477,22 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 		};
 	}
 
+	const deterministicExtractionReason =
+		getDeterministicExtractionSkipReason(heuristic);
+	if (deterministicExtractionReason) {
+		logOrchestrator("ai.skipped", {
+			reason: deterministicExtractionReason,
+			intent: heuristic.intent,
+			provider: heuristic.provider,
+			confirmationNumber: heuristic.confirmationNumber,
+		});
+		return {
+			usedAI: false,
+			skipped: true,
+			reason: deterministicExtractionReason,
+		};
+	}
+
 	const client = getOpenAiClient();
 	if (!client) {
 		logOrchestrator("ai.skipped", {
@@ -642,6 +668,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	);
 	const aiConfirmationCanReplace =
 		confirmationNumber &&
+		!isWeakOtaConfirmationValue(confirmationNumber) &&
 		aiConfidence >= 0.8 &&
 		fieldAppearsInText(confirmationNumber, emailText) &&
 		(isWeakOtaConfirmationValue(merged.confirmationNumber) ||
@@ -649,6 +676,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	if (
 		(!merged.confirmationNumber || aiConfirmationCanReplace) &&
 		confirmationNumber &&
+		!isWeakOtaConfirmationValue(confirmationNumber) &&
 		fieldAppearsInText(confirmationNumber, emailText)
 	) {
 		merged.confirmationNumber = confirmationNumber;
@@ -930,7 +958,27 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 		errors: heuristic.errors || [],
 	});
 
-	const aiResult = await askOpenAiForDecision(email, heuristic, emailContext);
+	const senderAuthenticationAiSkipReason =
+		heuristic.sourceSenderTrusted !== true
+			? "ota_sender_domain_not_trusted_for_mutation"
+			: heuristic.sourceSenderAuthenticated !== true
+			? "ota_sender_authentication_not_verified"
+			: "";
+	const aiResult = senderAuthenticationAiSkipReason
+		? {
+				usedAI: false,
+				skipped: true,
+				reason: senderAuthenticationAiSkipReason,
+		  }
+		: await askOpenAiForDecision(email, heuristic, emailContext);
+	if (senderAuthenticationAiSkipReason) {
+		logOrchestrator("ai.skipped", {
+			reason: senderAuthenticationAiSkipReason,
+			provider: heuristic.provider,
+			intent: heuristic.intent,
+			confirmationNumber: heuristic.confirmationNumber,
+		});
+	}
 	const merged = mergeAiDecision({
 		heuristic,
 		aiResult,
@@ -968,4 +1016,6 @@ module.exports = {
 	orchestrateInboundReservationEmail,
 	buildRedactedEmailText,
 	buildEmailContext,
+	isWeakOtaConfirmationValue,
+	getDeterministicExtractionSkipReason,
 };

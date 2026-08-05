@@ -282,3 +282,27 @@ test("orchestrator terminates known guest messages before invoking AI", async ()
 	assert.equal(result.decision.skipped, true);
 	assert.equal(result.decision.skipReason, "hotelrunner_guest_message");
 });
+
+test("orchestrator never spends AI tokens on an untrusted Agoda messaging sender", async () => {
+	const result = await orchestrateInboundReservationEmail({
+		from: "Agoda <notifications@agoda-messaging.com>",
+		subject: "Notification from Agoda (Aug 14-17, 2026)",
+		text: [
+			"Fee waiver request",
+			"Booking ID: 685912279",
+			"The guest has contacted the property about this booking.",
+		].join("\n"),
+		senderAuthentication: {
+			authenticatedAligned: true,
+			method: "spf",
+		},
+	});
+
+	assert.equal(result.normalized.sourceSenderTrusted, false);
+	assert.equal(result.decision.usedAI, false);
+	assert.equal(result.decision.skipped, true);
+	assert.equal(
+		result.decision.skipReason,
+		"ota_sender_domain_not_trusted_for_mutation"
+	);
+});
