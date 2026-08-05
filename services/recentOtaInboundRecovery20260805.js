@@ -184,6 +184,7 @@ const TARGETS = freeze({
 				sourceReceivedAt: "2026-08-05T08:24:41.000Z",
 				processingStatus: "created",
 				automationAction: "created",
+				reconciliationActionAbsent: true,
 				skipReason: "",
 			},
 			{
@@ -1048,7 +1049,15 @@ const validateAuditDocument = (audit, target, expected) => {
 	assert.equal(String(audit.automationAction || "").toLowerCase(), expected.automationAction, `${expected.id}.automationAction`);
 	assert.equal(String(audit.skipReason || "").toLowerCase(), expected.skipReason, `${expected.id}.skipReason`);
 	assert.equal(String(audit.reconciliation?.status || "").toLowerCase(), expected.processingStatus, `${expected.id}.reconciliation.status`);
-	assert.equal(String(audit.reconciliation?.actionTaken || "").toLowerCase(), expected.automationAction, `${expected.id}.reconciliation.actionTaken`);
+	if (expected.reconciliationActionAbsent === true) {
+		assert.equal(
+			own(audit.reconciliation || {}, "actionTaken"),
+			false,
+			`${expected.id}.reconciliation.actionTaken must remain absent`,
+		);
+	} else {
+		assert.equal(String(audit.reconciliation?.actionTaken || "").toLowerCase(), expected.automationAction, `${expected.id}.reconciliation.actionTaken`);
+	}
 	assert.equal(String(audit.reconciliation?.skipReason || "").toLowerCase(), expected.skipReason, `${expected.id}.reconciliation.skipReason`);
 	if (expected.trustedProvider) {
 		assert.equal(audit.senderAuthentication?.authenticatedAligned, true, `${expected.id} must be authenticated and aligned.`);

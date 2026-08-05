@@ -341,7 +341,6 @@ const pricingAuditFixture = (expected) => {
 	}
 	const reconciliation = {
 		status: expected.processingStatus,
-		actionTaken: expected.automationAction,
 		skipReason: expected.skipReason,
 		automationComment: "Original outcome",
 		warnings: [],
@@ -351,6 +350,9 @@ const pricingAuditFixture = (expected) => {
 		pmsConfirmationNumber: target.pmsConfirmation,
 		matchedReservationBy: direct ? ["otaIdentityKey", "reservation_id"] : [],
 	};
+	if (expected.reconciliationActionAbsent !== true) {
+		reconciliation.actionTaken = expected.automationAction;
+	}
 	return {
 		_id: objectId(expected.id),
 		source: "sendgrid",

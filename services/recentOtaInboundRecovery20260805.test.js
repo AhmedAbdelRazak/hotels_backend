@@ -579,12 +579,14 @@ const auditFixture = (targetKey, expected) => {
 	}
 	const reconciliation = {
 		status: expected.processingStatus,
-		actionTaken: expected.automationAction,
 		skipReason: expected.skipReason,
 		automationComment: "Original outcome",
 		warnings: [],
 		errors: expected.skipReason ? ["Original review reason"] : [],
 	};
+	if (expected.reconciliationActionAbsent !== true) {
+		reconciliation.actionTaken = expected.automationAction;
+	}
 	if (hasReservation) {
 		reconciliation.reservationId = oid(target.mongoId);
 		reconciliation.hotelId = target.kind === "hotel_assignment" ? null : oid(target.hotelId);
@@ -807,6 +809,7 @@ test("Agoda 2038686448 target is locked to the independently audited production 
 			sourceReceivedAt: "2026-08-05T08:24:41.000Z",
 			processingStatus: "created",
 			automationAction: "created",
+			reconciliationActionAbsent: true,
 			skipReason: "",
 		},
 		{
@@ -823,6 +826,34 @@ test("Agoda 2038686448 target is locked to the independently audited production 
 			skipReason: "stale_ota_lifecycle_event",
 		},
 	]);
+});
+
+test("Agoda 2038686448 permits only its observed missing relay reconciliation action", () => {
+	const target = TARGETS.agoda_pricing_2038686448;
+	const relayId = target.audits.find((audit) => audit.role === "creating_relay_evidence").id;
+	const fixture = targetFixture("agoda_pricing_2038686448");
+	const relay = fixture.audits.find((audit) => String(audit._id) === relayId);
+	assert.equal(Object.hasOwn(relay.reconciliation, "actionTaken"), false);
+	assert.doesNotThrow(() => buildRecoveryPlan(fixture));
+
+	for (const value of ["", null, false, 0, "created", "skipped"]) {
+		const unexpectedAction = targetFixture("agoda_pricing_2038686448");
+		const unexpectedRelay = unexpectedAction.audits.find((audit) => String(audit._id) === relayId);
+		unexpectedRelay.reconciliation.actionTaken = value;
+		assert.throws(
+			() => buildRecoveryPlan(unexpectedAction),
+			/reconciliation\.actionTaken must remain absent/,
+			`The target-specific absence exception accepted ${String(value)}.`,
+		);
+	}
+
+	const ordinaryTarget = targetFixture("agoda_pricing_2038722839");
+	delete ordinaryTarget.audits[0].reconciliation.actionTaken;
+	assert.throws(
+		() => buildRecoveryPlan(ordinaryTarget),
+		/reconciliation\.actionTaken/,
+		"Other recovery targets must continue requiring their recorded reconciliation action.",
+	);
 });
 
 test("all pricing targets satisfy fixed source conversion, stay, and cent-exact arithmetic invariants", () => {
