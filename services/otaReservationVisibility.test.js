@@ -12,7 +12,93 @@ const {
 	isOtaPlatformReviewPending,
 	platformOtaScopeFilter,
 	strictPlatformOtaHotelScopeFilter,
+	validateGenericPendingOtaReviewLifecycleUpdate,
+	validateOtaPlatformReviewActionState,
 } = require("./otaReservationVisibility");
+
+const pendingOtaReviewReservation = (overrides = {}) => ({
+	otaPlatformReview: { status: "pending" },
+	reservation_status: "OTA Platform Review",
+	state: "OTA Platform Review",
+	pendingConfirmation: { status: "", reason: "" },
+	agentDecisionSnapshot: { status: "", reason: "" },
+	...overrides,
+});
+
+test("dedicated OTA actions require a pending and internally consistent review lifecycle", () => {
+	assert.deepEqual(
+		validateOtaPlatformReviewActionState(pendingOtaReviewReservation()),
+		{ ready: true },
+	);
+
+	const inconsistent = validateOtaPlatformReviewActionState(
+		pendingOtaReviewReservation({
+			reservation_status: "confirmed",
+			state: "confirmed",
+		}),
+	);
+	assert.equal(inconsistent.ready, false);
+	assert.equal(inconsistent.statusCode, 409);
+	assert.equal(inconsistent.code, "ota_review_lifecycle_inconsistent");
+
+	const released = validateOtaPlatformReviewActionState(
+		pendingOtaReviewReservation({ otaPlatformReview: { status: "released" } }),
+	);
+	assert.equal(released.code, "ota_review_not_pending");
+});
+
+test("generic reservation updates cannot move a pending OTA review lifecycle", () => {
+	for (const field of [
+		"reservation_status",
+		"state",
+		"pendingConfirmation",
+		"pendingConfirmation.status",
+		"agentDecisionSnapshot",
+		"agentDecisionSnapshot.status",
+		"otaPlatformReview",
+		"otaPlatformReview.status",
+	]) {
+		const result = validateGenericPendingOtaReviewLifecycleUpdate(
+			pendingOtaReviewReservation(),
+			{ [field]: "confirmed" },
+		);
+		assert.equal(result.ready, false);
+		assert.equal(result.statusCode, 409);
+		assert.equal(result.code, "ota_review_dedicated_lifecycle_route_required");
+		assert.deepEqual(result.fields, [field]);
+	}
+
+	assert.deepEqual(
+		validateGenericPendingOtaReviewLifecycleUpdate(
+			pendingOtaReviewReservation(),
+			{ customer_details: { name: "Guest" } },
+		),
+		{ ready: true },
+	);
+	const existing = pendingOtaReviewReservation();
+	assert.deepEqual(
+		validateGenericPendingOtaReviewLifecycleUpdate(existing, {
+			reservation_status: "ota_platform_review",
+			state: " OTA Platform Review ",
+			pendingConfirmation: { reason: "", status: "" },
+			agentDecisionSnapshot: { reason: "", status: "" },
+			otaPlatformReview: { status: " PENDING " },
+			"pendingConfirmation.status": "",
+			"agentDecisionSnapshot.status": "",
+			"otaPlatformReview.status": "PENDING",
+		}),
+		{ ready: true },
+	);
+	assert.deepEqual(
+		validateGenericPendingOtaReviewLifecycleUpdate(
+			pendingOtaReviewReservation({
+				otaPlatformReview: { status: "released" },
+			}),
+			{ state: "confirmed" },
+		),
+		{ ready: true },
+	);
+});
 
 test("the OTA review queue contains pending records only, never cancelled/closed records", () => {
 	assert.deepEqual(buildPendingOtaReviewFilter(), {

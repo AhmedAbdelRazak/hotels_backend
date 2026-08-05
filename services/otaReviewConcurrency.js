@@ -2,6 +2,10 @@
 
 "use strict";
 
+const {
+	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+} = require("./otaReservationVisibility");
+
 const OTA_REVIEW_CONCURRENT_CHANGE_CODE = "ota_review_concurrent_change";
 
 const reservationVersion = (reservation = {}) => {
@@ -24,6 +28,8 @@ const buildReservationSnapshotFilter = (
 	if (reservation.updatedAt) filter.updatedAt = reservation.updatedAt;
 	if (requirePendingReview) {
 		filter["otaPlatformReview.status"] = "pending";
+		filter.reservation_status = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		filter.state = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
 	} else if (expectedReviewStatus !== undefined) {
 		filter["otaPlatformReview.status"] = expectedReviewStatus;
 	}

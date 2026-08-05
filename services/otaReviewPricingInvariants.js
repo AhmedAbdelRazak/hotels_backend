@@ -8,6 +8,326 @@ const {
 
 const TOTAL_TOLERANCE = 0.05;
 
+const hasOwn = (source = {}, field) =>
+	Object.prototype.hasOwnProperty.call(source || {}, field);
+
+const LOCALIZED_MONEY_DIGITS = Object.freeze({
+	"\u0660": "0",
+	"\u0661": "1",
+	"\u0662": "2",
+	"\u0663": "3",
+	"\u0664": "4",
+	"\u0665": "5",
+	"\u0666": "6",
+	"\u0667": "7",
+	"\u0668": "8",
+	"\u0669": "9",
+	"\u06f0": "0",
+	"\u06f1": "1",
+	"\u06f2": "2",
+	"\u06f3": "3",
+	"\u06f4": "4",
+	"\u06f5": "5",
+	"\u06f6": "6",
+	"\u06f7": "7",
+	"\u06f8": "8",
+	"\u06f9": "9",
+});
+const BIDI_CONTROL_PATTERN =
+	/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const GROUPED_SPACE_PATTERN = /[ \t\u00a0\u202f]/g;
+
+const normalizeLocalizedMoneyDigits = (value = "") =>
+	String(value || "").replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (digit) =>
+		LOCALIZED_MONEY_DIGITS[digit] || digit
+	);
+
+const validGroupedInteger = (value = "", separator = "") => {
+	if (!separator) return /^\d+$/.test(value);
+	const groups = String(value).split(separator);
+	return (
+		/^\d{1,3}$/.test(groups[0] || "") &&
+		groups.slice(1).every((group) => /^\d{3}$/.test(group))
+	);
+};
+
+const normalizeLocalizedMoneyText = (value) => {
+	if (typeof value === "number") {
+		return Number.isFinite(value) ? String(value) : "";
+	}
+	if (typeof value !== "string" || value.length > 128) return "";
+
+	let text = normalizeLocalizedMoneyDigits(value)
+		.replace(BIDI_CONTROL_PATTERN, "")
+		.trim();
+	if (!text) return "";
+
+	if (/[\u066b\u066c]/.test(text)) {
+		// Arabic decimal/thousands marks are unambiguous. Do not mix them with
+		// Western marks in one value, and enforce their actual Unicode meanings.
+		if (/[.,]/.test(text)) return "";
+		const sign = /^[+-]/.test(text) ? text[0] : "";
+		const unsigned = sign ? text.slice(1) : text;
+		if ((unsigned.match(/\u066b/g) || []).length > 1) return "";
+		const [integerPart, fractionPart] = unsigned.split("\u066b");
+		if (fractionPart !== undefined && !/^\d{1,2}$/.test(fractionPart)) {
+			return "";
+		}
+		if (
+			integerPart.includes("\u066c")
+				? !validGroupedInteger(integerPart, "\u066c")
+				: !/^\d+$/.test(integerPart)
+		) {
+			return "";
+		}
+		return `${sign}${integerPart.split("\u066c").join("")}${
+			fractionPart === undefined ? "" : `.${fractionPart}`
+		}`;
+	}
+
+	if (GROUPED_SPACE_PATTERN.test(text)) {
+		GROUPED_SPACE_PATTERN.lastIndex = 0;
+		const groupedSpaceMoney =
+			/^[+-]?\d{1,3}(?:[ \t\u00a0\u202f]\d{3})+(?:[.,]\d{1,2})?$/;
+		if (!groupedSpaceMoney.test(text)) return "";
+		text = text.replace(GROUPED_SPACE_PATTERN, "");
+	}
+	if (!/^[+-]?[\d.,]+$/.test(text)) return "";
+
+	const sign = /^[+-]/.test(text) ? text[0] : "";
+	const unsigned = sign ? text.slice(1) : text;
+	if (!unsigned || !/\d/.test(unsigned)) return "";
+
+	const normalizeWithDecimal = (decimalSeparator, groupingSeparator) => {
+		const decimalIndex = unsigned.lastIndexOf(decimalSeparator);
+		if (decimalIndex < 0 || unsigned.indexOf(decimalSeparator) !== decimalIndex) {
+			return "";
+		}
+		const integerPart = unsigned.slice(0, decimalIndex);
+		const fractionPart = unsigned.slice(decimalIndex + 1);
+		if (!/^\d{1,2}$/.test(fractionPart)) return "";
+		if (!validGroupedInteger(integerPart, groupingSeparator)) return "";
+		return `${sign}${integerPart.split(groupingSeparator).join("")}.${fractionPart}`;
+	};
+
+	const commaCount = (unsigned.match(/,/g) || []).length;
+	const dotCount = (unsigned.match(/\./g) || []).length;
+	if (commaCount && dotCount) {
+		return unsigned.lastIndexOf(",") > unsigned.lastIndexOf(".")
+			? normalizeWithDecimal(",", ".")
+			: normalizeWithDecimal(".", ",");
+	}
+
+	const normalizeSingleSeparator = (separator, count) => {
+		if (!count) return /^\d+$/.test(unsigned) ? `${sign}${unsigned}` : "";
+		const groups = unsigned.split(separator);
+		if (groups.some((group) => !/^\d+$/.test(group))) return "";
+		if (count > 1) {
+			if (validGroupedInteger(unsigned, separator)) {
+				return `${sign}${groups.join("")}`;
+			}
+			const fractionPart = groups[groups.length - 1];
+			const integerPart = groups.slice(0, -1).join(separator);
+			if (
+				/^\d{1,2}$/.test(fractionPart) &&
+				validGroupedInteger(integerPart, separator)
+			) {
+				return `${sign}${groups.slice(0, -1).join("")}.${fractionPart}`;
+			}
+			return "";
+		}
+
+		const [integerPart, suffix] = groups;
+		if (/^\d{1,2}$/.test(suffix)) {
+			return `${sign}${integerPart}.${suffix}`;
+		}
+		// A lone separator followed by three digits is ambiguous (`82.500`
+		// could mean 82.5 or 82,500). Reject it instead of risking a 1000x save.
+		return "";
+	};
+
+	return commaCount
+		? normalizeSingleSeparator(",", commaCount)
+		: normalizeSingleSeparator(".", dotCount);
+};
+
+const parseOtaCommissionAmount = (value) => {
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) {
+			return {
+				ready: false,
+				code: "ota_commission_invalid",
+				message:
+					"Commission must be a valid non-negative monetary amount using no more than two decimal places.",
+			};
+		}
+		if (value < 0) {
+			return {
+				ready: false,
+				code: "ota_commission_negative",
+				message: "Commission cannot be negative.",
+			};
+		}
+		if (value > Number.MAX_SAFE_INTEGER / 100) {
+			return {
+				ready: false,
+				code: "ota_commission_out_of_range",
+				message: "Commission is outside the supported monetary range.",
+			};
+		}
+		const scaled = value * 100;
+		const roundedScaled = Math.round(scaled);
+		if (
+			!Number.isSafeInteger(roundedScaled) ||
+			Math.abs(scaled - roundedScaled) > 1e-7
+		) {
+			return {
+				ready: false,
+				code: "ota_commission_invalid",
+				message:
+					"Commission must be a valid non-negative monetary amount using no more than two decimal places.",
+			};
+		}
+		return {
+			ready: true,
+			amount: Number(value.toFixed(2)),
+			normalized: String(value),
+		};
+	}
+	const normalized = normalizeLocalizedMoneyText(value);
+	if (!normalized) {
+		return {
+			ready: false,
+			code: "ota_commission_invalid",
+			message:
+				"Commission must be a valid non-negative monetary amount using no more than two decimal places.",
+		};
+	}
+	const negative = normalized.startsWith("-");
+	const unsigned = /^[+-]/.test(normalized)
+		? normalized.slice(1)
+		: normalized;
+	const [wholePart, fractionPart = ""] = unsigned.split(".");
+	const cents =
+		BigInt(wholePart) * 100n +
+		BigInt(String(fractionPart || "").padEnd(2, "0") || "0");
+	if (negative && cents > 0n) {
+		return {
+			ready: false,
+			code: "ota_commission_negative",
+			message: "Commission cannot be negative.",
+		};
+	}
+	if (cents > BigInt(Number.MAX_SAFE_INTEGER)) {
+		return {
+			ready: false,
+			code: "ota_commission_out_of_range",
+			message: "Commission is outside the supported monetary range.",
+		};
+	}
+	return { ready: true, amount: Number(cents) / 100, normalized };
+};
+
+const resolveRequestedOtaCommission = (payload = {}) => {
+	const adminPricing =
+		payload?.adminPricing &&
+		typeof payload.adminPricing === "object" &&
+		!Array.isArray(payload.adminPricing)
+			? payload.adminPricing
+			: {};
+	const candidates = [];
+	if (hasOwn(payload, "commission")) {
+		candidates.push(["commission", payload.commission]);
+	}
+	if (hasOwn(adminPricing, "commissionAmount")) {
+		candidates.push(["adminPricing.commissionAmount", adminPricing.commissionAmount]);
+	}
+	if (!candidates.length) {
+		return { ready: true, provided: false, amount: null, sources: [] };
+	}
+
+	const parsedCandidates = [];
+	for (const [source, value] of candidates) {
+		const parsed = parseOtaCommissionAmount(value);
+		if (!parsed.ready) return { ...parsed, provided: true, source };
+		parsedCandidates.push({ source, amount: parsed.amount });
+	}
+	const amount = parsedCandidates[0].amount;
+	const mismatch = parsedCandidates.find(
+		(candidate) => Math.abs(candidate.amount - amount) > 0.001
+	);
+	if (mismatch) {
+		return {
+			ready: false,
+			provided: true,
+			code: "ota_commission_mismatch",
+			message:
+				"The reservation commission and admin pricing commission must match exactly.",
+			details: Object.fromEntries(
+				parsedCandidates.map((candidate) => [candidate.source, candidate.amount])
+			),
+		};
+	}
+	return {
+		ready: true,
+		provided: true,
+		amount,
+		sources: parsedCandidates.map((candidate) => candidate.source),
+	};
+};
+
+const applyOtaCommissionSaveState = ({
+	normalizedUpdate = {},
+	reservation = {},
+	commissionRequest = {},
+	now = null,
+	auditActorId = null,
+} = {}) => {
+	const next = { ...normalizedUpdate };
+	const persisted =
+		reservation && typeof reservation.toObject === "function"
+			? reservation.toObject()
+			: reservation || {};
+	const existingAdminPricing =
+		persisted?.adminPricing && typeof persisted.adminPricing === "object"
+			? persisted.adminPricing
+			: {};
+	const nextAdminPricing = {
+		...(normalizedUpdate.adminPricing || {}),
+		mode: "ota_review",
+	};
+	const nextFinancialCycle = {
+		...(persisted.financial_cycle || {}),
+		lastUpdatedAt: now,
+		lastUpdatedBy: auditActorId || null,
+	};
+
+	if (commissionRequest.provided === true) {
+		const amount = commissionRequest.amount;
+		next.commission = amount;
+		nextAdminPricing.commissionAmount = amount;
+		nextFinancialCycle.commissionType = "amount";
+		nextFinancialCycle.commissionValue = amount;
+		nextFinancialCycle.commissionAmount = amount;
+	} else {
+		if (hasOwn(persisted, "commission")) {
+			next.commission = persisted.commission;
+		} else {
+			delete next.commission;
+		}
+		if (hasOwn(existingAdminPricing, "commissionAmount")) {
+			nextAdminPricing.commissionAmount =
+				existingAdminPricing.commissionAmount;
+		} else {
+			delete nextAdminPricing.commissionAmount;
+		}
+	}
+
+	next.adminPricing = nextAdminPricing;
+	next.financial_cycle = nextFinancialCycle;
+	return next;
+};
+
 const money = (value) => {
 	if (value === null || value === undefined || value === "") return 0;
 	const parsed = Number(String(value).replace(/,/g, "").trim());
@@ -732,6 +1052,7 @@ const validateOtaReleaseHotelBasePrice = (
 };
 
 module.exports = {
+	applyOtaCommissionSaveState,
 	canonicalizeOtaReviewedRooms,
 	invalidateOtaRoomPricingForHotelAssignment,
 	isOtaEmailReservation,
@@ -741,8 +1062,10 @@ module.exports = {
 	otaRoomMappingOptionsForHotel,
 	otaReleaseBlockingStatus,
 	preservePersistedOtaRoomIdentity,
+	parseOtaCommissionAmount,
 	resolvePersistedOtaClientTotalOverride,
 	resolveOtaSourceClientTotal,
+	resolveRequestedOtaCommission,
 	summarizeOtaReviewedClientPricing,
 	validateOtaStayDateCoverage,
 	validateOtaReleaseHotelBasePrice,

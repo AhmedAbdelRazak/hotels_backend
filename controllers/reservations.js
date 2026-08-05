@@ -56,6 +56,7 @@ const {
 	buildPendingOtaReviewFilter,
 	canManageOtaReservations,
 	isOtaPlatformReviewPending,
+	validateGenericPendingOtaReviewLifecycleUpdate,
 } = require("../services/otaReservationVisibility");
 const {
 	HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL,
@@ -7226,6 +7227,20 @@ exports.updateReservation = async (req, res) => {
 		) {
 			return res.status(404).json({ error: "Reservation not found" });
 		}
+		const otaLifecycleUpdateProtection =
+			validateGenericPendingOtaReviewLifecycleUpdate(
+				existingReservation,
+				normalizedUpdateData,
+			);
+		if (!otaLifecycleUpdateProtection.ready) {
+			return res
+				.status(otaLifecycleUpdateProtection.statusCode || 409)
+				.json({
+					error: otaLifecycleUpdateProtection.message,
+					code: otaLifecycleUpdateProtection.code,
+					fields: otaLifecycleUpdateProtection.fields || [],
+				});
+		}
 		let requestedLifecycleStatus = String(
 			normalizedUpdateData.reservation_status ||
 				normalizedUpdateData.state ||
@@ -8064,6 +8079,20 @@ exports.updateReservation = async (req, res) => {
 		);
 		if (syncedAgentWalletSnapshot) {
 			updatePayload.agentWalletSnapshot = syncedAgentWalletSnapshot;
+		}
+		const finalOtaLifecycleUpdateProtection =
+			validateGenericPendingOtaReviewLifecycleUpdate(
+				existingReservation,
+				updatePayload,
+			);
+		if (!finalOtaLifecycleUpdateProtection.ready) {
+			return res
+				.status(finalOtaLifecycleUpdateProtection.statusCode || 409)
+				.json({
+					error: finalOtaLifecycleUpdateProtection.message,
+					code: finalOtaLifecycleUpdateProtection.code,
+					fields: finalOtaLifecycleUpdateProtection.fields || [],
+				});
 		}
 
 		const auditEntries = buildReservationAuditEntries(
