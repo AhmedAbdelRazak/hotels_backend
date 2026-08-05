@@ -151,6 +151,145 @@ test("Airbnb guest conversation subjects are terminal but confirmations are not"
 	assert.equal(confirmation.matched, false);
 });
 
+const authenticatedAirbnbPayoutEmail = (overrides = {}) => ({
+	from: "Airbnb <automated@airbnb.com>",
+	subject: "We sent a payout of $29.00 USD",
+	text: [
+		"Your payout has been sent.",
+		"Reservation code HM2D9NPR35",
+		"View the details in your transaction history:",
+		"https://www.airbnb.com/users/transaction_history/123456789",
+	].join("\n"),
+	senderAuthentication: {
+		authenticatedAligned: true,
+		trustedProvider: "airbnb",
+		method: "dkim",
+	},
+	...overrides,
+});
+
+test("authenticated Airbnb payout-sent notification terminates before AI but remains forwardable", async () => {
+	const email = authenticatedAirbnbPayoutEmail();
+	const classification = classifyOtaGuestCommunication(email);
+
+	assert.equal(classification.matched, true);
+	assert.equal(classification.provider, "airbnb");
+	assert.equal(classification.intent, "not_reservation");
+	assert.equal(classification.terminalNonReservation, true);
+	assert.equal(classification.isGuestCommunication, false);
+	assert.equal(classification.classification, "finance_notification");
+	assert.equal(classification.reason, "airbnb_payout_notification");
+	assert.equal(classification.suppressForwarding, false);
+	assert.deepEqual(classification.evidence, [
+		"authenticated_airbnb_sender",
+		"payout_sent_subject",
+		"transaction_history_template",
+	]);
+
+	const orchestration = await orchestrateInboundReservationEmail(email);
+	assert.equal(orchestration.normalized.intent, "not_reservation");
+	assert.equal(orchestration.normalized.terminalNonReservation, true);
+	assert.equal(orchestration.normalized.suppressForwarding, false);
+	assert.equal(
+		orchestration.normalized.communicationClassification.classification,
+		"finance_notification"
+	);
+	assert.equal(orchestration.decision.usedAI, false);
+	assert.equal(orchestration.decision.skipped, true);
+	assert.equal(
+		orchestration.decision.skipReason,
+		"airbnb_payout_notification"
+	);
+
+	const forwardDecision = buildImportantEmailForwardDecision({
+		email,
+		normalized: orchestration.normalized,
+		reconciliation: { status: "not_reservation" },
+	});
+	assert.equal(forwardDecision.shouldForward, true);
+	assert.notEqual(forwardDecision.suppressed, true);
+	assert.equal(forwardDecision.reason, "ota_finance_or_dispute");
+	assert.ok(forwardDecision.categories.includes("ota_finance_or_dispute"));
+});
+
+test("Airbnb payout classifier accepts currency-template variants without broadening beyond sent notices", () => {
+	for (const subject of [
+		"Fwd: We sent a payout of US$ 1,234.56",
+		"[External] We sent you a payout of SAR 108.75",
+		"We sent a payout of 29.00 USD",
+	]) {
+		const classification = classifyOtaGuestCommunication(
+			authenticatedAirbnbPayoutEmail({ subject })
+		);
+		assert.equal(classification.reason, "airbnb_payout_notification", subject);
+		assert.equal(classification.suppressForwarding, false, subject);
+	}
+});
+
+test("Airbnb payout classifier fails closed for unverified or incomplete lookalikes", () => {
+	for (const [label, email] of [
+		[
+			"unaligned authentication",
+			authenticatedAirbnbPayoutEmail({
+				senderAuthentication: {
+					authenticatedAligned: false,
+					trustedProvider: "airbnb",
+				},
+			}),
+		],
+		[
+			"wrong authenticated provider",
+			authenticatedAirbnbPayoutEmail({
+				senderAuthentication: {
+					authenticatedAligned: true,
+					trustedProvider: "hotelrunner",
+				},
+			}),
+		],
+		[
+			"non-Airbnb sender",
+			authenticatedAirbnbPayoutEmail({
+				from: "Payments <payments@example.com>",
+			}),
+		],
+		[
+			"missing transaction-history evidence",
+			authenticatedAirbnbPayoutEmail({
+				text: "Your payout has been sent.",
+			}),
+		],
+		[
+			"transaction history without payout body evidence",
+			authenticatedAirbnbPayoutEmail({
+				text: "View your transaction history.",
+			}),
+		],
+	]) {
+		assert.equal(classifyOtaGuestCommunication(email).matched, false, label);
+	}
+});
+
+test("Airbnb reservation lifecycle and payout-conversation emails are never classified as payout-sent notifications", () => {
+	for (const subject of [
+		"Reservation confirmed - HM2D9NPR35",
+		"Reservation HM2D9NPR35 cancelled",
+		"Reservation changed - HM2D9NPR35",
+		"Have a question about your payout?",
+		"Payout requested for reservation HM2D9NPR35",
+		"We sent a payout of $29.00 USD - reservation changed",
+		"Your Airbnb payout is ready",
+	]) {
+		const classification = classifyOtaGuestCommunication(
+			authenticatedAirbnbPayoutEmail({ subject })
+		);
+		assert.notEqual(
+			classification.reason,
+			"airbnb_payout_notification",
+			subject
+		);
+	}
+});
+
 test("Booking, Expedia, Hotels.com, and Trip guest messages are terminal", () => {
 	for (const sample of [
 		{
