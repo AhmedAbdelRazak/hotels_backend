@@ -103,6 +103,8 @@ const TARGETS = freeze({
 				sourceReceivedAt: "2026-08-05T10:52:57.000Z",
 				processingStatus: "created",
 				automationAction: "created",
+				reconciliationActionAbsent: true,
+				reconciliationSkipReasonAbsent: true,
 				skipReason: "",
 			},
 			{
@@ -185,6 +187,7 @@ const TARGETS = freeze({
 				processingStatus: "created",
 				automationAction: "created",
 				reconciliationActionAbsent: true,
+				reconciliationSkipReasonAbsent: true,
 				skipReason: "",
 			},
 			{
@@ -266,6 +269,8 @@ const TARGETS = freeze({
 				sourceReceivedAt: "2026-08-05T10:35:47.000Z",
 				processingStatus: "created",
 				automationAction: "created",
+				reconciliationActionAbsent: true,
+				reconciliationSkipReasonAbsent: true,
 				skipReason: "",
 			},
 			{
@@ -307,6 +312,8 @@ const TARGETS = freeze({
 				receivedAt: "2026-07-06T15:13:21.918Z",
 				processingStatus: "created",
 				automationAction: "created",
+				reconciliationActionAbsent: true,
+				reconciliationSkipReasonAbsent: true,
 				skipReason: "",
 			},
 			{
@@ -1058,7 +1065,15 @@ const validateAuditDocument = (audit, target, expected) => {
 	} else {
 		assert.equal(String(audit.reconciliation?.actionTaken || "").toLowerCase(), expected.automationAction, `${expected.id}.reconciliation.actionTaken`);
 	}
-	assert.equal(String(audit.reconciliation?.skipReason || "").toLowerCase(), expected.skipReason, `${expected.id}.reconciliation.skipReason`);
+	if (expected.reconciliationSkipReasonAbsent === true) {
+		assert.equal(
+			own(audit.reconciliation || {}, "skipReason"),
+			false,
+			`${expected.id}.reconciliation.skipReason must remain absent`,
+		);
+	} else {
+		assert.equal(String(audit.reconciliation?.skipReason || "").toLowerCase(), expected.skipReason, `${expected.id}.reconciliation.skipReason`);
+	}
 	if (expected.trustedProvider) {
 		assert.equal(audit.senderAuthentication?.authenticatedAligned, true, `${expected.id} must be authenticated and aligned.`);
 		assert.equal(String(audit.senderAuthentication?.trustedProvider || "").toLowerCase(), expected.trustedProvider, `${expected.id}.senderAuthentication.trustedProvider`);
