@@ -57,6 +57,139 @@ const otaEmailReservation = (configId, overrides = {}) => ({
 	...overrides,
 });
 
+test("OTA commission accepts localized digits, separators, and invisible bidi controls", () => {
+	const localized = otaPricing.resolveRequestedOtaCommission({
+		commission: "82.50\u200f",
+		adminPricing: { commissionAmount: "٨٢٫٥٠" },
+	});
+	assert.deepEqual(localized, {
+		ready: true,
+		provided: true,
+		amount: 82.5,
+		sources: ["commission", "adminPricing.commissionAmount"],
+	});
+	assert.equal(otaPricing.parseOtaCommissionAmount("82,50").amount, 82.5);
+	assert.equal(otaPricing.parseOtaCommissionAmount("٨٢٫٥٠").amount, 82.5);
+	assert.equal(otaPricing.parseOtaCommissionAmount("۱٬۲۳۴").amount, 1234);
+
+	for (const value of [
+		"۱٬۲۳۴٫۵۰",
+		"1,234.50",
+		"1.234,50",
+		"1 234,50",
+	]) {
+		assert.deepEqual(otaPricing.parseOtaCommissionAmount(value), {
+			ready: true,
+			amount: 1234.5,
+			normalized: "1234.50",
+		});
+	}
+});
+
+test("OTA commission rejects malformed, negative, and contradictory explicit values", () => {
+	assert.equal(
+		otaPricing.parseOtaCommissionAmount("82.50 SAR").code,
+		"ota_commission_invalid",
+	);
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({ commission: "" }).code,
+		"ota_commission_invalid",
+	);
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({ commission: "-1" }).code,
+		"ota_commission_negative",
+	);
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({ commission: 82.501 }).code,
+		"ota_commission_invalid",
+	);
+	for (const ambiguous of ["82.500", "82,500"]) {
+		assert.equal(
+			otaPricing.resolveRequestedOtaCommission({ commission: ambiguous }).code,
+			"ota_commission_invalid",
+		);
+	}
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({ commission: "٨٢٬٥٠" }).code,
+		"ota_commission_invalid",
+	);
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({
+			commission: "82.50",
+			adminPricing: { commissionAmount: "83.00" },
+		}).code,
+		"ota_commission_mismatch",
+	);
+});
+
+test("omitted OTA commission is distinguishable from an explicit zero", () => {
+	assert.deepEqual(otaPricing.resolveRequestedOtaCommission({}), {
+		ready: true,
+		provided: false,
+		amount: null,
+		sources: [],
+	});
+	assert.equal(
+		otaPricing.resolveRequestedOtaCommission({ commission: 0 }).amount,
+		0,
+	);
+});
+
+test("omitted commission preserves inconsistent legacy commission fields exactly", () => {
+	const now = new Date("2026-08-05T17:30:00.000Z");
+	const reservation = {
+		commission: 17.125,
+		adminPricing: { commissionAmount: 82.5, rootTotal: 825 },
+		financial_cycle: {
+			commissionType: "percentage",
+			commissionValue: 9.75,
+			commissionAmount: 80.4375,
+			commissionAssigned: true,
+		},
+	};
+	const result = otaPricing.applyOtaCommissionSaveState({
+		normalizedUpdate: {
+			commission: 0,
+			adminPricing: { rootTotal: 900, commissionAmount: 0 },
+		},
+		reservation: { toObject: () => reservation },
+		commissionRequest: otaPricing.resolveRequestedOtaCommission({}),
+		now,
+		auditActorId: "actor-1",
+	});
+
+	assert.equal(result.commission, 17.125);
+	assert.equal(result.adminPricing.commissionAmount, 82.5);
+	assert.equal(result.financial_cycle.commissionType, "percentage");
+	assert.equal(result.financial_cycle.commissionValue, 9.75);
+	assert.equal(result.financial_cycle.commissionAmount, 80.4375);
+	assert.equal(result.financial_cycle.commissionAssigned, true);
+	assert.equal(result.financial_cycle.lastUpdatedAt, now);
+});
+
+test("explicit zero converges every saved commission amount to zero", () => {
+	const result = otaPricing.applyOtaCommissionSaveState({
+		normalizedUpdate: { adminPricing: {} },
+		reservation: {
+			commission: 17,
+			adminPricing: { commissionAmount: 82 },
+			financial_cycle: {
+				commissionType: "percentage",
+				commissionValue: 9,
+				commissionAmount: 80,
+			},
+		},
+		commissionRequest: otaPricing.resolveRequestedOtaCommission({
+			commission: 0,
+		}),
+	});
+	assert.equal(result.commission, 0);
+	assert.equal(result.adminPricing.commissionAmount, 0);
+	assert.equal(result.financial_cycle.commissionType, "amount");
+	assert.equal(result.financial_cycle.commissionValue, 0);
+	assert.equal(result.financial_cycle.commissionAmount, 0);
+});
+
 test("source guest total is locked independently from the OTA payout", () => {
 	const resolved = otaPricing.resolveOtaSourceClientTotal(
 		otaEmailReservation(roomId()),

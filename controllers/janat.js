@@ -81,14 +81,17 @@ const {
 	canManageOtaReservations,
 	isOtaPlatformReviewPending,
 	normalizeId: normalizeOtaReviewId,
+	validateOtaPlatformReviewActionState,
 } = require("../services/otaReservationVisibility");
 const {
+	applyOtaCommissionSaveState,
 	invalidateOtaRoomPricingForHotelAssignment,
 	isOtaSourceReservation,
 	normalizeId: normalizeOtaPricingId,
 	otaRoomMappingOptionsForHotel,
 	preservePersistedOtaRoomIdentity,
 	resolveOtaSourceClientTotal,
+	resolveRequestedOtaCommission,
 	validateOtaReleaseHotelBasePrice,
 	validatePersistedOtaRooms,
 	validateOtaSourceClientPricing,
@@ -2898,6 +2901,12 @@ const OTA_ADMIN_LIST_SELECT = [
 	"sub_total",
 	"total_amount",
 	"currency",
+	"commission",
+	"commissionPaid",
+	"commissionStatus",
+	"commissionData.assigned",
+	"commissionData.amount",
+	"commissionData.status",
 	"checkin_date",
 	"checkout_date",
 	"days_of_residence",
@@ -2905,6 +2914,10 @@ const OTA_ADMIN_LIST_SELECT = [
 	"supplierData",
 	"otaPlatformReview",
 	"adminPricing",
+	"financial_cycle.commissionType",
+	"financial_cycle.commissionValue",
+	"financial_cycle.commissionAmount",
+	"financial_cycle.commissionAssigned",
 	"createdAt",
 	"updatedAt",
 	"hotelId",
@@ -3049,10 +3062,13 @@ exports.getOtaReservationRoomOptions = async (req, res) => {
 				message: "Reservation not found",
 			});
 		}
-		if (!isOtaPlatformReviewPending(reservation)) {
-			return res.status(409).json({
+		const reviewActionState = validateOtaPlatformReviewActionState(reservation);
+		if (!reviewActionState.ready) {
+			return res.status(reviewActionState.statusCode || 409).json({
 				success: false,
-				message: "This OTA reservation is no longer pending platform review.",
+				code: reviewActionState.code,
+				message: reviewActionState.message,
+				details: reviewActionState.details || {},
 			});
 		}
 
@@ -3243,10 +3259,13 @@ exports.assignOtaReservationHotel = async (req, res) => {
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
-		if (!isOtaPlatformReviewPending(reservation)) {
-			return res.status(409).json({
+		const reviewActionState = validateOtaPlatformReviewActionState(reservation);
+		if (!reviewActionState.ready) {
+			return res.status(reviewActionState.statusCode || 409).json({
 				success: false,
-				message: "This OTA reservation is no longer pending platform review.",
+				code: reviewActionState.code,
+				message: reviewActionState.message,
+				details: reviewActionState.details || {},
 			});
 		}
 		if (!hotel.belongsTo || !mongoose.Types.ObjectId.isValid(hotel.belongsTo)) {
@@ -3791,10 +3810,13 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
-		if (!isOtaPlatformReviewPending(reservation)) {
-			return res.status(409).json({
+		const reviewActionState = validateOtaPlatformReviewActionState(reservation);
+		if (!reviewActionState.ready) {
+			return res.status(reviewActionState.statusCode || 409).json({
 				success: false,
-				message: "This OTA reservation is no longer pending platform review.",
+				code: reviewActionState.code,
+				message: reviewActionState.message,
+				details: reviewActionState.details || {},
 			});
 		}
 		const assignedHotelId = normalizeOtaPricingId(reservation.hotelId);
@@ -3862,16 +3884,19 @@ exports.updateOtaReservationPricing = async (req, res) => {
 		// different PMS room or alter the number/order of booked room rows.
 		updatePayload.pickedRoomsType = preservedRoomPricing.rooms;
 		updatePayload.pickedRoomsPricing = preservedRoomPricing.rooms;
-		const requestedAdminPricing = req.body?.adminPricing || {};
-		let requestedCommissionAmount = null;
-		if (hasExplicitMoneyField(req.body || {}, "commission")) {
-			requestedCommissionAmount = round2(req.body.commission);
-		} else if (
-			hasExplicitMoneyField(requestedAdminPricing, "commissionAmount")
-		) {
-			requestedCommissionAmount = round2(requestedAdminPricing.commissionAmount);
+		const commissionRequest = resolveRequestedOtaCommission(req.body || {});
+		if (!commissionRequest.ready) {
+			throw new ReservationPricingError(
+				commissionRequest.message,
+				400,
+				commissionRequest.code,
+				{
+					source: commissionRequest.source || "",
+					...(commissionRequest.details || {}),
+				},
+			);
 		}
-		const normalizedUpdate = await normalizeReservationStayPricing(
+		let normalizedUpdate = await normalizeReservationStayPricing(
 			reservation,
 			updatePayload,
 			{
@@ -3990,32 +4015,13 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				}
 			}
 		}
-		const defaultCommissionAmount = round2(
-			moneyNumber(normalizedUpdate.sub_total || reservation.sub_total) * 0.1
-		);
-		const nextCommissionAmount =
-			requestedCommissionAmount !== null
-				? requestedCommissionAmount
-				: round2(
-						normalizedUpdate.adminPricing?.commissionAmount ||
-							reservation.adminPricing?.commissionAmount ||
-							reservation.commission ||
-							defaultCommissionAmount
-				  );
-		normalizedUpdate.commission = nextCommissionAmount;
-		normalizedUpdate.adminPricing = {
-			...(normalizedUpdate.adminPricing || {}),
-			mode: "ota_review",
-			commissionAmount: nextCommissionAmount,
-		};
-		normalizedUpdate.financial_cycle = {
-			...(reservation.financial_cycle || {}),
-			commissionType: "amount",
-			commissionValue: nextCommissionAmount,
-			commissionAmount: nextCommissionAmount,
-			lastUpdatedAt: now,
-			lastUpdatedBy: auditActor._id || null,
-		};
+		normalizedUpdate = applyOtaCommissionSaveState({
+			normalizedUpdate,
+			reservation,
+			commissionRequest,
+			now,
+			auditActorId: auditActor._id || null,
+		});
 		const set = {
 			...normalizedUpdate,
 			adminPricingVisibility: {
@@ -4123,10 +4129,13 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 		if (!reservation) {
 			return res.status(404).json({ success: false, message: "Reservation not found" });
 		}
-		if (!isOtaPlatformReviewPending(reservation)) {
-			return res.status(409).json({
+		const reviewActionState = validateOtaPlatformReviewActionState(reservation);
+		if (!reviewActionState.ready) {
+			return res.status(reviewActionState.statusCode || 409).json({
 				success: false,
-				message: "This OTA reservation has already been released or is not pending review.",
+				code: reviewActionState.code,
+				message: reviewActionState.message,
+				details: reviewActionState.details || {},
 			});
 		}
 		const assignedHotelId = normalizeOtaPricingId(reservation.hotelId);

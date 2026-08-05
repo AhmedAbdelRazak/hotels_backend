@@ -72,8 +72,152 @@ const addExcludePendingOtaReviewToMutableFilter = (filter = {}) => {
 };
 
 const isOtaPlatformReviewPending = (reservation = {}) =>
-	String(reservation?.otaPlatformReview?.status || "").toLowerCase() ===
+	String(reservation?.otaPlatformReview?.status || "").trim().toLowerCase() ===
 	OTA_PLATFORM_REVIEW_PENDING;
+
+const normalizeOtaReviewLifecycleStatus = (value = "") =>
+	String(value || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[\s_-]+/g, " ");
+
+const isOtaPlatformReviewLifecycleConsistent = (reservation = {}) => {
+	const expected = normalizeOtaReviewLifecycleStatus(
+		OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+	);
+	return [reservation.reservation_status, reservation.state].every(
+		(value) => normalizeOtaReviewLifecycleStatus(value) === expected,
+	);
+};
+
+const validateOtaPlatformReviewActionState = (reservation = {}) => {
+	if (!isOtaPlatformReviewPending(reservation)) {
+		return {
+			ready: false,
+			statusCode: 409,
+			code: "ota_review_not_pending",
+			message:
+				"This OTA reservation is no longer pending platform review.",
+		};
+	}
+	if (!isOtaPlatformReviewLifecycleConsistent(reservation)) {
+		return {
+			ready: false,
+			statusCode: 409,
+			code: "ota_review_lifecycle_inconsistent",
+			message:
+				"This OTA review has inconsistent lifecycle statuses. Its reservation status and state must both remain OTA Platform Review until the dedicated release workflow is used.",
+			details: {
+				otaPlatformReviewStatus: String(
+					reservation?.otaPlatformReview?.status || "",
+				),
+				reservationStatus: String(reservation.reservation_status || ""),
+				state: String(reservation.state || ""),
+			},
+		};
+	}
+	return { ready: true };
+};
+
+const PENDING_OTA_REVIEW_GENERIC_LIFECYCLE_FIELDS = Object.freeze([
+	"reservation_status",
+	"state",
+	"pendingConfirmation",
+	"agentDecisionSnapshot",
+	"otaPlatformReview",
+]);
+
+const comparableOtaLifecycleValue = (value, fieldName = "") => {
+	if (value === undefined) return { __type: "undefined" };
+	if (value === null) return null;
+	if (fieldName === "status" && typeof value === "string") {
+		return value.trim().toLowerCase();
+	}
+	if (value instanceof Date) return value.toISOString();
+	if (
+		value &&
+		typeof value === "object" &&
+		(value._bsontype === "ObjectID" || value._bsontype === "ObjectId")
+	) {
+		return String(value);
+	}
+	if (value && typeof value.toObject === "function") {
+		return comparableOtaLifecycleValue(value.toObject(), fieldName);
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => comparableOtaLifecycleValue(item));
+	}
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.keys(value)
+				.filter((key) => value[key] !== undefined)
+				.sort()
+				.map((key) => [key, comparableOtaLifecycleValue(value[key], key)]),
+		);
+	}
+	return value;
+};
+
+const otaLifecycleValuesEqual = (left, right) =>
+	JSON.stringify(comparableOtaLifecycleValue(left)) ===
+	JSON.stringify(comparableOtaLifecycleValue(right));
+
+const otaLifecyclePathValue = (source = {}, path = "") =>
+	String(path || "")
+		.split(".")
+		.filter(Boolean)
+		.reduce(
+			(value, key) =>
+				value === null || value === undefined ? undefined : value[key],
+			source,
+		);
+
+const otaLifecycleUpdateChangesValue = (
+	reservation = {},
+	field = "",
+	value,
+) => {
+	const existingValue = otaLifecyclePathValue(reservation, field);
+	if (field === "reservation_status" || field === "state") {
+		return (
+			normalizeOtaReviewLifecycleStatus(value) !==
+			normalizeOtaReviewLifecycleStatus(existingValue)
+		);
+	}
+	if (field.endsWith(".status")) {
+		return (
+			String(value || "").trim().toLowerCase() !==
+			String(existingValue || "").trim().toLowerCase()
+		);
+	}
+	return !otaLifecycleValuesEqual(value, existingValue);
+};
+
+const validateGenericPendingOtaReviewLifecycleUpdate = (
+	reservation = {},
+	updates = {},
+) => {
+	if (!isOtaPlatformReviewPending(reservation)) return { ready: true };
+	const fields = Object.entries(updates || {})
+		.filter(([candidate]) =>
+			PENDING_OTA_REVIEW_GENERIC_LIFECYCLE_FIELDS.some(
+				(field) => candidate === field || candidate.startsWith(`${field}.`),
+			),
+		)
+		.filter(([field, value]) =>
+			otaLifecycleUpdateChangesValue(reservation, field, value),
+		)
+		.map(([field]) => field);
+	if (!fields.length) return { ready: true };
+	return {
+		ready: false,
+		statusCode: 409,
+		code: "ota_review_dedicated_lifecycle_route_required",
+		message:
+			"A pending OTA platform review cannot be confirmed, cancelled, or otherwise moved through the generic reservation update route. Use the dedicated OTA release or review workflow.",
+		fields,
+	};
+};
 
 const assignedHotelIdsFromUser = (user = {}) =>
 	[
@@ -166,8 +310,11 @@ module.exports = {
 	canManageOtaReservations,
 	isConfiguredSuperAdmin,
 	isOtaPlatformReviewPending,
+	isOtaPlatformReviewLifecycleConsistent,
 	isScopedPlatformOtaActor,
 	normalizeId,
 	platformOtaScopeFilter,
 	strictPlatformOtaHotelScopeFilter,
+	validateGenericPendingOtaReviewLifecycleUpdate,
+	validateOtaPlatformReviewActionState,
 };

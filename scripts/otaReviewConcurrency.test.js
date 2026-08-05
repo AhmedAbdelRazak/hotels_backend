@@ -28,6 +28,8 @@ test("OTA review writes are tied to the exact pending reservation snapshot", () 
 	assert.equal(filter.__v, 7);
 	assert.equal(filter.updatedAt, reservation.updatedAt);
 	assert.equal(filter["otaPlatformReview.status"], "pending");
+	assert.equal(filter.reservation_status, "OTA Platform Review");
+	assert.equal(filter.state, "OTA Platform Review");
 });
 
 test("revert guards can require the exact observed review status", () => {
