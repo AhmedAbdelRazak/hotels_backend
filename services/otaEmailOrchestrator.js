@@ -23,6 +23,7 @@ const {
 	detectProvider,
 	resolveBookingSource,
 	requiredNewReservationMissing,
+	otaInboundAllocationSafety,
 } = require("./otaReservationMapper");
 
 const ALLOWED_INTENTS = new Set([
@@ -233,6 +234,13 @@ const getDeterministicStatusSkipReason = (heuristic = {}, emailContext = {}) => 
 };
 
 const getDeterministicExtractionSkipReason = (heuristic = {}) => {
+	if (
+		heuristic.genericRepeatedFactConflict === true ||
+		(Array.isArray(heuristic.genericRepeatedFactConflictFields) &&
+			heuristic.genericRepeatedFactConflictFields.length > 0)
+	) {
+		return "Deterministic repeated explicit OTA facts conflict; extraction AI cannot choose between source values and was skipped.";
+	}
 	if (normalizeIntent(heuristic.intent) !== "new_reservation") return "";
 	if (!heuristic.provider || heuristic.provider === "unknown") return "";
 	if (heuristic.requiresManualReview === true) return "";
@@ -888,7 +896,8 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 			warnings: [],
 			errors: [],
 			terminalNonReservation: true,
-			suppressForwarding: true,
+			suppressForwarding:
+				communicationClassification.suppressForwarding === true,
 			skipReason: communicationClassification.reason,
 			communicationClassification,
 			source: {
@@ -910,7 +919,7 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 				skipped: true,
 				skipReason: communicationClassification.reason,
 				reason:
-					"Deterministic OTA guest communication; AI and reservation reconciliation are not required.",
+					"Deterministic non-reservation communication; AI and reservation reconciliation are not required.",
 			},
 			emailContext: {
 				...emailContext,
@@ -941,6 +950,32 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 		emailContext,
 		emailText
 	);
+	if (heuristic.intent === "new_reservation") {
+		const allocationSafety = otaInboundAllocationSafety(heuristic);
+		if (!allocationSafety.ok) {
+			logOrchestrator("heuristic.allocation_resource_limit", {
+				provider: heuristic.provider,
+				confirmationNumber: heuristic.confirmationNumber,
+				reason: allocationSafety.reason,
+				roomCount: allocationSafety.roomCount,
+				stayNights: allocationSafety.stayNights,
+				roomNightSlots: allocationSafety.roomNightSlots,
+			});
+			return {
+				normalized: heuristic,
+				decision: {
+					usedAI: false,
+					skipped: true,
+					skipReason: "ota_inbound_allocation_resource_limit",
+					reason:
+						"The deterministic room allocation exceeds the per-email resource-safety ceiling; live exchange-rate lookup and extraction AI were skipped.",
+				},
+				emailContext,
+				emailText,
+				safeSnippet: safeSnippet(emailText, 800),
+			};
+		}
+	}
 	heuristic = await applyLiveSarConversion(heuristic);
 	logOrchestrator("heuristic.extracted", {
 		provider: heuristic.provider,

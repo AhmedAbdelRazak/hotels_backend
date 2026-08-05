@@ -1,9 +1,9 @@
 /** @format */
 
 /*
- * Guest-message notifications are not reservation state changes. Keep this
- * classifier deterministic so they can be discarded before any AI or queue
- * work is started.
+ * Guest messages and narrowly identifiable non-lifecycle notifications are
+ * not reservation state changes. Keep this classifier deterministic so they
+ * can be terminated before any AI or queue work is started.
  */
 
 const normalizeWhitespace = (value = "") =>
@@ -85,13 +85,20 @@ const unmatchedClassification = () => ({
 	evidence: [],
 });
 
-const matchedClassification = ({ provider, reason, evidence = [] }) => ({
+const matchedClassification = ({
+	provider,
+	reason,
+	evidence = [],
+	isGuestCommunication = true,
+	suppressForwarding = true,
+	classification = "guest_communication",
+}) => ({
 	matched: true,
-	isGuestCommunication: true,
+	isGuestCommunication,
 	terminalNonReservation: true,
-	suppressForwarding: true,
+	suppressForwarding,
 	intent: "not_reservation",
-	classification: "guest_communication",
+	classification,
 	reason,
 	provider,
 	evidence,
@@ -184,6 +191,45 @@ const classifyOtaGuestCommunication = (email = {}, context = {}) => {
 		fromText
 	);
 	const airbnbHint = providerHints.some((value) => value === "airbnb");
+	const senderAuthentication =
+		email.senderAuthentication && typeof email.senderAuthentication === "object"
+			? email.senderAuthentication
+			: context.senderAuthentication &&
+				  typeof context.senderAuthentication === "object"
+				? context.senderAuthentication
+				: {};
+	const authenticatedAirbnbSender = !!(
+		airbnbSender &&
+		senderAuthentication.authenticatedAligned === true &&
+		String(senderAuthentication.trustedProvider || "").toLowerCase() === "airbnb"
+	);
+	const airbnbPayoutSentSubject = subjectCandidates.some((subject) =>
+		/^we sent (?:you )?a payout of\s+(?:(?:[a-z]{3}\s*)?(?:us\$|[$\u20ac\u00a3\u00a5])\s*[0-9][0-9,.]*(?:\s*[a-z]{3})?|[a-z]{3}\s*[0-9][0-9,.]*|[0-9][0-9,.]*\s*[a-z]{3})$/i.test(
+			subject
+		)
+	);
+	const airbnbTransactionHistoryTemplate = !!(
+		/\btransaction(?:\s+|[_-])history\b/i.test(body) &&
+		/\bpayout\b/i.test(body)
+	);
+	if (
+		authenticatedAirbnbSender &&
+		airbnbPayoutSentSubject &&
+		airbnbTransactionHistoryTemplate
+	) {
+		return matchedClassification({
+			provider: "airbnb",
+			reason: "airbnb_payout_notification",
+			classification: "finance_notification",
+			isGuestCommunication: false,
+			suppressForwarding: false,
+			evidence: [
+				"authenticated_airbnb_sender",
+				"payout_sent_subject",
+				"transaction_history_template",
+			],
+		});
+	}
 	const airbnbMessageSubject = subjectCandidates.some((subject) =>
 		/^(?:inquiry for\b|(?:you have a )?(?:new )?(?:message|inquiry) from\b|.{1,100}\s+(?:sent|wrote) (?:you )?(?:a )?message\b|.{1,100}\s+wants to change (?:his|her|their|the) reservation\b)/i.test(
 			subject
