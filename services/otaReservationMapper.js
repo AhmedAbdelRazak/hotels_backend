@@ -153,25 +153,27 @@ function normalizeAjyadComparable(value = "") {
 		.trim();
 }
 
-function containsAjyadKeyword(value = "") {
+function containsConfiguredZadAjyadAlias(value = "") {
 	const normalized = normalizeAjyadComparable(value);
-	if (/\bagyad\b/i.test(normalized)) return true;
-	return /\bajyad\b/i.test(normalized) || normalized.includes("اجياد");
+	const hasZad =
+		/\b(?:zad|zyd)\b/i.test(normalized) || normalized.includes("زاد");
+	const hasAjyad =
+		/\b(?:ajyad|agyad)\b/i.test(normalized) || normalized.includes("اجياد");
+	return hasZad && hasAjyad;
 }
 
-function normalizedReservationContainsAjyad(normalized = {}) {
-	return [
-		normalized.hotelName,
-		...(Array.isArray(normalized.hotelNameAliases)
-			? normalized.hotelNameAliases
-			: []),
-		normalized.roomName,
-		normalized.airbnbListingTitle,
-		normalized.source?.subject,
-		normalized.source?.safeSnippet,
-	]
+function normalizedReservationContainsConfiguredZadAjyadAlias(normalized = {}) {
+	const sourceBackedHotelValues = hasSourceField(normalized, "hotelName")
+		? [
+				normalized.hotelName,
+				...(Array.isArray(normalized.hotelNameAliases)
+					? normalized.hotelNameAliases
+					: []),
+		  ]
+		: [];
+	return [...sourceBackedHotelValues, normalized.source?.subject]
 		.filter(Boolean)
-		.some((value) => containsAjyadKeyword(value));
+		.some((value) => containsConfiguredZadAjyadAlias(value));
 }
 
 function configuredAjyadHotelId() {
@@ -602,8 +604,14 @@ function redactSensitive(value) {
 		/\b(?:cvv|cvc|validation code|security code)\s*[:#-]?\s*\d{3,4}\b/gi,
 		"validation code: [REDACTED]"
 	);
-	out = out.replace(/\b(?:\d[ -]*?){15,19}\b/g, (match) => {
+	out = out.replace(/\b(?:\d[ -]*?){15,19}\b/g, (match, offset, source) => {
 		const clean = String(match).replace(/\D/g, "");
+		const prefix = String(source || "").slice(Math.max(0, offset - 100), offset);
+		const isLabeledReservationIdentity =
+			/(?:confirmation|reservation|booking|reference|ref|voucher|itinerary|trip)\s*(?:number|no\.?|id|code|#)?\s*[:#-]?\s*$/i.test(
+				prefix
+			);
+		if (clean.length >= 15 && isLabeledReservationIdentity) return match;
 		return clean.length >= 15 ? `[CARD-${clean.slice(-4)}] ` : match;
 	});
 	return out;
@@ -875,6 +883,37 @@ function getSarExchangeRate(currency) {
 	return { code, rate: 0, source: "missing" };
 }
 
+async function fetchWithHardTimeout(
+	url,
+	{ fetchImpl = fetch, timeoutMs = 8000 } = {}
+) {
+	const boundedTimeoutMs = Math.max(1, Number(timeoutMs || 8000));
+	const controller =
+		typeof AbortController === "function" ? new AbortController() : null;
+	let timeoutHandle;
+	const timeoutPromise = new Promise((resolve, reject) => {
+		timeoutHandle = setTimeout(() => {
+			if (controller) controller.abort();
+			const error = new Error(
+				`Exchange-rate request exceeded ${boundedTimeoutMs}ms.`
+			);
+			error.code = "OTA_EXCHANGE_RATE_TIMEOUT";
+			reject(error);
+		}, boundedTimeoutMs);
+	});
+	try {
+		return await Promise.race([
+			fetchImpl(url, {
+				timeout: boundedTimeoutMs,
+				...(controller ? { signal: controller.signal } : {}),
+			}),
+			timeoutPromise,
+		]);
+	} finally {
+		clearTimeout(timeoutHandle);
+	}
+}
+
 async function fetchLiveSarExchangeRate(currency) {
 	const code = String(currency || "SAR").trim().toUpperCase() || "SAR";
 	if (!code || code === "SAR") {
@@ -889,11 +928,11 @@ async function fetchLiveSarExchangeRate(currency) {
 	}
 
 	try {
-		const response = await fetch(
+		const response = await fetchWithHardTimeout(
 			`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${encodeURIComponent(
 				code
 			)}/SAR/`,
-			{ timeout: 8000 }
+			{ timeoutMs: 8000 }
 		);
 		const data = await response.json();
 		const rate = Number(data?.conversion_rate);
@@ -1039,6 +1078,17 @@ function parseDate(value) {
 			: null;
 	}
 
+	// Numeric-looking dates must never reach permissive parsing. Accept a
+	// year-first value only when its calendar date is strict ISO, while allowing
+	// an otherwise valid ISO timestamp or a bounded timezone suffix.
+	const strictIso = s.match(
+		/^(\d{4}-\d{2}-\d{2})(?:(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:\s+(?:UTC|GMT)))?$/i
+	);
+	if (strictIso) {
+		const parsed = dayjs(strictIso[1], "YYYY-MM-DD", true);
+		return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+	}
+
 	const cleaned = s
 		.replace(/\b(mon|tue|wed|thu|fri|sat|sun)(day)?\b,?\s*/gi, "")
 		.replace(/(\d+)(st|nd|rd|th)\b/gi, "$1")
@@ -1046,22 +1096,37 @@ function parseDate(value) {
 		.replace(/\s+\d{1,2}:\d{2}.*$/i, "")
 		.trim();
 
-	// A value such as 08/09/2026 can mean either 8 September or August 9.
-	// Provider templates are not consistent enough to choose safely, so only
-	// accept slash dates when the ordering is unambiguous (or both parts match).
-	const numericSlashDate = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-	if (numericSlashDate) {
-		const first = Number(numericSlashDate[1]);
-		const second = Number(numericSlashDate[2]);
+	// Numeric day/month dates occur in both US and international order across
+	// providers. Every separator form therefore receives the same fail-closed
+	// treatment. Two-digit years have no safe generic century/order inference.
+	const numericDayMonthDate = cleaned.match(
+		/^(\d{1,2})\s*(?:[.\/\-\u2013\u2014]|\s)\s*(\d{1,2})\s*(?:[.\/\-\u2013\u2014]|\s)\s*(\d{2}|\d{4})(?:\s+(?:UTC|GMT|Z|[+-]\d{2}:?\d{2}))?$/i
+	);
+	if (numericDayMonthDate) {
+		const first = Number(numericDayMonthDate[1]);
+		const second = Number(numericDayMonthDate[2]);
+		const yearText = numericDayMonthDate[3];
+		if (yearText.length !== 4) return null;
 		if (first <= 12 && second <= 12 && first !== second) return null;
+		if (first > 12 && second > 12) return null;
+
+		const month = first > 12 ? second : first;
+		const day = first > 12 ? first : second;
+		const canonical = `${yearText}-${String(month).padStart(2, "0")}-${String(
+			day
+		).padStart(2, "0")}`;
+		const parsed = dayjs(canonical, "YYYY-MM-DD", true);
+		return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+	}
+	if (
+		/^\d{1,4}\s*(?:[.\/\-\u2013\u2014]|\s)\s*\d{1,2}\s*(?:[.\/\-\u2013\u2014]|\s)\s*\d{2,4}/.test(
+			cleaned
+		)
+	) {
+		return null;
 	}
 
 	const formats = [
-		"YYYY-MM-DD",
-		"MM/DD/YYYY",
-		"DD/MM/YYYY",
-		"M/D/YYYY",
-		"D/M/YYYY",
 		"MMM D, YYYY",
 		"MMMM D, YYYY",
 		"D MMM YYYY",
@@ -1117,13 +1182,12 @@ function calculateDaysOfResidence(checkIn, checkOut) {
 function generateDateRange(startDate, endDate) {
 	const start = dayjs(startDate);
 	const end = dayjs(endDate);
-	const dates = [];
-	let current = start;
-	while (current.isBefore(end, "day")) {
-		dates.push(current.format("YYYY-MM-DD"));
-		current = current.add(1, "day");
-	}
-	return dates;
+	if (!start.isValid() || !end.isValid()) return [];
+	const stayNights = end.startOf("day").diff(start.startOf("day"), "day");
+	if (stayNights <= 0 || stayNights > 366) return [];
+	return Array.from({ length: stayNights }, (_, offset) =>
+		start.add(offset, "day").format("YYYY-MM-DD")
+	);
 }
 
 function escapeRegExp(value) {
@@ -1149,6 +1213,7 @@ function findField(text, labels) {
 		}
 
 		const labelComparable = normalizeComparable(label);
+		if (!labelComparable) continue;
 		const idx = lines.findIndex((line) => {
 			const lineComparable = normalizeComparable(line);
 			return (
@@ -1157,7 +1222,26 @@ function findField(text, labels) {
 			);
 		});
 		if (idx >= 0) {
-			const sameLine = lines[idx].slice(label.length).replace(/^[:#-]\s*/, "");
+			// Do not slice the raw line by the literal label length. Comparable
+			// matching intentionally ignores punctuation (for example, "Reservation
+			// #" versus "Reservation"), so a literal slice can remove the first
+			// character of the actual value. Capture the remainder from the raw line
+			// using the same punctuation-tolerant token boundary instead.
+			const flexibleLabelPattern = labelComparable
+				.split(" ")
+				.filter(Boolean)
+				.map(escapeRegExp)
+				.join("[^A-Za-z0-9]+");
+			const sameLineMatch = lines[idx].match(
+				new RegExp(
+					`^\\s*${flexibleLabelPattern}(?=$|[^A-Za-z0-9])(?:\\s*[:#-]?\\s*)?(.*)$`,
+					"i"
+				)
+			);
+			const sameLine = normalizeWhitespace(sameLineMatch?.[1] || "").replace(
+				/^[:#-]\s*/,
+				""
+			);
 			if (normalizeWhitespace(sameLine)) return normalizeWhitespace(sameLine);
 			if (lines[idx + 1]) return lines[idx + 1];
 		}
@@ -1217,6 +1301,7 @@ const GENERIC_CONFIRMATION_VALUES = new Set([
 function isWeakConfirmationCandidate(value = "") {
 	const normalized = normalizeComparable(value);
 	if (!normalized) return true;
+	if (/^card\s+\d{4}$/.test(normalized)) return true;
 	// All supported OTA booking identifiers contain at least one digit. This
 	// blocks flattened labels such as "cancelation", "extra", and "receive"
 	// from ever becoming a reservation identity.
@@ -1284,6 +1369,14 @@ function stripOtaMarkdownValue(value = "") {
 
 function cleanAgodaValue(value = "") {
 	return cleanFieldValue(stripOtaMarkdownValue(value));
+}
+
+function findCleanConfirmationField(text, labels = []) {
+	for (const label of labels) {
+		const candidate = cleanConfirmationCandidate(findField(text, [label]));
+		if (candidate) return candidate;
+	}
+	return "";
 }
 
 function extractHotelRunnerArabicRoomBlocks(text = "") {
@@ -2178,13 +2271,13 @@ function resolveConfiguredAirbnbHotelMapping(context = {}) {
 		...(Array.isArray(context.hostLabels) ? context.hostLabels : []),
 	]
 		.filter(Boolean)
-		.find((value) => containsAjyadKeyword(value));
+		.find((value) => containsConfiguredZadAjyadAlias(value));
 	if (ajyadMatchedValue) {
 		return {
 			hotelId: configuredAjyadHotelId(),
-			matchedBy: "ajyad keyword",
+			matchedBy: "zad ajyad alias",
 			matchedValue: ajyadMatchedValue,
-			matchStrength: "keyword",
+			matchStrength: "exact_alias",
 		};
 	}
 
@@ -2679,6 +2772,321 @@ function extractExpediaPartnerCentralFields(text = "", provider = "") {
 	};
 }
 
+function extractDirectTripConfirmationNumbers(value = "") {
+	const source = String(value || "");
+	return Array.from(
+		new Set(
+			Array.from(
+				source.matchAll(
+					/\b(?:Booking|Reservation|Confirmation)\s*(?:no\.?|number|id|code|#)\s*[:#-]?\s*(\d{12,18})\b/gi
+				)
+			)
+				.map((match) => cleanConfirmationCandidate(match[1] || ""))
+				.filter(Boolean)
+		)
+	);
+}
+
+function extractDirectTripNightlySourceRows(
+	text = "",
+	{
+		dateRange = [],
+		roomCount = 1,
+		currency = "",
+		totalGuestAmount = 0,
+		totalPayoutAmount = 0,
+	} = {}
+) {
+	if (!dateRange.length || roomCount !== 1 || !currency) return [];
+	const source = String(text || "").replace(/\r/g, "");
+	const detailsMarker = source.search(/\bRoom\s+rate\s*Price\s+details\b/i);
+	if (detailsMarker < 0) return [];
+	const details = source
+		.slice(detailsMarker)
+		.split(/\bAdditional\s+Information\s*Type\s*Details\s*Rewards\b/i)[0];
+	const rowPattern =
+		/(?:^|\n)\s*([A-Za-z]{3,9}\s+\d{1,2})\s*\(\s*(\d+)\s+room\(s\)\s*\)([\s\S]*?)(?=(?:\n\s*[A-Za-z]{3,9}\s+\d{1,2}\s*\(\s*\d+\s+room\(s\)\s*\))|$)/gi;
+	const rows = Array.from(details.matchAll(rowPattern)).map((match) => {
+		const block = match[3] || "";
+		const clientAmount = parseMoney(
+			findFirstPattern(block, [
+				/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*1)?/i,
+			])
+		).amount;
+		const payoutAmount = parseMoney(
+			findFirstPattern(block, [
+				/\bYour\s+payout\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*1)?/i,
+			])
+		).amount;
+		return {
+			label: normalizeWhitespace(match[1]).toLowerCase(),
+			roomCount: Number(match[2] || 0),
+			clientAmount,
+			payoutAmount,
+		};
+	});
+	if (rows.length !== dateRange.length) return [];
+	const valid = rows.every((row, index) => {
+		const expectedLabel = dayjs(dateRange[index]).format("MMM D").toLowerCase();
+		return (
+			row.label === expectedLabel &&
+			row.roomCount === 1 &&
+			row.clientAmount > 0 &&
+			row.payoutAmount > 0 &&
+			row.payoutAmount <= row.clientAmount + 0.01
+		);
+	});
+	if (!valid) return [];
+	const clientSum = round2(
+		rows.reduce((sum, row) => sum + row.clientAmount, 0)
+	);
+	const payoutSum = round2(
+		rows.reduce((sum, row) => sum + row.payoutAmount, 0)
+	);
+	if (
+		Math.abs(clientSum - Number(totalGuestAmount || 0)) > 0.01 ||
+		Math.abs(payoutSum - Number(totalPayoutAmount || 0)) > 0.01
+	) {
+		return [];
+	}
+	return rows.map((row, index) => ({
+		date: dateRange[index],
+		clientAmount: row.clientAmount,
+		payoutAmount: row.payoutAmount,
+		currency,
+	}));
+}
+
+function convertDirectTripNightlyPricing(
+	sourceRows = [],
+	{
+		totalGuestAmountSar = 0,
+		totalPayoutAmountSar = 0,
+		exchangeRateToSar = 0,
+	} = {}
+) {
+	if (!sourceRows.length) return [];
+	const clientAmountsSar = allocateConvertedSourceAmounts(
+		sourceRows.map((row) => row.clientAmount),
+		totalGuestAmountSar,
+		exchangeRateToSar
+	);
+	const payoutAmountsSar = allocateConvertedSourceAmounts(
+		sourceRows.map((row) => row.payoutAmount),
+		totalPayoutAmountSar,
+		exchangeRateToSar
+	);
+	if (
+		clientAmountsSar.length !== sourceRows.length ||
+		payoutAmountsSar.length !== sourceRows.length
+	) {
+		return [];
+	}
+	return sourceRows.map((row, index) => ({
+		date: row.date,
+		clientAmountSar: clientAmountsSar[index],
+		payoutAmountSar: payoutAmountsSar[index],
+	}));
+}
+
+function extractDirectTripFields(email = {}, text = "", provider = "") {
+	const source = `${email.subject || ""}\n${text || ""}`;
+	const directTripSender = knownBookingSourceProvider(email.from || "") === "trip";
+	const templateMatched =
+		provider === "trip" &&
+		directTripSender &&
+		/\b(?:Booking|Reservation)\s+no\.?\s*#?\s*\d{12,18}\b/i.test(source) &&
+		/\bStaying\s+period\s*:/i.test(source) &&
+		/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)/i.test(
+			source
+		) &&
+		/\bYour\s+payout(?=\s|[A-Z]{3}|US\$|\$|[0-9])/i.test(source);
+	if (!templateMatched) return {};
+
+	const confirmationNumbers = extractDirectTripConfirmationNumbers(source);
+	const confirmationNumberConflict = confirmationNumbers.length > 1;
+	const confirmationNumber =
+		confirmationNumbers.length === 1 ? confirmationNumbers[0] : "";
+	const datePattern = dateTextPattern();
+	const stayMatch = source.match(
+		new RegExp(
+			`\\bStaying\\s+period\\s*:\\s*(${datePattern})\\s*(?:\\u2014|\\u2013|-)\\s*(${datePattern})\\s*\\|\\s*(\\d+)\\s+nights?`,
+			"i"
+		)
+	);
+	const roomMatches = Array.from(
+		String(text || "").matchAll(
+			/\bRoom\s+Type\s*:\s*([\s\S]{2,360}?)\s*\|\s*(\d+)\s+room\(s\)/gi
+		)
+	).map((match) => ({
+		roomName: cleanFieldValue(match[1] || ""),
+		roomCount: Number(match[2] || 0),
+	}));
+	const uniqueRoomBlocks = Array.from(
+		new Map(
+			roomMatches
+				.filter((room) => room.roomName && room.roomCount > 0)
+				.map((room) => [
+					`${normalizeComparable(room.roomName)}:${room.roomCount}`,
+					room,
+				])
+		).values()
+	);
+	const firstRoom = uniqueRoomBlocks[0] || {};
+	const roomRateMatches = Array.from(
+		source.matchAll(
+			/\bRoom\s+rate\s+(\d+)\s+room\(s\)\s*[x\u00d7]\s*(\d+)\s+night\(s\)/gi
+		)
+	);
+	const declaredRoomCounts = [
+		...uniqueRoomBlocks.map((room) => Number(room.roomCount || 0)),
+		...roomRateMatches.map((match) => Number(match[1] || 0)),
+	].filter((count) => count > 0);
+	const uniqueDeclaredRoomCounts = [...new Set(declaredRoomCounts)];
+	const roomCountConflict = uniqueDeclaredRoomCounts.length > 1;
+	const roomCount = roomCountConflict
+		? 0
+		: uniqueDeclaredRoomCounts[0] || firstRoom.roomCount || 0;
+	const checkinDate = parseDate(stayMatch?.[1] || "");
+	const checkoutDate = parseDate(stayMatch?.[2] || "");
+	const stayNights = Number(stayMatch?.[3] || 0);
+	const calendarNights = calculateDaysOfResidence(checkinDate, checkoutDate);
+	const declaredRoomRateNights = roomRateMatches
+		.map((match) => Number(match[2] || 0))
+		.filter((nights) => nights > 0);
+	const uniqueDeclaredRoomRateNights = [...new Set(declaredRoomRateNights)];
+	const stayNightConflict = !!(
+		(stayNights > 0 && calendarNights > 0 && stayNights !== calendarNights) ||
+		uniqueDeclaredRoomRateNights.length > 1 ||
+		uniqueDeclaredRoomRateNights.some(
+			(nights) =>
+				(calendarNights > 0 && nights !== calendarNights) ||
+				(stayNights > 0 && nights !== stayNights)
+		)
+	);
+	const occupancy = source.match(
+		/\bGuests\s*\(estimated\)\s*:\s*(\d+)\s+adults?(?:\s*[,|+]\s*(\d+)\s+child(?:ren)?)?/i
+	);
+	const adults = Number(occupancy?.[1] || 0);
+	const children = Number(occupancy?.[2] || 0);
+
+	const paymentBlock =
+		source.match(
+			/\bPayment\s+information\b([\s\S]{1,1800}?)(?=\bRoom\s+rate\s*Price\s+details\b)/i
+		)?.[1] || source;
+	const finalRateText = findFirstPattern(paymentBlock, [
+		/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)\s*((?:(?:[A-Z]{3}|US\$|\$)\s*)?[0-9][0-9,.]*)/i,
+	]);
+	const payoutText = findFirstPattern(paymentBlock, [
+		/\bYour\s+payout\s*((?:(?:[A-Z]{3}|US\$|\$)\s*)?[0-9][0-9,.]*)/i,
+	]);
+	const finalRate = parseMoney(finalRateText);
+	const payout = parseMoney(payoutText);
+	const finalRateCurrency = normalizeMoneyCurrency(finalRate.currency || "");
+	const payoutCurrency = normalizeMoneyCurrency(payout.currency || "");
+	const pricingCurrencyConflict = !!(
+		finalRateCurrency &&
+		payoutCurrency &&
+		finalRateCurrency !== payoutCurrency
+	);
+	const currency = pricingCurrencyConflict
+		? ""
+		: payoutCurrency || finalRateCurrency || "";
+	const pricingIsConsistent =
+		!pricingCurrencyConflict &&
+		finalRate.amount > 0 &&
+		payout.amount > 0 &&
+		!!currency &&
+		payout.amount <= finalRate.amount + 0.01;
+	const guestConversion = pricingIsConsistent
+		? getSarConversionMeta(finalRate.amount, currency)
+		: {};
+	const payoutConversion = pricingIsConsistent
+		? getSarConversionMeta(payout.amount, currency)
+		: {};
+	const nightlyPricingSource = pricingIsConsistent
+		? extractDirectTripNightlySourceRows(text, {
+				dateRange: generateDateRange(checkinDate, checkoutDate),
+				roomCount,
+				currency,
+				totalGuestAmount: finalRate.amount,
+				totalPayoutAmount: payout.amount,
+		  })
+		: [];
+	const nightlyPricingSar = convertDirectTripNightlyPricing(
+		nightlyPricingSource,
+		{
+			totalGuestAmountSar: Number(guestConversion.totalAmountSar || 0),
+			totalPayoutAmountSar: Number(payoutConversion.totalAmountSar || 0),
+			exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+		}
+	);
+	const prepaid =
+		/\bNet\s+rate\s*[|\uff5c]\s*Prepaid\b/i.test(source) ||
+		/\bThis\s+is\s+a\s+prepaid\s+reservation\b[\s\S]{0,160}?\bguest\s+has\s+already\s+paid\b/i.test(
+			source
+		);
+	const hotelName = cleanFieldValue(
+		findFirstPattern(text, [
+			/(?:^|\n)\s*([^\n]{2,120}\bHotel)\s*\n\s*Guest\s+Name\s*:/i,
+		])
+	);
+	const guestName = cleanFieldValue(
+		findNextLineAfterExactLabel(text, "Guest Name", 3)
+	);
+
+	return {
+		templateMatched: true,
+		confirmationNumber,
+		confirmationNumberConflict,
+		pricingCurrencyConflict,
+		hotelName,
+		guestName,
+		roomName: firstRoom.roomName || "",
+		roomCount,
+		roomCountConflict,
+		checkinDate,
+		checkoutDate,
+		stayNights,
+		stayNightConflict,
+		adults,
+		children,
+		totalGuests: adults + children,
+		amountText: pricingIsConsistent ? `${currency} ${finalRate.amount}` : "",
+		amount: pricingIsConsistent ? finalRate.amount : 0,
+		currency: pricingIsConsistent ? currency : "",
+		totalAmountSar: Number(guestConversion.totalAmountSar || 0),
+		sourceAmount: pricingIsConsistent ? finalRate.amount : 0,
+		sourceCurrency: pricingIsConsistent ? currency : "",
+		exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+		exchangeRateSource: guestConversion.exchangeRateSource || "",
+		amountConvertedAt: guestConversion.convertedAt || "",
+		totalPayoutSar: Number(payoutConversion.totalAmountSar || 0),
+		netAfterExpensesTotal: Number(payoutConversion.totalAmountSar || 0),
+		paymentSummary: pricingIsConsistent
+			? {
+					sourceCurrency: currency,
+					sourceTotalGuestPaymentAmount: finalRate.amount,
+					sourceTotalPayoutAmount: payout.amount,
+					totalGuestPaymentAmount: Number(guestConversion.totalAmountSar || 0),
+					totalPayoutAmount: Number(payoutConversion.totalAmountSar || 0),
+					currency: "SAR",
+					exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+					exchangeRateSource: guestConversion.exchangeRateSource || "",
+					amountConvertedAt: guestConversion.convertedAt || "",
+			  }
+			: {},
+		paymentCollectionModel: prepaid ? "ota_collect" : "unknown",
+		paymentInstructions: prepaid
+			? "Trip.com prepaid reservation; the guest has already paid the platform."
+			: "",
+		pricingIsConsistent,
+		nightlyPricingSource,
+		nightlyPricingSar,
+		multipleRoomBlocks: uniqueRoomBlocks.length > 1,
+	};
+}
+
 function cleanFieldValue(value = "") {
 	return cleanOtaDisplayValue(value).replace(/^\*+\s*/, "");
 }
@@ -2790,8 +3198,201 @@ function findGuestNoteField(text = "") {
 	return cleanOtaGuestNote(collected.join(" "));
 }
 
+const TRUSTED_OTA_SENDER_DOMAINS = Object.freeze({
+	expedia: ["expedia.com", "expediagroup.com", "expediapartnercentral.com"],
+	hotels: ["hotels.com"],
+	booking: ["booking.com"],
+	agoda: ["agoda.com"],
+	airbnb: ["airbnb.com"],
+	hotelrunner: ["hotelrunner.com"],
+	trip: ["trip.com"],
+});
+
+function parseSingleSenderMailbox(value = "") {
+	const source = normalizeWhitespace(value);
+	if (!source) return "";
+	let candidate = source;
+	if (/[<>]/.test(source)) {
+		// A display name can itself contain an address-like string. Only the sole
+		// RFC-style angle-bracket mailbox is authoritative; malformed or multiple
+		// mailbox forms fail closed.
+		const angleMatch = source.match(/^([^<>]*)<([^<>]*)>\s*$/);
+		if (!angleMatch) return "";
+		const displayName = normalizeWhitespace(angleMatch[1] || "");
+		if (/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+/i.test(displayName)) {
+			return "";
+		}
+		candidate = normalizeWhitespace(angleMatch[2]);
+	}
+
+	const mailboxMatch = candidate.match(
+		/^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+)$/i
+	);
+	return mailboxMatch ? candidate.toLowerCase() : "";
+}
+
+function trustedProviderFromDomain(value = "") {
+	const domain = normalizeWhitespace(value).toLowerCase().replace(/^@/, "");
+	if (!domain || !/^[a-z0-9.-]+$/.test(domain)) return "";
+	for (const [provider, trustedDomains] of Object.entries(
+		TRUSTED_OTA_SENDER_DOMAINS
+	)) {
+		if (
+			trustedDomains.some(
+				(trustedDomain) =>
+					domain === trustedDomain || domain.endsWith(`.${trustedDomain}`)
+			)
+		) {
+			return provider;
+		}
+	}
+	return "";
+}
+
+function trustedProviderFromSenderAddress(value = "") {
+	const mailbox = parseSingleSenderMailbox(value);
+	if (!mailbox) return "";
+	const domain = mailbox.slice(mailbox.lastIndexOf("@") + 1);
+	return trustedProviderFromDomain(domain);
+}
+
+function senderDomainsAreAligned(fromDomain = "", authenticationDomain = "") {
+	const from = normalizeWhitespace(fromDomain).toLowerCase().replace(/^@/, "");
+	const authenticated = normalizeWhitespace(authenticationDomain)
+		.toLowerCase()
+		.replace(/^@/, "");
+	return !!(
+		from &&
+		authenticated &&
+		(from === authenticated ||
+			from.endsWith(`.${authenticated}`) ||
+			authenticated.endsWith(`.${from}`))
+	);
+}
+
+function parseSendGridEnvelopeMailbox(value) {
+	let envelope = value;
+	if (typeof envelope === "string") {
+		try {
+			envelope = JSON.parse(envelope);
+		} catch (_error) {
+			return "";
+		}
+	}
+	if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+		return "";
+	}
+	return parseSingleSenderMailbox(envelope.from || "");
+}
+
+function parseSendGridDkimResults(value = "") {
+	if (typeof value !== "string" || value.length > 5000) return [];
+	const results = [];
+	const pattern = /@?([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)\s*:\s*(pass|fail|none|neutral|policy|temperror|permerror)\b/gi;
+	for (const match of value.matchAll(pattern)) {
+		const domain = String(match[1] || "").toLowerCase();
+		const result = String(match[2] || "").toLowerCase();
+		if (domain && result) results.push({ domain, result });
+	}
+	return results;
+}
+
+function evaluateTrustedSenderAuthentication({
+	from = "",
+	spf = "",
+	dkim = "",
+	envelope = null,
+} = {}) {
+	const fromMailbox = parseSingleSenderMailbox(from);
+	const fromDomain = fromMailbox.slice(fromMailbox.lastIndexOf("@") + 1);
+	const trustedProvider = trustedProviderFromDomain(fromDomain);
+	if (!fromMailbox) {
+		return {
+			evaluated: true,
+			authenticatedAligned: false,
+			trustedProvider: "",
+			fromDomain: "",
+			method: "",
+			reason: "invalid_sender_mailbox",
+		};
+	}
+	if (!trustedProvider) {
+		return {
+			evaluated: true,
+			authenticatedAligned: false,
+			trustedProvider: "",
+			fromDomain,
+			method: "",
+			reason: "untrusted_sender_domain",
+		};
+	}
+
+	const envelopeMailbox = parseSendGridEnvelopeMailbox(envelope);
+	const envelopeFromDomain = envelopeMailbox.slice(
+		envelopeMailbox.lastIndexOf("@") + 1
+	);
+	const spfResult =
+		typeof spf === "string" ? normalizeWhitespace(spf).toLowerCase() : "";
+	const spfAlignedPass = !!(
+		spfResult === "pass" &&
+		envelopeMailbox &&
+		senderDomainsAreAligned(fromDomain, envelopeFromDomain)
+	);
+	const dkimResults = parseSendGridDkimResults(dkim);
+	const alignedDkimPassDomains = Array.from(
+		new Set(
+			dkimResults
+				.filter(
+					(result) =>
+						result.result === "pass" &&
+						senderDomainsAreAligned(fromDomain, result.domain)
+				)
+				.map((result) => result.domain)
+		)
+	);
+	const dkimAlignedPass = alignedDkimPassDomains.length > 0;
+	const methods = [
+		...(spfAlignedPass ? ["spf"] : []),
+		...(dkimAlignedPass ? ["dkim"] : []),
+	];
+	const authenticatedAligned = methods.length > 0;
+	const hasAuthenticationEvidence = !!(spfResult || dkimResults.length);
+	const hasUnalignedPass = !!(
+		spfResult === "pass" ||
+		dkimResults.some((result) => result.result === "pass")
+	);
+
+	return {
+		evaluated: true,
+		authenticatedAligned,
+		trustedProvider,
+		fromDomain,
+		envelopeFromDomain,
+		spfResult,
+		spfAlignedPass,
+		dkimAlignedPass,
+		alignedDkimPassDomains,
+		method: methods.join("+"),
+		reason: authenticatedAligned
+			? "authenticated_aligned_sender"
+			: !hasAuthenticationEvidence
+			? "missing_sender_authentication"
+			: hasUnalignedPass
+			? "sender_authentication_not_aligned"
+			: "sender_authentication_failed",
+	};
+}
+
 function detectProvider({ from = "", to = "", subject = "", text = "" } = {}) {
-	const haystack = `${from} ${to} ${subject} ${text}`.toLowerCase();
+	// A direct, unambiguous OTA sender is stronger evidence than footer/body
+	// mentions of other platforms. HotelRunner remains on the legacy relay path
+	// below so existing provider namespaces for its non-Trip integrations do not
+	// change without a dedicated migration.
+	const directSenderProvider = trustedProviderFromSenderAddress(from);
+	if (directSenderProvider && directSenderProvider !== "hotelrunner") {
+		return directSenderProvider;
+	}
+	const haystack = `${to} ${subject} ${text}`.toLowerCase();
 	if (haystack.includes("expedia") || haystack.includes("expediapartnercentral")) {
 		return "expedia";
 	}
@@ -2804,6 +3405,7 @@ function detectProvider({ from = "", to = "", subject = "", text = "" } = {}) {
 	}
 	if (haystack.includes("agoda")) return "agoda";
 	if (haystack.includes("airbnb")) return "airbnb";
+	if (directSenderProvider === "hotelrunner") return "hotelrunner";
 	if (haystack.includes("hotelrunner")) return "hotelrunner";
 	if (haystack.includes("trip.com") || haystack.includes("@trip")) return "trip";
 	return "unknown";
@@ -2877,12 +3479,21 @@ function knownBookingSourceProvider(value = "") {
 	return providers.size === 1 ? [...providers][0] : "";
 }
 
-function embeddedBookingSourceProvider(value = "") {
+function embeddedBookingSourceProviders(value = "") {
 	const source = String(value || "").replace(/\r/g, "");
-	if (!source) return "";
-	const providers = BOOKING_SOURCE_EVIDENCE_PATTERNS.filter(([, pattern]) =>
-		pattern.test(source)
-	).map(([provider]) => provider);
+	if (!source) return [];
+	const providers = Array.from(
+		new Set(
+			BOOKING_SOURCE_EVIDENCE_PATTERNS.filter(([, pattern]) =>
+				pattern.test(source)
+			).map(([provider]) => provider)
+		)
+	);
+	return providers;
+}
+
+function embeddedBookingSourceProvider(value = "") {
+	const providers = embeddedBookingSourceProviders(value);
 	return providers.length === 1 ? providers[0] : "";
 }
 
@@ -2902,14 +3513,46 @@ function resolveBookingSource({
 	}
 
 	const explicitProvider = knownBookingSourceProvider(explicitSource);
+	const embeddedProviders = embeddedBookingSourceProviders(
+		`${subject || ""}\n${text || ""}`
+	);
+	if (envelopeProvider === "hotelrunner") {
+		const commercialProviders = Array.from(
+			new Set([
+				...embeddedProviders,
+				...(explicitProvider && explicitProvider !== "hotelrunner"
+					? [explicitProvider]
+					: []),
+			])
+		);
+		if (commercialProviders.length === 1) {
+			return (
+				PROVIDER_LABELS[commercialProviders[0]] || commercialProviders[0]
+			);
+		}
+		return PROVIDER_LABELS.hotelrunner;
+	}
+	if (explicitProvider && explicitProvider !== "hotelrunner") {
+		return PROVIDER_LABELS[explicitProvider] || explicitProvider;
+	}
+	const embeddedProvider =
+		embeddedProviders.length === 1 ? embeddedProviders[0] : "";
+	// HotelRunner is a transport relay. A sole, strong OTA signature embedded
+	// in the booking is the actual commercial source even when a generic Source
+	// field repeats HotelRunner. Conflicting embedded OTAs return no provider
+	// from embeddedBookingSourceProvider and therefore fail closed here.
+	if (
+		explicitProvider === "hotelrunner" &&
+		embeddedProvider &&
+		embeddedProvider !== "hotelrunner"
+	) {
+		return PROVIDER_LABELS[embeddedProvider] || embeddedProvider;
+	}
 	if (explicitProvider) return PROVIDER_LABELS[explicitProvider] || explicitProvider;
 	if (normalizeWhitespace(explicitSource)) {
 		return normalizeWhitespace(explicitSource).slice(0, 80);
 	}
 
-	const embeddedProvider = embeddedBookingSourceProvider(
-		`${subject || ""}\n${text || ""}`
-	);
 	if (embeddedProvider) return PROVIDER_LABELS[embeddedProvider] || embeddedProvider;
 
 	if (provider && provider !== "unknown") {
@@ -2941,6 +3584,59 @@ function hasArabicCancellationSignal(value = "") {
 	return /(?:^|[\n\r\-:\s])(?:\u062a\u0645\s+)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621)\s+(?:\u0627\u0644)?\u062d\u062c\u0632(?:\s|#|$)|(?:\u0627\u0644)?\u062d\u062c\u0632\s+(?:\u0645\u0644\u063a\u064a|\u0645\u0644\u063a\u0649|\u0623\u0644\u063a\u064a)/i.test(
 		source
 	);
+}
+
+function allocateConvertedSourceAmounts(
+	sourceAmounts = [],
+	targetTotalSar = 0,
+	exchangeRateToSar = 0
+) {
+	const amounts = sourceAmounts.map((value) => Number(value || 0));
+	const rate = Number(exchangeRateToSar || 0);
+	const targetCents = Math.round(Number(targetTotalSar || 0) * 100);
+	if (
+		!amounts.length ||
+		amounts.some((value) => !Number.isFinite(value) || value < 0) ||
+		!Number.isFinite(rate) ||
+		rate <= 0 ||
+		targetCents < 0
+	) {
+		return [];
+	}
+
+	const exactCents = amounts.map((value) => value * rate * 100);
+	const allocatedCents = exactCents.map((value) => Math.floor(value + 1e-9));
+	let remaining = targetCents - allocatedCents.reduce((sum, value) => sum + value, 0);
+	const descendingRemainders = exactCents
+		.map((value, index) => ({
+			index,
+			remainder: Number(
+				(value - Math.floor(value + 1e-9)).toFixed(6)
+			),
+		}))
+		.sort((left, right) =>
+			right.remainder !== left.remainder
+				? right.remainder - left.remainder
+				: left.index - right.index
+		);
+	const ascendingRemainders = [...descendingRemainders].reverse();
+	const maxAdjustment = amounts.length * 2;
+	if (Math.abs(remaining) > maxAdjustment) return [];
+	let cursor = 0;
+	while (remaining !== 0) {
+		const order = remaining > 0 ? descendingRemainders : ascendingRemainders;
+		const selected = order[cursor % order.length];
+		if (remaining > 0) {
+			allocatedCents[selected.index] += 1;
+			remaining -= 1;
+		} else if (allocatedCents[selected.index] > 0) {
+			allocatedCents[selected.index] -= 1;
+			remaining += 1;
+		}
+		cursor += 1;
+		if (cursor > maxAdjustment * 2) return [];
+	}
+	return allocatedCents.map((value) => value / 100);
 }
 
 function hasArabicModificationSignal(value = "") {
@@ -3165,19 +3861,78 @@ function detectReservationIntent({
 	return "unknown";
 }
 
-function extractCardLast4(text) {
-	const redactedCard = String(text || "").match(/\[CARD-(\d{4})\]/i);
-	if (redactedCard) return redactedCard[1];
+function extractCardLast4(
+	text,
+	{ allowUnlabeledCardNumber = false, excludedNumbers = [] } = {}
+) {
+	const source = String(text || "");
+	const excluded = new Set(
+		(excludedNumbers || [])
+			.map((value) => String(value || "").replace(/\D/g, ""))
+			.filter(Boolean)
+	);
+	if (allowUnlabeledCardNumber) {
+		for (const redactedCard of source.matchAll(/\[CARD-(\d{4})\]/gi)) {
+			const start = Number(redactedCard.index || 0);
+			const localContext = source.slice(
+				Math.max(0, start - 100),
+				start + redactedCard[0].length + 100
+			);
+			const locallyCardLabeled =
+				/(?:virtual\s+card|\bvcc\b|card\s+(?:number|no\.?|details?|information)|validation\s+code|security\s+code|cvv|cvc)/i.test(
+					localContext
+				);
+			const locallyUrlLike =
+				/https?:\/\/|www\.|[?&][a-z0-9_.-]+\s*=/i.test(localContext);
+			if (locallyCardLabeled && !locallyUrlLike) return redactedCard[1];
+		}
+	}
 	const nearCard = findFirstPattern(text, [
 		/\b(?:card number|card no\.?|pan)\s*[:#-]?\s*((?:\d[\s-]*){13,19})\b/i,
 	]);
 	const clean = String(nearCard || "").replace(/\D/g, "");
-	if (clean.length >= 4) return clean.slice(-4);
+	if (clean.length >= 4 && !excluded.has(clean)) return clean.slice(-4);
 
-	const generic = String(text || "").match(/\b(?:\d[ -]*?){15,19}\b/);
-	if (!generic) return "";
-	const digits = generic[0].replace(/\D/g, "");
-	return digits.length >= 15 ? digits.slice(-4) : "";
+	// A 15-19 digit OTA confirmation can look exactly like a card PAN. Only
+	// consider an unlabeled long number when the same message has explicit card
+	// context, and never reuse the already-extracted reservation identity.
+	if (!allowUnlabeledCardNumber) return "";
+	for (const match of source.matchAll(/\b(?:\d[ -]*?){15,19}\b/g)) {
+		const digits = String(match[0] || "").replace(/\D/g, "");
+		const start = Number(match.index || 0);
+		const localContext = source.slice(
+			Math.max(0, start - 100),
+			start + match[0].length + 100
+		);
+		const locallyUrlLike =
+			/https?:\/\/|www\.|[?&][a-z0-9_.-]+\s*=/i.test(localContext);
+		if (
+			digits.length >= 15 &&
+			!excluded.has(digits) &&
+			!locallyUrlLike &&
+			isLuhnValidCardNumber(digits)
+		) {
+			return digits.slice(-4);
+		}
+	}
+	return "";
+}
+
+function isLuhnValidCardNumber(value = "") {
+	const digits = String(value || "").replace(/\D/g, "");
+	if (!/^\d{13,19}$/.test(digits) || /^(\d)\1+$/.test(digits)) return false;
+	let sum = 0;
+	let doubleDigit = false;
+	for (let index = digits.length - 1; index >= 0; index -= 1) {
+		let digit = Number(digits[index]);
+		if (doubleDigit) {
+			digit *= 2;
+			if (digit > 9) digit -= 9;
+		}
+		sum += digit;
+		doubleDigit = !doubleDigit;
+	}
+	return sum % 10 === 0;
 }
 
 function detectPaymentCollectionModel(paymentText = "", vcc = {}) {
@@ -3254,7 +4009,8 @@ function safeOtaPaymentSummary(summary = {}) {
 }
 
 function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar = 0, commissionAmountSar = 0) {
-	const providerLabel = normalized.providerLabel || "OTA";
+	const providerLabel =
+		normalized.bookingSource || normalized.providerLabel || "OTA";
 	const collectionModel = normalized.paymentCollectionModel || "unknown";
 	const total = round2(totalAmountSar);
 	const subTotal = round2(subTotalSar || total);
@@ -3381,30 +4137,74 @@ function extractHotelRunnerRoomBlocks(text = "") {
 	return blocks;
 }
 
+function extractExplicitPrimaryConfirmationNumbers(text = "") {
+	const source = String(text || "");
+	const patterns = [
+		/\bConfirmation\s*(?:Number|No\.?|Code|ID|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/gi,
+		/\bBooking\s*(?:ID|Number|No\.?|Code|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/gi,
+		/\bReservation\s*(?:ID|Number|No\.?|Code|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/gi,
+	];
+	const seen = new Set();
+	return patterns
+		.flatMap((pattern) =>
+			Array.from(source.matchAll(pattern)).map((match) => match[1] || "")
+		)
+		.map(cleanConfirmationCandidate)
+		.filter((candidate) => {
+			const normalized = normalizeConfirmation(candidate);
+			if (!normalized || seen.has(normalized)) return false;
+			seen.add(normalized);
+			return true;
+		});
+}
+
+function extractHotelRunnerConfirmationNumbers(text = "") {
+	return extractExplicitPrimaryConfirmationNumbers(text);
+}
+
 function extractHotelRunnerConfirmationNumber(text = "") {
-	return cleanConfirmationCandidate(
-		findFirstPattern(text, [
-			/\bConfirmation\s*(?:Number|Code|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
-			/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
-		])
-	);
+	return extractHotelRunnerConfirmationNumbers(text)[0] || "";
 }
 
 function extractNormalizedReservation(email) {
-	const text = normalizeWhitespace(
-		`${email.subject || ""}\n${email.text || ""}\n${htmlToText(email.html || "")}`
-	);
+	const rawInboundText = `${email.subject || ""}\n${email.text || ""}\n${htmlToText(
+		email.html || ""
+	)}`;
+	const text = normalizeWhitespace(rawInboundText);
 	const provider = detectProvider({
 		from: email.from,
 		to: email.to,
 		subject: email.subject,
 		text,
 	});
+	const trustedTransportProvider = trustedProviderFromSenderAddress(
+		email.from || ""
+	);
+	const senderAuthentication =
+		email.senderAuthentication && typeof email.senderAuthentication === "object"
+			? { ...email.senderAuthentication }
+			: {};
+	const sourceSenderAuthenticated = !!(
+		trustedTransportProvider &&
+		senderAuthentication.authenticatedAligned === true &&
+		senderAuthentication.trustedProvider === trustedTransportProvider
+	);
 	const airbnbFields = extractAirbnbFields(email, text, provider);
 	const agodaFields = extractAgodaFields(email, text, provider);
 	const expediaPartnerCentralFields = extractExpediaPartnerCentralFields(
 		text,
 		provider
+	);
+	const directTripFields = extractDirectTripFields(email, rawInboundText, provider);
+	const directTripExplicitConfirmationNumbers =
+		extractDirectTripConfirmationNumbers(rawInboundText);
+	const genericExplicitConfirmationNumbers =
+		extractExplicitPrimaryConfirmationNumbers(rawInboundText);
+	const isDirectTripSender =
+		provider === "trip" &&
+		trustedTransportProvider === "trip";
+	const directTripIdentityConflict = !!(
+		isDirectTripSender && directTripExplicitConfirmationNumbers.length > 1
 	);
 	const tableStayDates = extractTableStayDates(text);
 	const tableOccupancy = extractTableOccupancy(text);
@@ -3417,9 +4217,19 @@ function extractNormalizedReservation(email) {
 	const hotelRunnerArabicFields = isHotelRunnerSender
 		? extractHotelRunnerArabicFields(rawHotelRunnerText)
 		: {};
-	const hotelRunnerConfirmationNumber = isHotelRunnerSender
-		? extractHotelRunnerConfirmationNumber(rawHotelRunnerText)
-		: "";
+	const hotelRunnerConfirmationNumbers = isHotelRunnerSender
+		? Array.from(
+				new Set(
+					[
+						...extractHotelRunnerConfirmationNumbers(rawHotelRunnerText),
+						hotelRunnerArabicFields.confirmationNumber || "",
+					]
+						.map(cleanConfirmationCandidate)
+						.filter(Boolean)
+				)
+		  )
+		: [];
+	const hotelRunnerConfirmationNumber = hotelRunnerConfirmationNumbers[0] || "";
 	const hotelRunnerRoomBlocks = isHotelRunnerSender
 		? [
 				extractHotelRunnerRoomBlocks(email.text || ""),
@@ -3447,6 +4257,20 @@ function extractNormalizedReservation(email) {
 		"Travel agency",
 		"Agency",
 	]);
+	const embeddedBookingProviders = embeddedBookingSourceProviders(rawInboundText);
+	const explicitBookingProvider = knownBookingSourceProvider(sourceField);
+	const hotelRunnerCommercialSourceProviders = Array.from(
+		new Set([
+			...embeddedBookingProviders,
+			...(explicitBookingProvider && explicitBookingProvider !== "hotelrunner"
+				? [explicitBookingProvider]
+				: []),
+		])
+	);
+	const hotelRunnerBookingSourceConflict = !!(
+		isHotelRunnerSender &&
+		hotelRunnerCommercialSourceProviders.length > 1
+	);
 	const bookingSource = resolveBookingSource({
 		provider,
 		providerLabel,
@@ -3456,21 +4280,54 @@ function extractNormalizedReservation(email) {
 		explicitSource: sourceField,
 	});
 	const bookingSourceIsSourceBacked = !!(
-		normalizeWhitespace(sourceField) ||
-		knownBookingSourceProvider(email.from) ||
-		embeddedBookingSourceProvider(`${email.subject || ""}\n${text}`)
+		!hotelRunnerBookingSourceConflict &&
+		(normalizeWhitespace(sourceField) ||
+			trustedProviderFromSenderAddress(email.from) ||
+			embeddedBookingProviders.length === 1)
 	);
+	const embeddedBookingProvider =
+		embeddedBookingProviders.length === 1 ? embeddedBookingProviders[0] : "";
+	const hotelRunnerTripRelayEvidence = !!(
+		isHotelRunnerSender &&
+		embeddedBookingProvider === "trip" &&
+		knownBookingSourceProvider(bookingSource) === "trip"
+	);
+	const hotelRunnerTripConfirmationNumbers = hotelRunnerTripRelayEvidence
+		? hotelRunnerConfirmationNumbers.filter((value) => /^\d{9,18}$/.test(value))
+		: [];
+	const hotelRunnerTripIdentityConflict = !!(
+		hotelRunnerTripRelayEvidence &&
+		hotelRunnerTripConfirmationNumbers.length !== 1
+	);
+	const validatedHotelRunnerConfirmationNumber = hotelRunnerTripRelayEvidence
+		? hotelRunnerTripConfirmationNumbers[0] || ""
+		: hotelRunnerConfirmationNumber;
+	// HotelRunner is a transport relay and may legitimately carry both its own
+	// reference and the OTA's booking identity. Its verified Trip relay path has
+	// a dedicated ambiguity check above. Direct OTA messages, however, must not
+	// select one of two conflicting primary identity labels.
+	const genericExplicitIdentityConflict = !!(
+		!isHotelRunnerSender && genericExplicitConfirmationNumbers.length > 1
+	);
+	const otaIdentityConflict =
+		directTripIdentityConflict ||
+		hotelRunnerTripIdentityConflict ||
+		genericExplicitIdentityConflict;
 
 	const explicitProviderConfirmation = firstNonEmpty(
 		airbnbFields.confirmationNumber,
 		agodaFields.confirmationNumber,
 		expediaPartnerCentralFields.confirmationNumber,
-		hotelRunnerArabicFields.confirmationNumber,
-		hotelRunnerConfirmationNumber
+		directTripFields.confirmationNumber,
+		isDirectTripSender && directTripExplicitConfirmationNumbers.length === 1
+			? directTripExplicitConfirmationNumbers[0]
+			: "",
+		hotelRunnerTripRelayEvidence
+			? validatedHotelRunnerConfirmationNumber
+			: hotelRunnerArabicFields.confirmationNumber,
+		validatedHotelRunnerConfirmationNumber
 	);
-	const reservationCandidate = firstNonEmpty(
-		explicitProviderConfirmation,
-		findField(text, [
+	const genericConfirmationField = findCleanConfirmationField(text, [
 				"Reservation ID",
 				"Reservation number",
 				"Reservation No",
@@ -3500,7 +4357,8 @@ function extractNormalizedReservation(email) {
 				"Itinerary #",
 				"Trip number",
 				"Trip #",
-			]),
+	]);
+	const genericConfirmationPattern = cleanConfirmationCandidate(
 		findFirstPattern(text, [
 				/\bReservation\s*(?:ID|No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bConfirmation\s*(?:Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
@@ -3511,13 +4369,30 @@ function extractNormalizedReservation(email) {
 				/\bTrip\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 		])
 	);
+	const reservationCandidate = otaIdentityConflict
+		? ""
+		: firstNonEmpty(
+				explicitProviderConfirmation,
+				genericConfirmationField,
+				genericConfirmationPattern
+		  );
 	// Airbnb confirmation codes may be alphabetic. Only permit that format when
 	// it came from Airbnb's explicit reservation URL/label or HotelRunner's
 	// explicit Arabic confirmation label; generic alphabetic fragments remain blocked.
-	const reservationId =
-		provider === "airbnb" && explicitProviderConfirmation
+	const reservationId = otaIdentityConflict
+		? ""
+		: provider === "airbnb" && explicitProviderConfirmation
 			? normalizeWhitespace(explicitProviderConfirmation)
 			: cleanConfirmationCandidate(reservationCandidate);
+	const directTripLifecycleTemplateMatched = !!(
+		isDirectTripSender &&
+		["cancelled", "no_show", "modified", "status"].includes(eventType) &&
+		directTripExplicitConfirmationNumbers.length === 1 &&
+		reservationId &&
+		directTripExplicitConfirmationNumbers[0] ===
+			normalizeConfirmation(reservationId) &&
+		/^\d{12,18}$/.test(normalizeConfirmation(reservationId))
+	);
 
 	const explicitHotelName = firstNonEmpty(
 		explicitHotelAliasFromText(email.subject || ""),
@@ -3526,6 +4401,7 @@ function extractNormalizedReservation(email) {
 	const hotelName = firstNonEmpty(
 		airbnbFields.hotelName,
 		agodaFields.hotelName,
+		directTripFields.hotelName,
 		provider === "airbnb" ? explicitHotelName : "",
 		provider === "airbnb" ? "" : extractProviderLogoHotelName(text, provider),
 		provider === "airbnb" ? "" : findHotelNameField(text),
@@ -3545,6 +4421,7 @@ function extractNormalizedReservation(email) {
 	const roomName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.roomName,
 		agodaFields.roomName,
+		directTripFields.roomName,
 		hotelRunnerArabicFields.roomName,
 		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
 	), [
@@ -3558,7 +4435,7 @@ function extractNormalizedReservation(email) {
 		"تاريخ\\s*تسجيل\\s*المغادرة",
 		"عدد\\s*الضيوف",
 	]);
-	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || expediaPartnerCentralFields.checkinDate || hotelRunnerArabicFields.checkinDate || tableStayDates.checkinDate || findDateValue(
+	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || expediaPartnerCentralFields.checkinDate || directTripFields.checkinDate || hotelRunnerArabicFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -3577,7 +4454,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || expediaPartnerCentralFields.checkoutDate || hotelRunnerArabicFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
+	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || expediaPartnerCentralFields.checkoutDate || directTripFields.checkoutDate || hotelRunnerArabicFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -3606,9 +4483,12 @@ function extractNormalizedReservation(email) {
 		hotelRunnerArabicFields.bookedAt ||
 		expediaPartnerCentralFields.bookedAt ||
 		parseDate(bookedAtField) ||
-		dayjs().format("YYYY-MM-DD");
+		email.receivedAt ||
+		email.date ||
+		new Date();
 
 	const amountText = firstNonEmpty(
+		directTripFields.amountText,
 		hotelRunnerArabicFields.orderTotalText,
 		expediaPartnerCentralFields.totalGuestPaymentText,
 		findField(text, [
@@ -3677,6 +4557,7 @@ function extractNormalizedReservation(email) {
 		airbnbFields.adults ||
 		agodaFields.adults ||
 		expediaPartnerCentralFields.adults ||
+		directTripFields.adults ||
 		(hotelRunnerArabicFields.hasOccupancyBreakdown
 			? hotelRunnerArabicFields.adults
 			: hotelRunnerArabicFields.totalGuests) ||
@@ -3686,6 +4567,7 @@ function extractNormalizedReservation(email) {
 		airbnbFields.children ||
 		agodaFields.children ||
 		expediaPartnerCentralFields.children ||
+		directTripFields.children ||
 		(hotelRunnerArabicFields.hasOccupancyBreakdown
 			? hotelRunnerArabicFields.children
 			: 0) ||
@@ -3695,6 +4577,7 @@ function extractNormalizedReservation(email) {
 		airbnbFields.totalGuests ||
 		agodaFields.totalGuests ||
 		expediaPartnerCentralFields.totalGuests ||
+		directTripFields.totalGuests ||
 		hotelRunnerArabicFields.totalGuests ||
 		countNumber(totalGuestsField) ||
 		tableOccupancy.totalGuests ||
@@ -3703,6 +4586,7 @@ function extractNormalizedReservation(email) {
 	const roomCount =
 		airbnbFields.roomCount ||
 		agodaFields.roomCount ||
+		directTripFields.roomCount ||
 		hotelRunnerArabicFields.roomCount ||
 		countNumber(roomCountField) ||
 		1;
@@ -3747,6 +4631,7 @@ function extractNormalizedReservation(email) {
 	const guestName = trimFlattenedFieldTail(firstNonEmpty(
 		airbnbFields.guestName,
 		agodaFields.guestName,
+		directTripFields.guestName,
 		hotelRunnerArabicFields.guestName,
 		hotelRunnerInlineGuest.guestName,
 		extractProviderGuestName(text),
@@ -3791,6 +4676,7 @@ function extractNormalizedReservation(email) {
 	);
 
 	const paymentInstructionField = firstNonEmpty(
+		directTripFields.paymentInstructions,
 		airbnbFields.paymentInstructions,
 		agodaFields.paymentInstructions,
 		findField(text, [
@@ -3844,18 +4730,33 @@ function extractNormalizedReservation(email) {
 			? null
 			: parseCardExpirationDate(expirationDateField);
 	const cardLast4 =
-		provider === "airbnb" && !hasExplicitCardContext ? "" : extractCardLast4(text);
+		provider === "airbnb" && !hasExplicitCardContext
+			? ""
+			: extractCardLast4(text, {
+					allowUnlabeledCardNumber: hasExplicitCardContext,
+					excludedNumbers: [reservationId],
+			  });
 	const vccAmountDetails = resolveVccAmountDetails(
 		amountToChargeField,
 		amountCurrency
 	);
+	const verifiedHotelRunnerTripPrepay =
+		provider === "hotelrunner" &&
+		hotelRunnerTripRelayEvidence &&
+		knownBookingSourceProvider(bookingSource) === "trip" &&
+		/\bpre[-\s]?pay\b/i.test(text);
 	const paymentCollectionModel =
-		airbnbFields.paymentCollectionModel &&
+		directTripFields.paymentCollectionModel &&
+		directTripFields.paymentCollectionModel !== "unknown"
+			? directTripFields.paymentCollectionModel
+			: airbnbFields.paymentCollectionModel &&
 		airbnbFields.paymentCollectionModel !== "unknown"
 			? airbnbFields.paymentCollectionModel
 			: agodaFields.paymentCollectionModel &&
 			  agodaFields.paymentCollectionModel !== "unknown"
 			? agodaFields.paymentCollectionModel
+			: verifiedHotelRunnerTripPrepay
+			? "ota_collect"
 			: detectPaymentCollectionModel(paymentText, {
 					cardLast4,
 			  });
@@ -3865,9 +4766,17 @@ function extractNormalizedReservation(email) {
 			? round2(vccAmountDetails.amountToChargeSar || 0)
 			: 0;
 	const providerTotalPayoutSar = round2(
-		agodaFields.totalPayoutSar || airbnbFields.totalPayoutSar || vccPayoutSar || 0
+		directTripFields.totalPayoutSar ||
+			agodaFields.totalPayoutSar ||
+			airbnbFields.totalPayoutSar ||
+			vccPayoutSar ||
+			0
 	);
-	const providerPaymentSummaryRaw = Object.keys(agodaFields.paymentSummary || {}).length
+	const providerPaymentSummaryRaw = Object.keys(
+		directTripFields.paymentSummary || {}
+	).length
+		? directTripFields.paymentSummary
+		: Object.keys(agodaFields.paymentSummary || {}).length
 		? agodaFields.paymentSummary
 		: airbnbFields.paymentSummary || {};
 	const providerPaymentSummary = hasExplicitAggregateMoney
@@ -3925,6 +4834,46 @@ function extractNormalizedReservation(email) {
 	});
 
 	if (provider === "unknown") warnings.push("Could not detect OTA provider.");
+	if (provider !== "unknown" && !trustedTransportProvider) {
+		warnings.push(
+			"OTA provider was inferred without a trusted sender mailbox domain; automatic reservation mutation is disabled."
+		);
+	}
+	if (provider !== "unknown" && trustedTransportProvider && !sourceSenderAuthenticated) {
+		warnings.push(
+			"OTA sender authentication is missing, failed, or not aligned with the trusted From domain; automatic reservation mutation is disabled."
+		);
+	}
+	if (directTripIdentityConflict) {
+		warnings.push(
+			"Trip.com template contains conflicting explicit booking/reservation numbers; no identity was selected."
+		);
+	}
+	if (genericExplicitIdentityConflict && !directTripIdentityConflict) {
+		warnings.push(
+			"OTA email contains conflicting explicit confirmation, booking, or reservation numbers; no identity was selected."
+		);
+	}
+	if (hotelRunnerTripIdentityConflict) {
+		warnings.push(
+			"HotelRunner Trip.com relay does not contain exactly one unambiguous numeric OTA booking identity; no identity was selected."
+		);
+	}
+	if (directTripFields.pricingCurrencyConflict) {
+		warnings.push(
+			"Trip.com guest-total and payout currencies conflict; no automatic pricing was accepted."
+		);
+	}
+	if (directTripFields.roomCountConflict) {
+		warnings.push(
+			"Trip.com template contains conflicting room counts; no automatic room quantity was accepted."
+		);
+	}
+	if (directTripFields.stayNightConflict) {
+		warnings.push(
+			"Trip.com declared night counts conflict with the check-in/check-out date range."
+		);
+	}
 	if (!reservationId) warnings.push("Missing reservation/confirmation id.");
 	if (!checkinDate || !checkoutDate) warnings.push("Missing or invalid stay dates.");
 	if (!hotelName && !hotelId) warnings.push("Missing hotel/property name.");
@@ -3933,6 +4882,10 @@ function extractNormalizedReservation(email) {
 	return {
 		provider,
 		providerLabel,
+		trustedTransportProvider,
+		sourceSenderTrusted: !!trustedTransportProvider,
+		sourceSenderAuthenticated,
+		senderAuthentication,
 		bookingSource,
 		intent,
 		eventType,
@@ -3963,21 +4916,30 @@ function extractNormalizedReservation(email) {
 		sourceAmount:
 			hasExplicitAggregateMoney
 				? parsedMoney.amount
-				: agodaFields.sourceAmount || airbnbFields.sourceAmount || 0,
+				: directTripFields.sourceAmount ||
+				  agodaFields.sourceAmount ||
+				  airbnbFields.sourceAmount ||
+				  0,
 		sourceCurrency:
 			hasExplicitAggregateMoney
 				? amountCurrency
-				: agodaFields.sourceCurrency || airbnbFields.sourceCurrency || "",
+				: directTripFields.sourceCurrency ||
+				  agodaFields.sourceCurrency ||
+				  airbnbFields.sourceCurrency ||
+				  "",
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
 		totalPayoutSar: providerTotalPayoutSar,
 		netAfterExpensesTotal: round2(
-			agodaFields.netAfterExpensesTotal ||
+			directTripFields.netAfterExpensesTotal ||
+				agodaFields.netAfterExpensesTotal ||
 				airbnbFields.netAfterExpensesTotal ||
 				vccPayoutSar ||
 				0
 		),
+		nightlyPricingSource: directTripFields.nightlyPricingSource || [],
+		nightlyPricingSar: directTripFields.nightlyPricingSar || [],
 		paymentSummary,
 		adults,
 		children,
@@ -3997,6 +4959,12 @@ function extractNormalizedReservation(email) {
 		),
 		requiresManualReview:
 			hotelRunnerRoomBlocks.length > 1 ||
+			hotelRunnerBookingSourceConflict ||
+			directTripFields.multipleRoomBlocks === true ||
+			otaIdentityConflict ||
+			directTripFields.pricingCurrencyConflict === true ||
+			directTripFields.roomCountConflict === true ||
+			directTripFields.stayNightConflict === true ||
 			Number(agodaFields.referenceSellRateOccurrences || 0) > 1 ||
 			agodaFields.multiRoomEvidence === true,
 		manualReviewReasons:
@@ -4004,6 +4972,50 @@ function extractNormalizedReservation(email) {
 				...(hotelRunnerRoomBlocks.length > 1
 					? [
 						`HotelRunner email contains ${hotelRunnerRoomBlocks.length} room blocks in one message representation; automatic partial-room creation is disabled.`,
+						  ]
+						: []),
+				...(hotelRunnerBookingSourceConflict
+					? [
+							`HotelRunner relay contains conflicting commercial booking-source evidence (${hotelRunnerCommercialSourceProviders
+								.map((sourceProvider) =>
+									PROVIDER_LABELS[sourceProvider] || sourceProvider
+								)
+								.join(", ")}); automatic reservation lookup and mutation are disabled.`,
+					  ]
+					: []),
+				...(directTripFields.multipleRoomBlocks === true
+					? [
+							"Trip.com email contains multiple distinct room blocks; automatic partial-room creation is disabled and the booking requires room review.",
+					  ]
+					: []),
+				...(directTripIdentityConflict
+					? [
+							"Trip.com email contains conflicting explicit booking/reservation numbers; automatic identity selection is disabled.",
+					  ]
+					: []),
+				...(hotelRunnerTripIdentityConflict
+					? [
+							"HotelRunner Trip.com relay lacks one unambiguous numeric OTA booking identity; automatic lookup and creation are disabled.",
+					  ]
+					: []),
+				...(genericExplicitIdentityConflict && !directTripIdentityConflict
+					? [
+							"OTA email contains conflicting explicit confirmation, booking, or reservation numbers; automatic identity selection and mutation are disabled.",
+					  ]
+					: []),
+				...(directTripFields.pricingCurrencyConflict === true
+					? [
+							"Trip.com guest-total and payout currencies conflict; automatic pricing and reservation mutation are disabled.",
+					  ]
+					: []),
+				...(directTripFields.roomCountConflict === true
+					? [
+							"Trip.com email contains conflicting room counts; automatic inventory and pricing mutation are disabled.",
+					  ]
+					: []),
+				...(directTripFields.stayNightConflict === true
+					? [
+							"Trip.com declared night counts do not reconcile with the stay dates; automatic reservation mutation is disabled.",
 					  ]
 					: []),
 				...(Number(agodaFields.referenceSellRateOccurrences || 0) > 1
@@ -4045,6 +5057,7 @@ function extractNormalizedReservation(email) {
 				!!agodaFields.sourcePresence?.adults ||
 				airbnbFields.adults > 0 ||
 				expediaPartnerCentralFields.adults > 0 ||
+				directTripFields.adults > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.adults > 0,
 			children:
@@ -4052,6 +5065,8 @@ function extractNormalizedReservation(email) {
 				!!agodaFields.sourcePresence?.children ||
 				airbnbFields.children > 0 ||
 				expediaPartnerCentralFields.hasChildren === true ||
+				(directTripFields.templateMatched === true &&
+					directTripFields.totalGuests > 0) ||
 				hotelRunnerArabicFields.hasOccupancyBreakdown === true ||
 				tableOccupancy.children > 0,
 			totalGuests:
@@ -4059,11 +5074,13 @@ function extractNormalizedReservation(email) {
 				!!agodaFields.sourcePresence?.totalGuests ||
 				airbnbFields.totalGuests > 0 ||
 				expediaPartnerCentralFields.totalGuests > 0 ||
+				directTripFields.totalGuests > 0 ||
 				hotelRunnerArabicFields.totalGuests > 0 ||
 				tableOccupancy.totalGuests > 0,
 			roomCount:
 				!!roomCountField ||
 				!!agodaFields.sourcePresence?.roomCount ||
+				directTripFields.roomCount > 0 ||
 				hotelRunnerArabicFields.roomCount > 0,
 			guestName: !!guestName,
 			guestEmail: !!guestEmail,
@@ -4097,10 +5114,32 @@ function extractNormalizedReservation(email) {
 			to: email.to || "",
 			subject: email.subject || "",
 			messageId: email.messageId || "",
-			receivedAt: email.receivedAt || email.date || null,
+			receivedAt:
+				email.sourceReceivedAt || email.receivedAt || email.date || null,
+			deliveryReceivedAt: email.deliveryReceivedAt || null,
+			messageDate: email.date || null,
+			timestampMethod: email.sourceTimestampMethod || "",
 			textHash: hashText(text),
 			safeSnippet: safeSnippet(text),
+			senderAuthentication,
 		},
+		directTripTemplateMatched: directTripFields.templateMatched === true,
+		directTripLifecycleTemplateMatched,
+		hotelRunnerTripRelayEvidence,
+		hotelRunnerBookingSourceConflict,
+		hotelRunnerCommercialSourceProviders,
+		hotelRunnerTripRelayIdentityValidated: !!(
+			hotelRunnerTripRelayEvidence &&
+			!hotelRunnerTripIdentityConflict &&
+			hotelRunnerTripConfirmationNumbers.length === 1
+		),
+		blocksUnmappedReservationCreation: !!(
+			hotelRunnerBookingSourceConflict ||
+			otaIdentityConflict ||
+			directTripFields.pricingCurrencyConflict ||
+			directTripFields.roomCountConflict ||
+			directTripFields.stayNightConflict
+		),
 		warnings,
 		errors,
 	};
@@ -4161,7 +5200,7 @@ const ENGLISH_ROOM_CLASS_TOKENS = Object.freeze({
 	octuple: { roomType: "familyRooms", capacity: 8 },
 });
 
-const ARABIC_ROOM_CLASS_TOKENS = Object.freeze({
+const ARABIC_ROOM_CLASS_TOKEN_DEFINITIONS = Object.freeze({
 	فردي: { roomType: "singleRooms", capacity: 1 },
 	فردية: { roomType: "singleRooms", capacity: 1 },
 	ثنائي: { roomType: "doubleRooms", capacity: 2 },
@@ -4183,6 +5222,14 @@ const ARABIC_ROOM_CLASS_TOKENS = Object.freeze({
 	ثماني: { roomType: "familyRooms", capacity: 8 },
 	ثمانية: { roomType: "familyRooms", capacity: 8 },
 });
+
+const ARABIC_ROOM_CLASS_TOKENS = Object.freeze(
+	Object.fromEntries(
+		Object.entries(ARABIC_ROOM_CLASS_TOKEN_DEFINITIONS).map(
+			([token, evidence]) => [normalizeRoomSignalText(token), evidence]
+		)
+	)
+);
 
 const ARABIC_ROOM_WORDS = new Set(["غرفة", "غرفه", "الغرفة", "الغرفه"]);
 
@@ -4243,7 +5290,7 @@ function roomClassEvidence(value = "") {
 		return { matches: [], roomTypes: [], capacities: [] };
 	}
 	const source = normalizeRoomSignalText(value).replace(
-		/(الغرفة|الغرفه|غرفة|غرفه)(?=(?:ال)?(?:فردي(?:ة|ه)?|ثنائي(?:ة|ه)?|زوجي(?:ة|ه)?|مزدوج(?:ة|ه)?|ثلاثي(?:ة|ه)?|رباعي(?:ة|ه)?|خماسي(?:ة|ه)?|سداسي(?:ة|ه)?|سباعي(?:ة|ه)?|ثماني(?:ة|ه)?))/gu,
+		/(الغرفة|الغرفه|غرفة|غرفه)(?=(?:ال)?(?:فردي(?:ة|ه)?|ثنايي(?:ة|ه)?|زوجي(?:ة|ه)?|مزدوج(?:ة|ه)?|ثلاثي(?:ة|ه)?|رباعي(?:ة|ه)?|خماسي(?:ة|ه)?|سداسي(?:ة|ه)?|سباعي(?:ة|ه)?|ثماني(?:ة|ه)?))/gu,
 		"$1 "
 	);
 	if (!source) return { matches: [], roomTypes: [], capacities: [] };
@@ -4522,7 +5569,7 @@ function mapArabicRoomType(roomNameRaw) {
 	if (/(استوديو|studio)/.test(s)) return "studioRooms";
 	const withoutBedDescriptions = s
 		.replace(
-			/(?:^|\s)(?:و?ب?(?:ال)?)?(?:سرير(?:ين|ان|ات)?|اسر(?:ة|ه|تين|تان|ات)?)\s+(?:فردي(?:ة|ين)?|مزدوج(?:ة|ين|تين)?|ثنائي(?:ة|ين)?|دبل)(?=$|\s)/gu,
+			/(?:^|\s)(?:و?ب?(?:ال)?)?(?:سرير(?:ين|ان|ات)?|اسر(?:ة|ه|تين|تان|ات)?)\s+(?:فردي(?:ة|ين)?|مزدوج(?:ة|ين|تين)?|ثنايي(?:ة|ين)?|دبل)(?=$|\s)/gu,
 			" "
 		)
 		.replace(/\s+/g, " ")
@@ -4565,10 +5612,10 @@ function mapRoomType(roomNameRaw) {
 	if (hasKeyword("family")) return "familyRooms";
 	if (hasKeyword("studio")) return "studioRooms";
 	if (hasKeyword("suite")) return "suite";
-	if (hasKeyword("standard")) return "standardRooms";
-	if (hasKeyword("shared") || hasKeyword("individual")) return "individualBed";
 	if (/\bking(?:\s+[a-z]+){0,2}\s+room\b/i.test(s)) return "kingRooms";
 	if (/\bqueen(?:\s+[a-z]+){0,2}\s+room\b/i.test(s)) return "queenRooms";
+	if (hasKeyword("standard")) return "standardRooms";
+	if (hasKeyword("shared") || hasKeyword("individual")) return "individualBed";
 	if (explicitPersonCapacityEvidence(roomNameRaw).conflicting) return null;
 	const explicitCapacity = explicitRoomCapacity(roomNameRaw);
 	if (explicitCapacity === 1) return "singleRooms";
@@ -4924,7 +5971,13 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 				return !sourceClassType || room.roomType === sourceClassType;
 		  })
 		: rooms;
-	const capacityCandidateIds = capacityMatchedRooms
+	const requiresSemanticRoomTypeMatch =
+		capacityEvidence.kind !== "room_class" &&
+		SEMANTIC_ROOM_TYPES_REQUIRING_NAME_EVIDENCE.has(mappedRoomType);
+	const compatibleRooms = requiresSemanticRoomTypeMatch
+		? capacityMatchedRooms.filter((room) => room.roomType === mappedRoomType)
+		: capacityMatchedRooms;
+	const capacityCandidateIds = compatibleRooms
 		.map((room) => String(room?._id || "").trim())
 		.filter(Boolean);
 	if (sourceCapacity && !capacityMatchedRooms.length) {
@@ -4944,22 +5997,30 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			],
 		};
 	}
-
-	const requiresSemanticNameEvidence =
-		capacityEvidence.kind !== "room_class" &&
-		SEMANTIC_ROOM_TYPES_REQUIRING_NAME_EVIDENCE.has(mappedRoomType) &&
-		capacityMatchedRooms.length === 1 &&
-		capacityMatchedRooms[0].roomType !== mappedRoomType;
-	if (
-		sourceCapacity &&
-		capacityMatchedRooms.length === 1 &&
-		!requiresSemanticNameEvidence
-	) {
+	if (requiresSemanticRoomTypeMatch && !compatibleRooms.length) {
 		return {
-			roomDetails: capacityMatchedRooms[0],
+			roomDetails: null,
+			score: 0,
+			matchType: "semantic_room_type_unavailable",
+			mappedRoomType,
+			sourceCapacity,
+			sourceClassCapacity,
+			sourceClassType,
+			capacityCandidateCount: 0,
+			capacityCandidateIds: [],
+			aiFallbackAllowed: false,
+			warnings: [
+				`Room "${roomName}" requires PMS semantic type "${mappedRoomType}", but this hotel has no active compatible room; the OTA wording remains unmapped for review.`,
+			],
+		};
+	}
+
+	if (sourceCapacity && compatibleRooms.length === 1) {
+		return {
+			roomDetails: compatibleRooms[0],
 			score: 0.98,
 			displayScore: scoreRoomCandidate(
-				capacityMatchedRooms[0],
+				compatibleRooms[0],
 				roomName,
 				mappedRoomType
 			).displayScore,
@@ -4976,7 +6037,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		};
 	}
 
-	const candidates = capacityMatchedRooms
+	const candidates = compatibleRooms
 		.map((room, index) => ({
 			room,
 			index,
@@ -5007,7 +6068,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 				...semanticFallback,
 				sourceCapacity,
 				sourceClassCapacity,
-				capacityCandidateCount: capacityMatchedRooms.length,
+				capacityCandidateCount: compatibleRooms.length,
 				capacityCandidateIds,
 			};
 		}
@@ -5018,7 +6079,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			mappedRoomType,
 			sourceCapacity,
 			sourceClassCapacity,
-			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateCount: compatibleRooms.length,
 			capacityCandidateIds,
 			warnings: [
 				`No hotel room matched "${roomName}" at the required 75% confidence.`,
@@ -5041,7 +6102,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			mappedRoomType,
 			sourceCapacity,
 			sourceClassCapacity,
-			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateCount: compatibleRooms.length,
 			capacityCandidateIds,
 			warnings: [
 				`Multiple active PMS rooms are equally plausible for "${roomName}"; manual room mapping is required.`,
@@ -5061,7 +6122,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 			mappedRoomType,
 			sourceCapacity,
 			sourceClassCapacity,
-			capacityCandidateCount: capacityMatchedRooms.length,
+			capacityCandidateCount: compatibleRooms.length,
 			capacityCandidateIds,
 			warnings: [
 				`Room "${roomName}" only matched a broad PMS room category; manual room mapping is required.`,
@@ -5078,7 +6139,7 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		mappedRoomType,
 		sourceCapacity,
 		sourceClassCapacity,
-		capacityCandidateCount: capacityMatchedRooms.length,
+		capacityCandidateCount: compatibleRooms.length,
 		capacityCandidateIds,
 		warnings,
 	};
@@ -5124,6 +6185,23 @@ async function resolveRoomMatchWithAi(hotelDetails, normalized = {}) {
 			return {
 				...deterministicMatch,
 				aiRoomMatch: aiMatch,
+			};
+		}
+		if (
+			aiMatch.skipReason ===
+			"required_semantic_room_type_has_no_pms_candidate"
+		) {
+			return {
+				...deterministicMatch,
+				roomDetails: null,
+				matchType: "semantic_room_type_unavailable",
+				capacityCandidateCount: 0,
+				capacityCandidateIds: [],
+				aiFallbackAllowed: false,
+				aiRoomMatch: aiMatch,
+				warnings: [
+					`Room "${normalized.roomName || "unknown"}" requires PMS semantic type "${deterministicMatch.mappedRoomType || "unknown"}", but this hotel has no active compatible room; the OTA wording remains unmapped for review.`,
+				],
 			};
 		}
 		return {
@@ -5199,10 +6277,6 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 
 	const roomCount = Math.max(1, Math.floor(Number(normalized.roomCount || 1)));
 	const totalAmountSar = round2(normalized.totalAmountSar || 0);
-	const slotPrices = allocateAmountAcrossSlots(
-		totalAmountSar,
-		daysOfResidence * roomCount
-	);
 	const paymentSummary = normalized.paymentSummary || {};
 	const totalPayoutSar = round2(
 		normalized.totalPayoutSar ||
@@ -5219,12 +6293,49 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	const effectiveNetAfterExpensesTotal = hasExplicitPayoutTotal
 		? round2(Math.min(totalPayoutSar, totalAmountSar || totalPayoutSar))
 		: fallbackNetTotalSar;
+	const nightlyPricingSar = Array.isArray(normalized.nightlyPricingSar)
+		? normalized.nightlyPricingSar
+		: [];
+	const usesSourceNightlyPricing =
+		roomCount === 1 &&
+		nightlyPricingSar.length === dateRange.length &&
+		nightlyPricingSar.every(
+			(row, index) =>
+				row?.date === dateRange[index] &&
+				Number(row.clientAmountSar || 0) > 0 &&
+				Number(row.payoutAmountSar || 0) > 0 &&
+				Number(row.payoutAmountSar) <= Number(row.clientAmountSar) + 0.01
+		) &&
+		Math.abs(
+			round2(
+				nightlyPricingSar.reduce(
+					(sum, row) => sum + Number(row.clientAmountSar || 0),
+					0
+				)
+			) - totalAmountSar
+		) <= 0.01 &&
+		Math.abs(
+			round2(
+				nightlyPricingSar.reduce(
+					(sum, row) => sum + Number(row.payoutAmountSar || 0),
+					0
+				)
+			) - effectiveNetAfterExpensesTotal
+		) <= 0.01;
+	const slotPrices = usesSourceNightlyPricing
+		? nightlyPricingSar.map((row) => round2(row.clientAmountSar))
+		: allocateAmountAcrossSlots(totalAmountSar, daysOfResidence * roomCount);
 	const netAfterExpensesSlots = allocateAmountAcrossSlots(
 		effectiveNetAfterExpensesTotal > 0
 			? effectiveNetAfterExpensesTotal
 			: totalAmountSar,
 		daysOfResidence * roomCount
 	);
+	if (usesSourceNightlyPricing) {
+		nightlyPricingSar.forEach((row, index) => {
+			netAfterExpensesSlots[index] = round2(row.payoutAmountSar);
+		});
+	}
 	const fallbackRootSlots = allocateAmountAcrossSlots(
 		fallbackNetTotalSar || totalAmountSar,
 		daysOfResidence * roomCount
@@ -5690,6 +6801,31 @@ function hasKnownProvider(normalized = {}) {
 	);
 }
 
+function isSourceBackedHotelRunnerUpgrade(
+	existingSource = "",
+	incomingSource = "",
+	normalized = {}
+) {
+	if (!hasSourceField(normalized, "bookingSource")) return false;
+	const transportProvider = normalizeComparable(normalized.provider || "").replace(
+		/\s+/g,
+		""
+	);
+	if (
+		transportProvider !== "hotelrunner" &&
+		normalized.preserveCanonicalTransportIdentity !== true
+	) {
+		return false;
+	}
+	const existingProvider = knownBookingSourceProvider(existingSource);
+	const incomingProvider = knownBookingSourceProvider(incomingSource);
+	return (
+		existingProvider === "hotelrunner" &&
+		!!incomingProvider &&
+		incomingProvider !== "hotelrunner"
+	);
+}
+
 function otaSourceAuthority(normalized = {}) {
 	const rawFrom = normalizeWhitespace(normalized.source?.from || "").toLowerCase();
 	const comparableFrom = normalizeComparable(rawFrom);
@@ -5779,6 +6915,8 @@ function buildExistingReservationUpdateSet({
 		["cancelled", "no_show", "status"].includes(normalized.eventType);
 	const appliesAuthoritativeRefresh =
 		normalized.authoritativeExistingRefresh === true && !!document;
+	const preserveCanonicalTransportIdentity =
+		normalized.preserveCanonicalTransportIdentity === true;
 	const normalizedGuestComment = cleanOtaGuestNote(
 		normalized.comment || normalized.guestNotes || ""
 	);
@@ -5795,9 +6933,25 @@ function buildExistingReservationUpdateSet({
 			if (!hasSourceField(normalized, "totalGuests")) {
 				delete docSet.total_guests;
 			}
+			if (preserveCanonicalTransportIdentity) {
+				delete docSet["supplierData.otaProvider"];
+			}
 			Object.assign(set, docSet);
-			set.adminPricing = document.adminPricing;
-			set.ota_financial_summary = document.ota_financial_summary;
+			set.adminPricing = preserveCanonicalTransportIdentity
+				? {
+						...(document.adminPricing || {}),
+						provider:
+							existing?.adminPricing?.provider || document.adminPricing?.provider,
+				  }
+				: document.adminPricing;
+			set.ota_financial_summary = preserveCanonicalTransportIdentity
+				? {
+						...(document.ota_financial_summary || {}),
+						provider:
+							existing?.ota_financial_summary?.provider ||
+							document.ota_financial_summary?.provider,
+				  }
+				: document.ota_financial_summary;
 			set.adminPricingVisibility = document.adminPricingVisibility;
 			set["otaPlatformReview.proposedInbound"] = null;
 			set["supplierData.otaSourceAuthority"] = otaSourceAuthority(normalized);
@@ -5844,11 +6998,35 @@ function buildExistingReservationUpdateSet({
 		setIfOtaValue(set, "reservation_id", normalized.reservationId || confirmationNumber);
 	}
 	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
-		if (!String(existing?.booking_source || "").trim()) {
+		const topLevelSourceUpgrade = isSourceBackedHotelRunnerUpgrade(
+			existing?.booking_source,
+			providerLabel,
+			normalized
+		);
+		const customerSourceUpgrade = isSourceBackedHotelRunnerUpgrade(
+			existing?.customer_details?.booking_source,
+			providerLabel,
+			normalized
+		);
+		if (!String(existing?.booking_source || "").trim() || topLevelSourceUpgrade) {
 			setIfOtaValue(set, "booking_source", providerLabel);
 		}
-		if (!String(existing?.customer_details?.booking_source || "").trim()) {
+		if (
+			!String(existing?.customer_details?.booking_source || "").trim() ||
+			customerSourceUpgrade
+		) {
 			setIfOtaValue(set, "customer_details.booking_source", providerLabel);
+		}
+		if (topLevelSourceUpgrade || customerSourceUpgrade) {
+			[
+				"adminPricing.providerLabel",
+				"ota_financial_summary.providerLabel",
+				"otaPlatformReview.providerLabel",
+			].forEach((path) => setIfOtaValue(set, path, providerLabel));
+			addExistingUpdatePreservedWarning(
+				warnings,
+				`HotelRunner remains the transport provider; the source-backed booking platform was upgraded to ${providerLabel}.`
+			);
 		}
 	}
 	if (!statusOnlyUpdate && appliesAuthoritativeRefresh) {
@@ -6082,6 +7260,19 @@ function buildExistingReservationUpdateSet({
 		) {
 			set.otaIdentityKey = incomingOtaIdentityKey;
 		}
+		const incomingCrossTransportIdentityKey =
+			buildOtaCrossTransportIdentityKey(normalized, confirmationNumber);
+		const existingCrossTransportIdentityKey = normalizeWhitespace(
+			existing?.otaCrossTransportIdentityKey || ""
+		).toLowerCase();
+		if (
+			incomingCrossTransportIdentityKey &&
+			(!existingCrossTransportIdentityKey ||
+				existingCrossTransportIdentityKey ===
+					incomingCrossTransportIdentityKey)
+		) {
+			set.otaCrossTransportIdentityKey = incomingCrossTransportIdentityKey;
+		}
 		setIfMissingOrSameConfirmation(
 			set,
 			"customer_details.confirmation_number2",
@@ -6110,8 +7301,19 @@ function buildExistingReservationUpdateSet({
 	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
 		setIfOtaValue(set, "supplierData.supplierName", providerLabel);
 	}
-	if (hasKnownProvider(normalized)) {
+	if (
+		hasKnownProvider(normalized) &&
+		!preserveCanonicalTransportIdentity &&
+		!normalizeWhitespace(existing?.supplierData?.otaProvider || "")
+	) {
 		setIfOtaValue(set, "supplierData.otaProvider", normalized.provider);
+	}
+	if (hasKnownProvider(normalized) && preserveCanonicalTransportIdentity) {
+		setIfOtaValue(
+			set,
+			"supplierData.otaLastObservedTransportProvider",
+			normalized.provider
+		);
 	}
 	if (appliesAuthoritativeRefresh && hasSourceField(normalized, "hotelName")) {
 		setIfOtaValue(set, "supplierData.otaHotelName", normalized.hotelName);
@@ -6250,7 +7452,12 @@ function buildExistingReservationUpdateSet({
 	);
 	set["supplierData.otaLastEmailAt"] = new Date();
 	const sourceReceivedAt = otaSourceReceivedAt(normalized);
-	if (sourceReceivedAt) {
+	const existingSourceReceivedAt = otaExistingLifecycleBaselineAt(existing);
+	if (
+		sourceReceivedAt &&
+		(!existingSourceReceivedAt ||
+			sourceReceivedAt.getTime() > existingSourceReceivedAt.getTime())
+	) {
 		set["supplierData.otaLastSourceReceivedAt"] = sourceReceivedAt;
 	}
 	if (normalized.eventType && normalized.eventType !== "unknown") {
@@ -6268,11 +7475,16 @@ function buildExistingReservationUpdateSet({
 			"otaPlatformReview.inboundEmailId",
 			normalized.inboundEmailId
 		);
-		setIfOtaValue(set, "otaPlatformReview.provider", normalized.provider);
+		if (
+			!preserveCanonicalTransportIdentity &&
+			!normalizeWhitespace(existing?.otaPlatformReview?.provider || "")
+		) {
+			setIfOtaValue(set, "otaPlatformReview.provider", normalized.provider);
+		}
 		setIfOtaValue(
 			set,
 			"otaPlatformReview.providerLabel",
-			normalized.providerLabel || providerLabel
+			providerLabel
 		);
 		setIfOtaValue(
 			set,
@@ -6475,7 +7687,7 @@ async function resolveHotel(normalized, existingReservation = null) {
 		const hotels = await allHotelsForExactOrKeyword();
 		const exactMentioned = findHotelMentionedInSourceText(hotels, normalized);
 		if (exactMentioned) return exactMentioned;
-		if (normalizedReservationContainsAjyad(normalized)) {
+		if (normalizedReservationContainsConfiguredZadAjyadAlias(normalized)) {
 			const ajyadHotel = await loadConfiguredAjyadHotel();
 			if (ajyadHotel) return ajyadHotel;
 		}
@@ -6489,7 +7701,7 @@ async function resolveHotel(normalized, existingReservation = null) {
 		hotelNameCandidates
 	);
 	if (exactHotel) return exactHotel;
-	if (normalizedReservationContainsAjyad(normalized)) {
+	if (normalizedReservationContainsConfiguredZadAjyadAlias(normalized)) {
 		const ajyadHotel = await loadConfiguredAjyadHotel();
 		if (ajyadHotel) return ajyadHotel;
 	}
@@ -6655,6 +7867,101 @@ function normalizeStatusToApply(value) {
 	return "";
 }
 
+function resolvedIncomingHotelConflictsWithExisting(
+	existingReservation = {},
+	resolvedIncomingHotel = null
+) {
+	const existingHotelId = normalizeId(existingReservation?.hotelId);
+	const incomingHotelId = normalizeId(resolvedIncomingHotel?._id);
+	return !!(
+		existingHotelId &&
+		incomingHotelId &&
+		existingHotelId !== incomingHotelId
+	);
+}
+
+function wouldReopenTerminalOtaReservation(
+	existingReservation = {},
+	incomingStatus = ""
+) {
+	const terminalStatuses = new Set(["cancelled", "no_show", "checked_out"]);
+	const storedTerminalStatuses = Array.from(new Set([
+		existingReservation?.state,
+		existingReservation?.reservation_status,
+	]
+		.map(normalizeStatusToApply)
+		.filter((status) => terminalStatuses.has(status))));
+	if (!storedTerminalStatuses.length) return false;
+	const nextStatus = normalizeStatusToApply(incomingStatus);
+	return !(
+		storedTerminalStatuses.length === 1 &&
+		nextStatus === storedTerminalStatuses[0]
+	);
+}
+
+function hasTerminalOtaReservationStatus(existingReservation = {}) {
+	return [
+		existingReservation?.state,
+		existingReservation?.reservation_status,
+	]
+		.map(normalizeStatusToApply)
+		.some((status) => ["cancelled", "no_show", "checked_out"].includes(status));
+}
+
+function hasInhouseOtaReservationStatus(existingReservation = {}) {
+	return [
+		existingReservation?.state,
+		existingReservation?.reservation_status,
+	]
+		.map(normalizeStatusToApply)
+		.includes("inhouse");
+}
+
+function wouldRegressInhouseOtaReservation(
+	existingReservation = {},
+	incomingStatus = ""
+) {
+	if (!hasInhouseOtaReservationStatus(existingReservation)) return false;
+	return !["inhouse", "checked_out"].includes(
+		normalizeStatusToApply(incomingStatus)
+	);
+}
+
+function normalizedStayDate(value) {
+	if (value instanceof Date && !Number.isNaN(value.getTime())) {
+		return dayjs(value).format("YYYY-MM-DD");
+	}
+	return parseDate(value);
+}
+
+function terminalLifecycleStayDatesConflict(
+	normalized = {},
+	existingReservation = {},
+	incomingStatus = ""
+) {
+	if (!["cancelled", "no_show"].includes(normalizeStatusToApply(incomingStatus))) {
+		return false;
+	}
+	if (
+		!hasSourceField(normalized, "checkinDate") ||
+		!hasSourceField(normalized, "checkoutDate")
+	) {
+		return false;
+	}
+	const incomingCheckin = normalizedStayDate(normalized.checkinDate);
+	const incomingCheckout = normalizedStayDate(normalized.checkoutDate);
+	const existingCheckin = normalizedStayDate(existingReservation?.checkin_date);
+	const existingCheckout = normalizedStayDate(existingReservation?.checkout_date);
+	return !(
+		incomingCheckin &&
+		incomingCheckout &&
+		existingCheckin &&
+		existingCheckout &&
+		incomingCheckin === existingCheckin &&
+		incomingCheckout === existingCheckout
+	);
+}
+
 function validOtaEventDate(value) {
 	if (!value) return null;
 	const parsed = value instanceof Date ? value : new Date(value);
@@ -6665,13 +7972,37 @@ function otaSourceReceivedAt(normalized = {}) {
 	return validOtaEventDate(normalized?.source?.receivedAt);
 }
 
-function isStaleOtaLifecycleEvent(normalized = {}, existing = {}) {
-	const incomingAt = otaSourceReceivedAt(normalized);
-	const lastAppliedAt = validOtaEventDate(
-		existing?.supplierData?.otaLastSourceReceivedAt
+function otaExistingLifecycleBaselineAt(existing = {}) {
+	return (
+		validOtaEventDate(existing?.supplierData?.otaLastSourceReceivedAt) ||
+		validOtaEventDate(existing?.updatedAt) ||
+		validOtaEventDate(existing?.createdAt)
 	);
-	return Boolean(
-		incomingAt && lastAppliedAt && incomingAt.getTime() < lastAppliedAt.getTime()
+}
+
+function otaLifecycleOrderingConflict(normalized = {}, existing = {}) {
+	if (
+		normalizeComparable(normalized?.source?.timestampMethod || "") ===
+		"sendgrid webhook received at"
+	) {
+		return "delivery_timestamp_only";
+	}
+	const incomingAt = otaSourceReceivedAt(normalized);
+	if (!incomingAt) return "missing_incoming_timestamp";
+	const lastAppliedAt = otaExistingLifecycleBaselineAt(existing);
+	if (
+		lastAppliedAt &&
+		incomingAt.getTime() <= lastAppliedAt.getTime()
+	) {
+		return "stale_or_equal_timestamp";
+	}
+	return "";
+}
+
+function isStaleOtaLifecycleEvent(normalized = {}, existing = {}) {
+	return (
+		otaLifecycleOrderingConflict(normalized, existing) ===
+		"stale_or_equal_timestamp"
 	);
 }
 
@@ -6807,6 +8138,47 @@ async function applyLiveSarConversion(normalized = {}) {
 			const error = `Missing SAR exchange rate for ${conversion.sourceCurrency}.`;
 			if (!next.errors.includes(error)) next.errors.push(error);
 		}
+
+		const paymentSummary = { ...(next.paymentSummary || {}) };
+		const sourcePayoutAmount = Number(
+			paymentSummary.sourceTotalPayoutAmount || 0
+		);
+		const summarySourceCurrency = normalizeMoneyCurrency(
+			paymentSummary.sourceCurrency || next.sourceCurrency || next.currency || ""
+		);
+		if (
+			sourcePayoutAmount > 0 &&
+			summarySourceCurrency === conversion.sourceCurrency &&
+			Number(conversion.exchangeRateToSar || 0) > 0
+		) {
+			const payoutAmountSar = round2(
+				sourcePayoutAmount * Number(conversion.exchangeRateToSar)
+			);
+			next.totalPayoutSar = payoutAmountSar;
+			next.netAfterExpensesTotal = payoutAmountSar;
+			next.paymentSummary = {
+				...paymentSummary,
+				totalGuestPaymentAmount: conversion.totalAmountSar,
+				totalPayoutAmount: payoutAmountSar,
+				currency: "SAR",
+				exchangeRateToSar: conversion.exchangeRateToSar,
+				exchangeRateSource: conversion.exchangeRateSource,
+				amountConvertedAt: conversion.convertedAt,
+			};
+		}
+		if (Array.isArray(next.nightlyPricingSource)) {
+			const convertedNightlyPricing = convertDirectTripNightlyPricing(
+				next.nightlyPricingSource,
+				{
+					totalGuestAmountSar: next.totalAmountSar,
+					totalPayoutAmountSar: next.totalPayoutSar,
+					exchangeRateToSar: conversion.exchangeRateToSar,
+				}
+			);
+			if (convertedNightlyPricing.length) {
+				next.nightlyPricingSar = convertedNightlyPricing;
+			}
+		}
 	}
 
 	const vcc = { ...(next.vcc || {}) };
@@ -6936,17 +8308,8 @@ function isHotelActiveForOtaInbound(hotelDetails = {}) {
 	return hotelDetails?.activateHotel === true && hotelDetails?.xHotelProActive !== false;
 }
 
-function isAjyadKeywordHotelResolution(normalized = {}, hotelDetails = {}) {
-	return (
-		normalizeId(hotelDetails?._id) === normalizeId(configuredAjyadHotelId()) &&
-		normalizedReservationContainsAjyad(normalized)
-	);
-}
-
 function getManualOtaHotelAssignmentReason(normalized = {}, hotelDetails = {}) {
-	if (!hotelDetails?._id || isAjyadKeywordHotelResolution(normalized, hotelDetails)) {
-		return "";
-	}
+	if (!hotelDetails?._id) return "";
 	if (!isHotelActiveForOtaInbound(hotelDetails)) {
 		return "resolved_hotel_inactive";
 	}
@@ -6989,6 +8352,338 @@ function buildOtaIdentityKey(provider, confirmationNumber) {
 	return `${normalizedProvider}:${normalizedConfirmation}`;
 }
 
+function isVerifiedTripCrossTransportReservation(normalized = {}) {
+	const provider = normalizeOtaIdentityProvider(normalized.provider);
+	if (!["trip", "hotelrunner"].includes(provider)) return false;
+	if (!hasSourceField(normalized, "confirmationNumber")) return false;
+	if (!hasSourceField(normalized, "bookingSource")) return false;
+	if (knownBookingSourceProvider(normalized.bookingSource) !== "trip") return false;
+
+	const from = normalizeWhitespace(normalized.source?.from || "");
+	if (provider === "trip") {
+		return (
+			(normalized.directTripTemplateMatched === true ||
+				normalized.directTripLifecycleTemplateMatched === true) &&
+			/@(?:[a-z0-9-]+\.)*trip\.com(?:[>\s]|$)/i.test(from)
+		);
+	}
+	return (
+		normalized.hotelRunnerTripRelayEvidence === true &&
+		normalized.hotelRunnerTripRelayIdentityValidated === true &&
+		/@(?:[a-z0-9-]+\.)*hotelrunner\.com(?:[>\s]|$)/i.test(from)
+	);
+}
+
+function buildOtaCrossTransportIdentityKey(
+	normalized = {},
+	confirmationNumber = ""
+) {
+	const normalizedConfirmation = normalizeConfirmation(
+		confirmationNumber || normalized.confirmationNumber || normalized.reservationId
+	);
+	if (!normalizedConfirmation || !isVerifiedTripCrossTransportReservation(normalized)) {
+		return "";
+	}
+	return `trip:${normalizedConfirmation}`;
+}
+
+function reservationMatchesOtaCrossTransportIdentity(
+	reservation = {},
+	crossTransportIdentityKey = ""
+) {
+	const expected = normalizeWhitespace(crossTransportIdentityKey).toLowerCase();
+	return (
+		!!expected &&
+		normalizeWhitespace(
+			reservation?.otaCrossTransportIdentityKey || ""
+		).toLowerCase() === expected
+	);
+}
+
+function reservationConfirmationAliases(reservation = {}) {
+	return [
+		reservation?.reservation_id,
+		reservation?.customer_details?.confirmation_number2,
+		reservation?.supplierData?.suppliedBookingNo,
+		reservation?.supplierData?.otaConfirmationNumber,
+		reservation?.supplierData?.platformConfirmationNumber,
+		reservation?.otaPlatformReview?.confirmationNumber,
+	].filter((value) => normalizeWhitespace(value));
+}
+
+function parseStoredOtaIdentityKey(value = "") {
+	const raw = normalizeWhitespace(value).toLowerCase();
+	if (!raw) return null;
+	const separatorIndex = raw.indexOf(":");
+	if (separatorIndex < 0) {
+		return {
+			raw,
+			provider: "",
+			confirmationNumber: normalizeConfirmation(raw),
+			legacy: true,
+			malformed: false,
+		};
+	}
+	const providerValue = raw.slice(0, separatorIndex);
+	const confirmationValue = raw.slice(separatorIndex + 1);
+	const parsedProvider =
+		normalizeOtaIdentityProvider(providerValue) ||
+		knownBookingSourceProvider(providerValue);
+	const parsedConfirmation = normalizeConfirmation(confirmationValue);
+	return {
+		raw,
+		provider: parsedProvider,
+		confirmationNumber: parsedConfirmation,
+		legacy: false,
+		malformed: !parsedProvider || !parsedConfirmation,
+	};
+}
+
+function normalizeStoredCanonicalProvider(value = "") {
+	return (
+		normalizeOtaIdentityProvider(value) || knownBookingSourceProvider(value) || ""
+	);
+}
+
+function invalidOtaIdentityConsistency(reason) {
+	return { valid: false, reason };
+}
+
+function validateReservationOtaIdentityConsistency(
+	reservation = {},
+	confirmationNumber = "",
+	provider = "",
+	crossTransportIdentityKey = "",
+	{ matchedByCrossTransport = false } = {}
+) {
+	const expectedConfirmation = normalizeConfirmation(confirmationNumber);
+	const expectedProvider = normalizeOtaIdentityProvider(provider);
+	const expectedCrossTransportKey = normalizeWhitespace(
+		crossTransportIdentityKey
+	).toLowerCase();
+	if (!reservation || !expectedConfirmation || !expectedProvider) {
+		return invalidOtaIdentityConsistency("missing_expected_ota_identity");
+	}
+
+	const identityKey = parseStoredOtaIdentityKey(reservation.otaIdentityKey);
+	if (identityKey?.malformed) {
+		return invalidOtaIdentityConsistency("malformed_canonical_ota_identity_key");
+	}
+	if (
+		identityKey?.confirmationNumber &&
+		!valuesMatchConfirmation(
+			identityKey.confirmationNumber,
+			expectedConfirmation
+		)
+	) {
+		return invalidOtaIdentityConsistency(
+			"canonical_ota_identity_confirmation_conflict"
+		);
+	}
+
+	const storedCrossTransportKey = normalizeWhitespace(
+		reservation.otaCrossTransportIdentityKey || ""
+	).toLowerCase();
+	const parsedStoredCrossTransportKey = parseStoredOtaIdentityKey(
+		storedCrossTransportKey
+	);
+	if (
+		parsedStoredCrossTransportKey &&
+		(parsedStoredCrossTransportKey.malformed ||
+			parsedStoredCrossTransportKey.provider !== "trip")
+	) {
+		return invalidOtaIdentityConsistency(
+			"malformed_cross_transport_identity_key"
+		);
+	}
+	if (
+		parsedStoredCrossTransportKey?.confirmationNumber &&
+		!valuesMatchConfirmation(
+			parsedStoredCrossTransportKey.confirmationNumber,
+			expectedConfirmation
+		)
+	) {
+		return invalidOtaIdentityConsistency(
+			"cross_transport_confirmation_conflict"
+		);
+	}
+	if (
+		expectedCrossTransportKey &&
+		storedCrossTransportKey &&
+		storedCrossTransportKey !== expectedCrossTransportKey
+	) {
+		return invalidOtaIdentityConsistency("cross_transport_identity_conflict");
+	}
+	if (
+		matchedByCrossTransport &&
+		(!expectedCrossTransportKey ||
+			storedCrossTransportKey !== expectedCrossTransportKey)
+	) {
+		return invalidOtaIdentityConsistency("cross_transport_match_not_verified");
+	}
+	if (
+		storedCrossTransportKey &&
+		!expectedCrossTransportKey &&
+		!["trip", "hotelrunner"].includes(expectedProvider)
+	) {
+		return invalidOtaIdentityConsistency(
+			"unexpected_cross_transport_identity_namespace"
+		);
+	}
+
+	const rawCanonicalProviderValues = [
+		reservation?.supplierData?.otaProvider,
+		reservation?.otaPlatformReview?.provider,
+	].filter((value) => normalizeWhitespace(value));
+	const canonicalProviderValues = rawCanonicalProviderValues.map(
+		normalizeStoredCanonicalProvider
+	);
+	if (
+		canonicalProviderValues.some((value) => !value) ||
+		new Set(canonicalProviderValues).size > 1
+	) {
+		return invalidOtaIdentityConsistency("canonical_ota_provider_conflict");
+	}
+
+	if (matchedByCrossTransport) {
+		const transportProvider =
+			identityKey?.provider || canonicalProviderValues[0] || "";
+		if (
+			transportProvider &&
+			!["trip", "hotelrunner"].includes(transportProvider)
+		) {
+			return invalidOtaIdentityConsistency(
+				"cross_transport_provider_namespace_conflict"
+			);
+		}
+		if (
+			identityKey?.provider &&
+			canonicalProviderValues.some((value) => value !== identityKey.provider)
+		) {
+			return invalidOtaIdentityConsistency(
+				"canonical_ota_provider_identity_key_conflict"
+			);
+		}
+	} else {
+		if (identityKey?.provider && identityKey.provider !== expectedProvider) {
+			return invalidOtaIdentityConsistency(
+				"canonical_ota_identity_provider_conflict"
+			);
+		}
+		if (
+			canonicalProviderValues.some((value) => value !== expectedProvider)
+		) {
+			return invalidOtaIdentityConsistency("canonical_ota_provider_conflict");
+		}
+		if (!identityKey?.provider && !canonicalProviderValues.length) {
+			const legacyProviderValues = [
+				reservation?.supplierData?.supplierName,
+				reservation?.booking_source,
+				reservation?.customer_details?.booking_source,
+			]
+				.map(normalizeStoredCanonicalProvider)
+				.filter(Boolean);
+			const distinctLegacyProviders = new Set(legacyProviderValues);
+			if (distinctLegacyProviders.size > 1) {
+				return invalidOtaIdentityConsistency(
+					"contradictory_legacy_ota_provider_evidence"
+				);
+			}
+			if (
+				distinctLegacyProviders.size !== 1 ||
+				!distinctLegacyProviders.has(expectedProvider)
+			) {
+				return invalidOtaIdentityConsistency(
+					"legacy_ota_provider_not_verified"
+				);
+			}
+		}
+	}
+
+	const confirmationAliases = reservationConfirmationAliases(reservation);
+	if (
+		confirmationAliases.some(
+			(value) => !valuesMatchConfirmation(value, expectedConfirmation)
+		)
+	) {
+		return invalidOtaIdentityConsistency("ota_confirmation_alias_conflict");
+	}
+	if (matchedByCrossTransport && confirmationAliases.length === 0) {
+		return invalidOtaIdentityConsistency(
+			"cross_transport_confirmation_alias_missing"
+		);
+	}
+	if (
+		!matchedByCrossTransport &&
+		!identityKey?.confirmationNumber &&
+		confirmationAliases.length === 0
+	) {
+		return invalidOtaIdentityConsistency("ota_confirmation_evidence_missing");
+	}
+
+	return { valid: true, reason: "" };
+}
+
+function isSafeOtaCrossTransportMatch(
+	reservation = {},
+	confirmationNumber = "",
+	crossTransportIdentityKey = "",
+	provider = "trip"
+) {
+	if (
+		!reservationMatchesOtaCrossTransportIdentity(
+			reservation,
+			crossTransportIdentityKey
+		)
+	) {
+		return false;
+	}
+	return validateReservationOtaIdentityConsistency(
+		reservation,
+		confirmationNumber,
+		provider,
+		crossTransportIdentityKey,
+		{ matchedByCrossTransport: true }
+	).valid;
+}
+
+function buildLegacyRedactedTripConflictLookup(
+	normalized = {},
+	hotelId = null
+) {
+	const confirmationNumber = normalizeConfirmation(
+		normalized.confirmationNumber || normalized.reservationId
+	);
+	if (
+		!hotelId ||
+		!buildOtaCrossTransportIdentityKey(normalized, confirmationNumber) ||
+		!/^\d{12,18}$/.test(confirmationNumber) ||
+		!parseDate(normalized.checkinDate) ||
+		!parseDate(normalized.checkoutDate)
+	) {
+		return null;
+	}
+	return {
+		otaIdentityKey: `hotelrunner:card-${confirmationNumber.slice(-4)}`,
+		hotelId,
+		checkin_date: parseDate(normalized.checkinDate),
+		checkout_date: parseDate(normalized.checkoutDate),
+	};
+}
+
+async function findLegacyRedactedTripIdentityConflict(
+	normalized = {},
+	hotelId = null
+) {
+	const query = buildLegacyRedactedTripConflictLookup(normalized, hotelId);
+	if (!query) return null;
+	return Reservations.findOne(query)
+		.select(
+			"_id hotelId confirmation_number otaIdentityKey reservation_id checkin_date checkout_date"
+		)
+		.exec();
+}
+
 function otaProviderLookupValues(provider = "") {
 	const normalizedProvider = normalizeOtaIdentityProvider(provider);
 	if (!normalizedProvider) return [];
@@ -7006,19 +8701,41 @@ function otaProviderLookupValues(provider = "") {
 }
 
 function reservationMatchesOtaProvider(reservation = {}, provider = "") {
+	const normalizedProvider = normalizeOtaIdentityProvider(provider);
 	const expected = new Set(
 		otaProviderLookupValues(provider).map((value) => normalizeComparable(value))
 	);
 	if (!expected.size) return false;
-	return [
+	const canonicalProviderValues = [
 		reservation?.supplierData?.otaProvider,
 		reservation?.otaPlatformReview?.provider,
+	].filter(Boolean);
+	const candidateValues = canonicalProviderValues.length
+		? canonicalProviderValues
+		: [
 		reservation?.supplierData?.supplierName,
 		reservation?.booking_source,
 		reservation?.customer_details?.booking_source,
-	]
+		  ];
+	const normalizedCandidates = candidateValues
 		.filter(Boolean)
-		.some((value) => expected.has(normalizeComparable(value)));
+		.map((value) => normalizeComparable(value));
+	if (canonicalProviderValues.length) {
+		return (
+			normalizedCandidates.length > 0 &&
+			normalizedCandidates.every((value) => expected.has(value))
+		);
+	}
+	const recognizedLegacyProviders = new Set(
+		candidateValues.map(normalizeStoredCanonicalProvider).filter(Boolean)
+	);
+	if (recognizedLegacyProviders.size > 0) {
+		return (
+			recognizedLegacyProviders.size === 1 &&
+			recognizedLegacyProviders.has(normalizedProvider)
+		);
+	}
+	return normalizedCandidates.some((value) => expected.has(value));
 }
 
 function buildOtaConfirmationLookup(confirmationNumber, provider) {
@@ -7042,9 +8759,47 @@ function buildOtaConfirmationLookup(confirmationNumber, provider) {
 						$or: [
 							{ "supplierData.otaProvider": { $in: providerValues } },
 							{ "otaPlatformReview.provider": { $in: providerValues } },
-							{ "supplierData.supplierName": { $in: providerValues } },
-							{ booking_source: { $in: providerValues } },
-							{ "customer_details.booking_source": { $in: providerValues } },
+							{
+								$and: [
+									{
+										$or: [
+											{
+												"supplierData.otaProvider": {
+													$exists: false,
+												},
+											},
+											{ "supplierData.otaProvider": null },
+											{ "supplierData.otaProvider": "" },
+										],
+									},
+									{
+										$or: [
+											{
+												"otaPlatformReview.provider": {
+													$exists: false,
+												},
+											},
+											{ "otaPlatformReview.provider": null },
+											{ "otaPlatformReview.provider": "" },
+										],
+									},
+									{
+										$or: [
+											{
+												"supplierData.supplierName": {
+													$in: providerValues,
+												},
+											},
+											{ booking_source: { $in: providerValues } },
+											{
+												"customer_details.booking_source": {
+													$in: providerValues,
+												},
+											},
+										],
+									},
+								],
+							},
 						],
 					},
 					{
@@ -7067,6 +8822,11 @@ function buildOtaConfirmationLookup(confirmationNumber, provider) {
 									$in: allValues,
 								},
 							},
+							{
+								"otaPlatformReview.confirmationNumber": {
+									$in: allValues,
+								},
+							},
 						],
 					},
 				],
@@ -7075,16 +8835,138 @@ function buildOtaConfirmationLookup(confirmationNumber, provider) {
 	};
 }
 
+const OTA_IDENTITY_CONSISTENCY_PROJECTION = [
+	"_id",
+	"hotelId",
+	"confirmation_number",
+	"otaIdentityKey",
+	"otaCrossTransportIdentityKey",
+	"reservation_id",
+	"booking_source",
+	"customer_details.confirmation_number2",
+	"customer_details.booking_source",
+	"supplierData.otaProvider",
+	"supplierData.supplierName",
+	"supplierData.suppliedBookingNo",
+	"supplierData.otaConfirmationNumber",
+	"supplierData.platformConfirmationNumber",
+	"otaPlatformReview.provider",
+	"otaPlatformReview.confirmationNumber",
+].join(" ");
+
+function withOtaIdentityConsistencyProjection(projection = "") {
+	const requestedPaths = String(projection || "")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean);
+	const consistencyPaths = OTA_IDENTITY_CONSISTENCY_PROJECTION.split(/\s+/).filter(
+		Boolean
+	);
+	const uniquePaths = Array.from(new Set([...requestedPaths, ...consistencyPaths]));
+
+	// MongoDB rejects an inclusive projection containing both an object and one
+	// of its children (for example, `supplierData` together with
+	// `supplierData.otaProvider`). A selected parent already contains every
+	// consistency field below it, so omit only those redundant child paths.
+	return uniquePaths
+		.filter(
+			(path) =>
+				!uniquePaths.some(
+					(parentPath) =>
+						parentPath !== path && path.startsWith(`${parentPath}.`)
+				)
+		)
+		.join(" ");
+}
+
+function otaIdentityConflictError(reason, reservations = []) {
+	const error = new Error(
+		`Conflicting OTA reservation identity detected (${reason}); no reservation may be selected or mutated.`
+	);
+	error.code = "OTA_RESERVATION_IDENTITY_CONFLICT";
+	error.reason = reason;
+	error.reservationIds = reservations
+		.map((reservation) => normalizeId(reservation?._id))
+		.filter(Boolean);
+	return error;
+}
+
+function selectConsistentOtaIdentityCandidate(
+	reservations = [],
+	confirmationNumber = "",
+	provider = "",
+	crossTransportIdentityKey = ""
+) {
+	const candidates = Array.isArray(reservations) ? reservations.filter(Boolean) : [];
+	if (candidates.length === 0) return null;
+	if (candidates.length > 1) {
+		throw otaIdentityConflictError("multiple_ota_identity_candidates", candidates);
+	}
+	const candidate = candidates[0];
+	const matchedByCrossTransport = !!(
+		normalizeWhitespace(crossTransportIdentityKey) &&
+		reservationMatchesOtaCrossTransportIdentity(
+			candidate,
+			crossTransportIdentityKey
+		)
+	);
+	const consistency = validateReservationOtaIdentityConsistency(
+		candidate,
+		confirmationNumber,
+		provider,
+		crossTransportIdentityKey,
+		{ matchedByCrossTransport }
+	);
+	if (!consistency.valid) {
+		throw otaIdentityConflictError(consistency.reason, candidates);
+	}
+	return candidate;
+}
+
 async function findReservationByOtaConfirmation(
 	confirmationNumber,
 	provider,
-	projection = ""
+	projection = "",
+	crossTransportIdentityKey = ""
 ) {
 	const query = buildOtaConfirmationLookup(confirmationNumber, provider);
 	if (!query) return null;
-	let finder = Reservations.findOne(query);
-	if (projection) finder = finder.select(projection);
-	return finder.exec();
+	const normalizedCrossTransportIdentityKey = normalizeWhitespace(
+		crossTransportIdentityKey
+	).toLowerCase();
+	const normalizedProvider = normalizeOtaIdentityProvider(provider);
+	const normalizedConfirmationNumber = normalizeConfirmation(confirmationNumber);
+	const oppositeTransportIdentityKey =
+		normalizedCrossTransportIdentityKey && normalizedProvider === "trip"
+			? `hotelrunner:${normalizedConfirmationNumber}`
+			: normalizedCrossTransportIdentityKey && normalizedProvider === "hotelrunner"
+			? `trip:${normalizedConfirmationNumber}`
+			: "";
+	const combinedQuery = normalizedCrossTransportIdentityKey
+		? {
+				$or: [
+					query,
+					{
+						otaCrossTransportIdentityKey:
+							normalizedCrossTransportIdentityKey,
+					},
+					...(oppositeTransportIdentityKey
+						? [{ otaIdentityKey: oppositeTransportIdentityKey }]
+						: []),
+				],
+		  }
+		: query;
+	let finder = Reservations.find(combinedQuery).limit(3);
+	if (projection) {
+		finder = finder.select(withOtaIdentityConsistencyProjection(projection));
+	}
+	const candidates = await finder.exec();
+	return selectConsistentOtaIdentityCandidate(
+		candidates,
+		confirmationNumber,
+		provider,
+		normalizedCrossTransportIdentityKey
+	);
 }
 
 function valuesMatchConfirmation(storedValue, incomingConfirmation) {
@@ -7097,17 +8979,33 @@ function valuesMatchConfirmation(storedValue, incomingConfirmation) {
 	return storedValues.some((value) => incomingValues.includes(value));
 }
 
-function detectConfirmationMatchFields(reservation, confirmationNumber, provider) {
+function detectConfirmationMatchFields(
+	reservation,
+	confirmationNumber,
+	provider,
+	crossTransportIdentityKey = ""
+) {
+	const crossTransportMatch = isSafeOtaCrossTransportMatch(
+		reservation,
+		confirmationNumber,
+		crossTransportIdentityKey,
+		provider
+	);
 	if (
 		!reservation ||
 		!confirmationNumber ||
 		!normalizeOtaIdentityProvider(provider) ||
-		!reservationMatchesOtaProvider(reservation, provider)
+		(!reservationMatchesOtaProvider(reservation, provider) &&
+			!crossTransportMatch)
 	) {
 		return [];
 	}
 	const otaIdentityKey = buildOtaIdentityKey(provider, confirmationNumber);
 	const fields = [
+		[
+			"otaCrossTransportIdentityKey",
+			crossTransportMatch ? confirmationNumber : "",
+		],
 		[
 			"otaIdentityKey",
 			String(reservation.otaIdentityKey || "").includes(":")
@@ -7159,6 +9057,7 @@ function canCreateUnmappedOtaReviewReservation(
 	allowCreate = false
 ) {
 	if (!allowCreate) return false;
+	if (normalized.blocksUnmappedReservationCreation === true) return false;
 	return requiredNewReservationMissing(normalized).every(
 		(item) =>
 			item === "source-backed hotel/property" ||
@@ -7173,6 +9072,10 @@ async function createUnmappedOtaReviewReservation({
 	errors = [],
 	allowCreate = false,
 } = {}) {
+	const crossTransportIdentityKey = buildOtaCrossTransportIdentityKey(
+		normalized,
+		confirmationNumber
+	);
 	const nonHotelMissing = requiredNewReservationMissing(normalized).filter(
 		(item) => item !== "source-backed hotel/property"
 	);
@@ -7204,7 +9107,8 @@ async function createUnmappedOtaReviewReservation({
 	const existingBeforeCreate = await findReservationByOtaConfirmation(
 		confirmationNumber,
 		normalized.provider,
-		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+		"_id hotelId confirmation_number otaIdentityKey otaCrossTransportIdentityKey reservation_id customer_details supplierData otaPlatformReview",
+		crossTransportIdentityKey
 	);
 	if (existingBeforeCreate) {
 		return {
@@ -7220,7 +9124,8 @@ async function createUnmappedOtaReviewReservation({
 			matchedReservationBy: detectConfirmationMatchFields(
 				existingBeforeCreate,
 				confirmationNumber,
-				normalized.provider
+				normalized.provider,
+				crossTransportIdentityKey
 			),
 		};
 	}
@@ -7236,6 +9141,9 @@ async function createUnmappedOtaReviewReservation({
 		normalized.provider,
 		confirmationNumber
 	);
+	if (crossTransportIdentityKey) {
+		document.otaCrossTransportIdentityKey = crossTransportIdentityKey;
+	}
 	document.reservationAuditLog = [
 		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
 	];
@@ -7273,7 +9181,8 @@ async function createUnmappedOtaReviewReservation({
 				const duplicate = await findReservationByOtaConfirmation(
 					confirmationNumber,
 					normalized.provider,
-					"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+					"_id hotelId confirmation_number otaIdentityKey otaCrossTransportIdentityKey reservation_id customer_details supplierData otaPlatformReview",
+					crossTransportIdentityKey
 				);
 				if (duplicate) {
 					return {
@@ -7289,7 +9198,8 @@ async function createUnmappedOtaReviewReservation({
 						matchedReservationBy: detectConfirmationMatchFields(
 							duplicate,
 							confirmationNumber,
-							normalized.provider
+							normalized.provider,
+							crossTransportIdentityKey
 						),
 					};
 				}
@@ -7332,6 +9242,10 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 	const errors = [...(normalized.errors || [])];
 
 	const confirmationNumber = normalizeConfirmation(normalized.confirmationNumber);
+	const crossTransportIdentityKey = buildOtaCrossTransportIdentityKey(
+		normalized,
+		confirmationNumber
+	);
 	const intent = normalized.intent || "unknown";
 	const statusToApply = normalizeStatusToApply(
 		normalized.statusToApply || normalized.eventType
@@ -7370,6 +9284,55 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				"The email intent was not deterministically established; no reservation fields were changed.",
 			warnings,
 			errors: [...errors, "Could not safely determine the OTA reservation intent."],
+		};
+	}
+	if (
+		isOtaInboundEmail(normalized) &&
+		normalized.sourceSenderTrusted === false
+	) {
+		logReconcile("needs_review.untrusted_sender", {
+			provider: normalized.provider || "unknown",
+			confirmationNumber,
+			sourceFrom: normalized.source?.from || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "untrusted_ota_sender_no_mutation",
+			automationComment:
+				"The apparent OTA provider was not authenticated by a trusted sender mailbox domain; no reservation lookup, creation, or mutation was attempted.",
+			warnings,
+			errors: [
+				...errors,
+				"OTA sender mailbox domain is not trusted for automatic mutation.",
+			],
+		};
+	}
+	if (
+		isOtaInboundEmail(normalized) &&
+		hasKnownProvider(normalized) &&
+		normalized.sourceSenderAuthenticated !== true
+	) {
+		logReconcile("needs_review.unauthenticated_sender", {
+			provider: normalized.provider || "unknown",
+			confirmationNumber,
+			sourceFrom: normalized.source?.from || "",
+			authenticationReason:
+				normalized.senderAuthentication?.reason ||
+				normalized.source?.senderAuthentication?.reason ||
+				"missing_sender_authentication",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "unauthenticated_ota_sender_no_mutation",
+			automationComment:
+				"The OTA sender domain did not have verified, aligned SPF or DKIM evidence from the inbound mail provider; no reservation lookup, creation, or mutation was attempted.",
+			warnings,
+			errors: [
+				...errors,
+				"OTA sender authentication is missing, failed, or not aligned with the From domain.",
+			],
 		};
 	}
 	if (normalized.requiresManualReview === true) {
@@ -7468,13 +9431,50 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 
 	const existing = await findReservationByOtaConfirmation(
 		confirmationNumber,
+		normalized.provider,
+		"",
+		crossTransportIdentityKey
+	);
+	if (
+		existing &&
+		crossTransportIdentityKey &&
+		normalizeWhitespace(existing.otaCrossTransportIdentityKey || "") &&
+		!reservationMatchesOtaCrossTransportIdentity(
+			existing,
+			crossTransportIdentityKey
+		)
+	) {
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "ota_cross_transport_identity_conflict",
+			automationComment:
+				"The verified Trip.com bridge conflicts with the reservation's existing cross-transport identity; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"Conflicting OTA cross-transport identity key detected.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+		};
+	}
+	const matchedByCrossTransportIdentity = isSafeOtaCrossTransportMatch(
+		existing,
+		confirmationNumber,
+		crossTransportIdentityKey,
 		normalized.provider
 	);
+	if (matchedByCrossTransportIdentity) {
+		normalized.preserveCanonicalTransportIdentity = true;
+	}
 	const matchedReservationBy = existing
 		? detectConfirmationMatchFields(
 				existing,
 				confirmationNumber,
-				normalized.provider
+				normalized.provider,
+				crossTransportIdentityKey
 		  )
 		: [];
 	logReconcile("existing.checked", {
@@ -7485,6 +9485,237 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		hotelId: existing?.hotelId ? String(existing.hotelId) : "",
 		matchedReservationBy,
 	});
+
+	const mutationOrderingConflict =
+		existing && (isStatusIntent || isUpdateIntent)
+			? otaLifecycleOrderingConflict(normalized, existing)
+			: "";
+	if (mutationOrderingConflict) {
+		const missingTimestamp =
+			mutationOrderingConflict !== "stale_or_equal_timestamp";
+		logReconcile(
+			missingTimestamp
+				? "lifecycle.needs_review.missing_timestamp"
+				: "lifecycle.needs_review.stale_event",
+			{
+				confirmationNumber,
+				statusToApply,
+				intent,
+				incomingReceivedAt: normalized?.source?.receivedAt || null,
+				lastAppliedReceivedAt:
+					otaExistingLifecycleBaselineAt(existing) || null,
+			}
+		);
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: missingTimestamp
+				? "ota_lifecycle_timestamp_missing"
+				: "stale_ota_lifecycle_event",
+			automationComment: missingTimestamp
+				? "The OTA lifecycle email has no trusted source timestamp, so it cannot be safely ordered against prior reservation events."
+				: "An older or equal-time OTA lifecycle email was not allowed to overwrite a newer reservation event.",
+			warnings,
+			errors: [
+				...errors,
+				missingTimestamp
+					? "This OTA lifecycle email has no trusted ordering timestamp."
+					: "This OTA lifecycle email is older than or equal to the latest OTA event already applied to the reservation.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (existing && isUpdateIntent && hasTerminalOtaReservationStatus(existing)) {
+		logReconcile("update.needs_review.terminal_reservation", {
+			confirmationNumber,
+			existingState: existing.state || "",
+			existingReservationStatus: existing.reservation_status || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "terminal_ota_reservation_update_blocked",
+			automationComment:
+				"An ordinary OTA modification cannot move a terminal reservation back into platform review; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"OTA modifications to cancelled, no-show, or checked-out reservations require manual review.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (existing && isUpdateIntent && hasInhouseOtaReservationStatus(existing)) {
+		logReconcile("update.needs_review.inhouse_reservation", {
+			confirmationNumber,
+			existingState: existing.state || "",
+			existingReservationStatus: existing.reservation_status || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "inhouse_ota_reservation_update_blocked",
+			automationComment:
+				"An ordinary OTA modification cannot move an in-house reservation back into platform review; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"OTA modifications to an in-house reservation require manual review.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (existing && isStatusIntent && !statusToApply) {
+		logReconcile("status.needs_review.unknown_status", {
+			confirmationNumber,
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "unknown_ota_status_no_mutation",
+			warnings,
+			errors: [...errors, "Could not safely determine which status to apply."],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (
+		existing &&
+		isStatusIntent &&
+		wouldReopenTerminalOtaReservation(existing, statusToApply)
+	) {
+		logReconcile("status.needs_review.terminal_transition", {
+			confirmationNumber,
+			statusToApply,
+			existingState: existing.state || "",
+			existingReservationStatus: existing.reservation_status || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "terminal_ota_reservation_transition_blocked",
+			automationComment:
+				"A terminal reservation cannot transition to a different OTA status without an explicit manual policy; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"Incoming OTA status conflicts with the reservation's terminal status and requires manual review.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (
+		existing &&
+		isStatusIntent &&
+		wouldRegressInhouseOtaReservation(existing, statusToApply)
+	) {
+		logReconcile("status.needs_review.inhouse_regression", {
+			confirmationNumber,
+			statusToApply,
+			existingState: existing.state || "",
+			existingReservationStatus: existing.reservation_status || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "inhouse_ota_status_regression_blocked",
+			automationComment:
+				"An in-house reservation may only remain in-house or advance to checked-out automatically; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"Incoming OTA status is not an allowed in-house lifecycle transition.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	if (
+		existing &&
+		isStatusIntent &&
+		terminalLifecycleStayDatesConflict(normalized, existing, statusToApply)
+	) {
+		logReconcile("status.needs_review.stay_conflict", {
+			confirmationNumber,
+			statusToApply,
+			incomingCheckin: normalized.checkinDate || "",
+			incomingCheckout: normalized.checkoutDate || "",
+			existingCheckin: existing.checkin_date || "",
+			existingCheckout: existing.checkout_date || "",
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "terminal_ota_lifecycle_stay_dates_conflict",
+			automationComment:
+				"The source-backed cancellation or no-show stay dates do not exactly match the existing reservation; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"Terminal OTA lifecycle stay dates conflict with the existing reservation.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
+	let independentlyResolvedIncomingHotel = null;
+	if (existing && hasSourceField(normalized, "hotelName")) {
+		independentlyResolvedIncomingHotel = await resolveHotel(normalized, null);
+		if (
+			resolvedIncomingHotelConflictsWithExisting(
+				existing,
+				independentlyResolvedIncomingHotel
+			)
+		) {
+			logReconcile("needs_review.existing_hotel_conflict", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				existingHotelId: normalizeId(existing.hotelId),
+				incomingHotelId: normalizeId(independentlyResolvedIncomingHotel._id),
+			});
+			return {
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "ota_incoming_hotel_conflicts_with_existing_reservation",
+				automationComment:
+					"The source-backed incoming hotel resolves to a different PMS hotel than the matched reservation; no fields were changed.",
+				warnings,
+				errors: [
+					...errors,
+					"Incoming OTA hotel identity conflicts with the existing reservation hotel.",
+				],
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
+	}
 
 	if (existing && intent === "new_reservation" && !isStatusIntent && !isUpdateIntent) {
 		const incomingAuthority = otaSourceAuthority(normalized);
@@ -7510,6 +9741,92 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			authorityUpgrade &&
 			requiredNewReservationMissing(normalized).length === 0;
 		if (canAuthoritativelyRefresh) {
+			const refreshOrderingConflict = otaLifecycleOrderingConflict(
+				normalized,
+				existing
+			);
+			if (refreshOrderingConflict) {
+				const missingTimestamp =
+					refreshOrderingConflict !== "stale_or_equal_timestamp";
+				logReconcile(
+					missingTimestamp
+						? "authoritative_refresh.needs_review.missing_timestamp"
+						: "authoritative_refresh.needs_review.stale_event",
+					{
+						confirmationNumber,
+						incomingReceivedAt: normalized?.source?.receivedAt || null,
+						lastAppliedReceivedAt:
+							otaExistingLifecycleBaselineAt(existing) || null,
+					}
+				);
+				return {
+					status: "needs_review",
+					actionTaken: "skipped",
+					skipReason: missingTimestamp
+						? "ota_lifecycle_timestamp_missing"
+						: "stale_ota_lifecycle_event",
+					automationComment: missingTimestamp
+						? "The higher-authority OTA confirmation has no trusted source timestamp, so it cannot safely refresh the existing reservation."
+						: "An older or equal-time higher-authority OTA confirmation was not allowed to refresh the existing reservation.",
+					warnings,
+					errors: [
+						...errors,
+						missingTimestamp
+							? "The higher-authority OTA confirmation has no trusted ordering timestamp."
+							: "The higher-authority OTA confirmation is older than or equal to the latest OTA event already applied.",
+					],
+					reservationId: existing._id,
+					hotelId: existing.hotelId,
+					pmsConfirmationNumber: existing.confirmation_number,
+					matchedReservationBy,
+				};
+			}
+			if (hasTerminalOtaReservationStatus(existing)) {
+				logReconcile("authoritative_refresh.needs_review.terminal_reservation", {
+					confirmationNumber,
+					existingState: existing.state || "",
+					existingReservationStatus: existing.reservation_status || "",
+				});
+				return {
+					status: "needs_review",
+					actionTaken: "skipped",
+					skipReason: "terminal_ota_reservation_refresh_blocked",
+					automationComment:
+						"A higher-authority confirmation cannot refresh a terminal reservation automatically; no fields were changed.",
+					warnings,
+					errors: [
+						...errors,
+						"Higher-authority refresh of a cancelled, no-show, or checked-out reservation requires manual review.",
+					],
+					reservationId: existing._id,
+					hotelId: existing.hotelId,
+					pmsConfirmationNumber: existing.confirmation_number,
+					matchedReservationBy,
+				};
+			}
+			if (hasInhouseOtaReservationStatus(existing)) {
+				logReconcile("authoritative_refresh.needs_review.inhouse_reservation", {
+					confirmationNumber,
+					existingState: existing.state || "",
+					existingReservationStatus: existing.reservation_status || "",
+				});
+				return {
+					status: "needs_review",
+					actionTaken: "skipped",
+					skipReason: "inhouse_ota_reservation_refresh_blocked",
+					automationComment:
+						"A higher-authority confirmation cannot move an in-house reservation back into platform review; no fields were changed.",
+					warnings,
+					errors: [
+						...errors,
+						"Higher-authority refresh of an in-house reservation requires manual review.",
+					],
+					reservationId: existing._id,
+					hotelId: existing.hotelId,
+					pmsConfirmationNumber: existing.confirmation_number,
+					matchedReservationBy,
+				};
+			}
 			normalized.authoritativeExistingRefresh = true;
 			normalized.otaSourceAuthority = incomingAuthority;
 			warnings.push(
@@ -7594,45 +9911,6 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				],
 			};
 		}
-		if (existing && isStaleOtaLifecycleEvent(normalized, existing)) {
-			logReconcile("status.needs_review.stale_event", {
-				confirmationNumber,
-				statusToApply,
-				incomingReceivedAt: normalized?.source?.receivedAt || null,
-				lastAppliedReceivedAt:
-					existing?.supplierData?.otaLastSourceReceivedAt || null,
-			});
-			return {
-				status: "needs_review",
-				actionTaken: "skipped",
-				skipReason: "stale_ota_lifecycle_event",
-				automationComment:
-					"An older OTA lifecycle email was not allowed to overwrite a newer OTA email state.",
-				warnings,
-				errors: [
-					...errors,
-					"This OTA lifecycle email is older than the latest OTA event already applied to the reservation.",
-				],
-				reservationId: existing._id,
-				hotelId: existing.hotelId,
-				pmsConfirmationNumber: existing.confirmation_number,
-				matchedReservationBy,
-			};
-		}
-		if (existing && !statusToApply) {
-			logReconcile("status.needs_review.unknown_status", {
-				confirmationNumber,
-			});
-			return {
-				status: "needs_review",
-				warnings,
-				errors: [...errors, "Could not safely determine which status to apply."],
-				reservationId: existing._id,
-				hotelId: existing.hotelId,
-				pmsConfirmationNumber: existing.confirmation_number,
-				matchedReservationBy,
-			};
-		}
 		if (existing) {
 			logReconcile("status.update.start", {
 				confirmationNumber,
@@ -7679,6 +9957,39 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				...errors,
 				"Update email did not match an existing reservation by confirmation number.",
 			],
+		};
+	}
+
+	if (isUpdateIntent && existing) {
+		logReconcile("update.stage.start", {
+			confirmationNumber,
+			reservationId: String(existing._id),
+			hotelId: existing.hotelId ? String(existing.hotelId) : "",
+		});
+		const set = await applyExistingReservationEmailUpdate({
+			normalized,
+			existing,
+			statusToApply,
+			warnings,
+			action: "staged-existing-update-from-email",
+		});
+		logReconcile("update.stage.done", {
+			confirmationNumber,
+			reservationId: String(existing._id),
+			updatedFields: Object.keys(set),
+		});
+		return {
+			status: "updated",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			otaPlatformReviewStatus:
+				set?.["otaPlatformReview.status"] ||
+				existing?.otaPlatformReview?.status ||
+				"",
+			matchedReservationBy,
 		};
 	}
 
@@ -7735,10 +10046,12 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		});
 	}
 
-	const hotelDetails = await resolveHotel(
-		normalized,
-		normalized.authoritativeExistingRefresh ? null : existing
-	);
+	const hotelDetails =
+		independentlyResolvedIncomingHotel ||
+		(await resolveHotel(
+			normalized,
+			normalized.authoritativeExistingRefresh ? null : existing
+		));
 	if (!hotelDetails) {
 		logReconcile("needs_mapping.hotel", {
 			confirmationNumber,
@@ -7779,6 +10092,58 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			errors,
 			allowCreate: true,
 		});
+	}
+	if (
+		matchedByCrossTransportIdentity &&
+		existing?.hotelId &&
+		normalizeId(existing.hotelId) !== normalizeId(hotelDetails._id)
+	) {
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "ota_cross_transport_hotel_conflict",
+			automationComment:
+				"The direct Trip.com and relayed reservation identities agree, but their resolved hotels conflict; no fields were changed.",
+			warnings,
+			errors: [
+				...errors,
+				"Cross-transport OTA match resolved to a different hotel.",
+			],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	if (!existing && crossTransportIdentityKey) {
+		const legacyRedactedIdentityConflict =
+			await findLegacyRedactedTripIdentityConflict(
+				normalized,
+				hotelDetails._id
+			);
+		if (legacyRedactedIdentityConflict) {
+			return {
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "legacy_redacted_trip_identity_conflict",
+				automationComment:
+					"A legacy HotelRunner record has the same Trip confirmation suffix, hotel, and stay dates but its full OTA identity was historically redacted; no duplicate was created and no identity was guessed.",
+				warnings,
+				errors: [
+					...errors,
+					"Possible legacy redacted Trip.com identity requires manual verification.",
+				],
+				reservationId: legacyRedactedIdentityConflict._id,
+				hotelId: legacyRedactedIdentityConflict.hotelId,
+				pmsConfirmationNumber:
+					legacyRedactedIdentityConflict.confirmation_number,
+				matchedReservationBy: [
+					"legacyRedactedTripSuffix",
+					"hotelId",
+					"stayDates",
+				],
+			};
+		}
 	}
 	const manualHotelAssignmentReason = getManualOtaHotelAssignmentReason(
 		normalized,
@@ -7971,13 +10336,15 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 	const existingBeforeCreate = await findReservationByOtaConfirmation(
 		confirmationNumber,
 		normalized.provider,
-		"_id hotelId confirmation_number otaIdentityKey reservation_id customer_details supplierData"
+		"_id hotelId confirmation_number otaIdentityKey otaCrossTransportIdentityKey reservation_id customer_details supplierData otaPlatformReview",
+		crossTransportIdentityKey
 	);
 	if (existingBeforeCreate) {
 		const lateMatchedBy = detectConfirmationMatchFields(
 			existingBeforeCreate,
 			confirmationNumber,
-			normalized.provider
+			normalized.provider,
+			crossTransportIdentityKey
 		);
 		logReconcile("duplicate_reservation.pre_create_recheck", {
 			confirmationNumber,
@@ -8012,6 +10379,9 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		normalized.provider,
 		confirmationNumber
 	);
+	if (crossTransportIdentityKey) {
+		document.otaCrossTransportIdentityKey = crossTransportIdentityKey;
+	}
 	applyVccSafeFieldsToDocument(document, normalized);
 	document.confirmation_number = await generateUniquePmsConfirmationNumber();
 	document.customer_details = {
@@ -8059,13 +10429,15 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				const duplicate = await findReservationByOtaConfirmation(
 					confirmationNumber,
 					normalized.provider,
-					"_id hotelId confirmation_number otaIdentityKey"
+					"_id hotelId confirmation_number otaIdentityKey otaCrossTransportIdentityKey reservation_id customer_details supplierData otaPlatformReview",
+					crossTransportIdentityKey
 				);
 				if (duplicate) {
 					const duplicateMatchedBy = detectConfirmationMatchFields(
 						duplicate,
 						confirmationNumber,
-						normalized.provider
+						normalized.provider,
+						crossTransportIdentityKey
 					);
 					return {
 						status: "duplicate_reservation",
@@ -8121,14 +10493,40 @@ async function reconcileOtaReservation(inputNormalized) {
 	const confirmationNumber = normalizeConfirmation(
 		input.confirmationNumber || input.reservationId
 	);
-	return enqueueOtaReservationWork(
-		() => reconcileOtaReservationUnqueued(input),
-		{
+	try {
+		return await enqueueOtaReservationWork(
+			() => reconcileOtaReservationUnqueued(input),
+			{
+				confirmationNumber,
+				provider: input.provider || "unknown",
+				source: input.source?.from || "ota",
+			}
+		);
+	} catch (error) {
+		if (error?.code !== "OTA_RESERVATION_IDENTITY_CONFLICT") throw error;
+		logReconcile("needs_review.ota_identity_conflict", {
 			confirmationNumber,
 			provider: input.provider || "unknown",
-			source: input.source?.from || "ota",
-		}
-	);
+			reason: error.reason || "ota_identity_conflict",
+			reservationIds: error.reservationIds || [],
+		});
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "ota_reservation_identity_conflict_no_mutation",
+			automationComment:
+				"Multiple or internally contradictory OTA reservation identities were detected; no reservation was selected, created, or changed.",
+			warnings: [...(input.warnings || [])],
+			errors: [
+				...(input.errors || []),
+				"Conflicting OTA reservation identity evidence requires manual review.",
+			],
+			reservationId: null,
+			hotelId: null,
+			pmsConfirmationNumber: "",
+			matchedReservationBy: [],
+		};
+	}
 }
 
 function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
@@ -8422,6 +10820,7 @@ module.exports = {
 	parseMoney,
 	toSarAmount,
 	getSarExchangeRate,
+	fetchWithHardTimeout,
 	getSarConversionMeta,
 	getSarConversionMetaAsync,
 	applyLiveSarConversion,
@@ -8435,9 +10834,16 @@ module.exports = {
 	expandHotelNameCandidates,
 	normalizeConfirmation,
 	buildOtaIdentityKey,
+	buildOtaCrossTransportIdentityKey,
+	buildLegacyRedactedTripConflictLookup,
 	buildOtaConfirmationLookup,
+	validateReservationOtaIdentityConsistency,
+	selectConsistentOtaIdentityCandidate,
 	detectConfirmationMatchFields,
 	detectProvider,
+	parseSingleSenderMailbox,
+	trustedProviderFromSenderAddress,
+	evaluateTrustedSenderAuthentication,
 	detectEventType,
 	detectStatusToApply,
 	detectReservationIntent,
@@ -8460,6 +10866,9 @@ module.exports = {
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
 	isStaleOtaLifecycleEvent,
+	resolvedIncomingHotelConflictsWithExisting,
+	terminalLifecycleStayDatesConflict,
+	wouldReopenTerminalOtaReservation,
 	otaSourceAuthority,
 	normalizeStatusToApply,
 	calculateDaysOfResidence,
@@ -8469,6 +10878,7 @@ module.exports = {
 	generateUniquePmsConfirmationNumber,
 	getOtaInboundAllowedHotelIds,
 	isHotelAllowedForOtaInbound,
+	getManualOtaHotelAssignmentReason,
 	isOtaInboundTotalOutlier,
 	isPlausibleOtaGuestName,
 	isPlausibleOtaRoomName,

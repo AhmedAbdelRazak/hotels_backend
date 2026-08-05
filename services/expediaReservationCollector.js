@@ -25,6 +25,9 @@ const DEFAULT_LOGIN_URL =
 	"https://expediapartnercentral.com/Account/Logon?returnUrl=https%3A%2F%2Fapps.expediapartnercentral.com%2Fmanageproperty%2FManageProperty";
 const DEFAULT_MANAGE_PROPERTY_URL =
 	"https://apps.expediapartnercentral.com/manageproperty/ManageProperty";
+const EXPEDIA_PROVIDER = "expedia";
+const EXPEDIA_EXISTING_RESERVATION_PROJECTION =
+	"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment";
 const DEFAULT_BOOKINGS_URL =
 	"https://apps.expediapartnercentral.com/lodging/bookings";
 const DEFAULT_RESERVATION_DETAIL_URL =
@@ -3347,14 +3350,20 @@ const resolveSelectedTargets = (job, selectedHotelIds = []) => {
 	};
 };
 
-const classifyCandidate = async (candidate) => {
+const classifyCandidate = async (
+	candidate,
+	{
+		findReservation = findReservationByOtaConfirmation,
+	} = {}
+) => {
 	const lookupValues = getExpediaCandidateLookupValues(candidate);
 	let existing = null;
 	let matchedLookupValue = "";
 	for (const lookupValue of lookupValues) {
-		existing = await findReservationByOtaConfirmation(
+		existing = await findReservation(
 			lookupValue,
-			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment"
+			EXPEDIA_PROVIDER,
+			EXPEDIA_EXISTING_RESERVATION_PROJECTION
 		);
 		if (existing) {
 			matchedLookupValue = lookupValue;
@@ -3403,7 +3412,8 @@ const classifyCandidate = async (candidate) => {
 			matchedLookupValue,
 			matchedReservationBy: detectConfirmationMatchFields(
 				existing,
-				matchedLookupValue || candidate.confirmationNumber
+				matchedLookupValue || candidate.confirmationNumber,
+				EXPEDIA_PROVIDER
 			),
 		},
 	};
@@ -4407,5 +4417,6 @@ module.exports = {
 		parseReservationRowCandidate,
 		parseExpediaReservationDetailText,
 		lineConfirmationValueAfter,
+		classifyCandidate,
 	},
 };

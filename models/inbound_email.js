@@ -53,6 +53,7 @@ const inboundEmailSchema = new mongoose.Schema(
 			],
 			default: [],
 		},
+		senderAuthentication: { type: Object, default: undefined },
 
 		confirmationNumber: { type: String, trim: true, lowercase: true, default: "" },
 		pmsConfirmationNumber: { type: String, trim: true, lowercase: true, default: "" },

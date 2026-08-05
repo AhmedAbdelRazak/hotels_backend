@@ -124,6 +124,108 @@ test("a hard room capacity with no PMS candidate never invokes OpenAI", async ()
 	);
 });
 
+test("semantic room types with no compatible PMS category never invoke OpenAI", async () => {
+	let calls = 0;
+	const client = {
+		chat: {
+			completions: {
+				create: async () => {
+					calls += 1;
+					throw new Error("must not be called");
+				},
+			},
+		},
+	};
+	const hotelWithoutSemanticRooms = {
+		_id: "fixed-class-only-hotel",
+		roomCountDetails: [
+			{ _id: "double", roomType: "doubleRooms", activeRoom: true },
+			{ _id: "quad", roomType: "quadRooms", activeRoom: true },
+		],
+	};
+
+	for (const mappedRoomType of ["familyRooms", "standardRooms", "kingRooms"]) {
+		const result = await matchOtaRoomWithOpenAi({
+			hotelDetails: hotelWithoutSemanticRooms,
+			normalized: { roomName: `${mappedRoomType} OTA title` },
+			deterministicMatch: {
+				roomDetails: null,
+				matchType: "no_deterministic_match",
+				mappedRoomType,
+			},
+			client,
+		});
+
+		assert.equal(result.usedAI, false);
+		assert.equal(result.matched, false);
+		assert.equal(
+			result.skipReason,
+			"required_semantic_room_type_has_no_pms_candidate"
+		);
+	}
+	assert.equal(calls, 0);
+});
+
+test("semantic room AI receives only capacity-compatible rooms of the required PMS category", async () => {
+	let request;
+	const client = {
+		chat: {
+			completions: {
+				create: async (body) => {
+					request = body;
+					return {
+						choices: [
+							{
+								message: {
+									content: JSON.stringify(
+										aiDecision({
+											selectedRoomId: "family-four",
+											confidence: 0.92,
+											basis: "semantic_name",
+										})
+									),
+								},
+							},
+						],
+					};
+				},
+			},
+		},
+	};
+	const mixedCapacityHotel = {
+		_id: "mixed-capacity-hotel",
+		roomCountDetails: [
+			{ _id: "quad", roomType: "quadRooms", activeRoom: true },
+			{ _id: "family-four", roomType: "familyRooms", activeRoom: true },
+			{ _id: "family-five", roomType: "familyRooms", activeRoom: true },
+		],
+	};
+	const result = await matchOtaRoomWithOpenAi({
+		hotelDetails: mixedCapacityHotel,
+		normalized: { roomName: "Family accommodation for 4 persons" },
+		deterministicMatch: {
+			roomDetails: null,
+			matchType: "insufficient_display_evidence",
+			mappedRoomType: "familyRooms",
+			capacityCandidateIds: ["quad", "family-four"],
+		},
+		sourceCapacity: 4,
+		candidateCapacities: { quad: 4, "family-four": 4, "family-five": 5 },
+		client,
+	});
+
+	assert.equal(result.matched, true);
+	assert.equal(result.selectedRoomId, "family-four");
+	assert.deepEqual(
+		request.response_format.json_schema.schema.properties.selectedRoomId.enum,
+		["family-four", null]
+	);
+	assert.deepEqual(
+		JSON.parse(request.messages[1].content).pmsRooms.map((room) => room.id),
+		["family-four"]
+	);
+});
+
 test("AI room decisions must use an allowlisted PMS ID and pass confidence, ambiguity, and capacity gates", () => {
 	const candidates = activeRoomCandidates(hotel);
 	const capacities = { "room-five": 5, "room-six": 6 };
@@ -277,7 +379,11 @@ test("semantic room matching sends the resolved hotel's allowlist using strict s
 			guestName: "This Guest Must Never Be Sent",
 			totalGuests: 0,
 		},
-		deterministicMatch: { roomDetails: null, matchType: "ambiguous" },
+		deterministicMatch: {
+			roomDetails: null,
+			matchType: "ambiguous",
+			mappedRoomType: "familyRooms",
+		},
 		sourceCapacity: 0,
 		candidateCapacities: { "room-five": 5, "room-six": 6 },
 		client,
@@ -374,6 +480,42 @@ test("explicit capacity limits AI to capacity-compatible PMS candidates", async 
 	assert.deepEqual(
 		JSON.parse(request.messages[1].content).pmsRooms.map((room) => room.id),
 		["triple-deluxe", "triple-city"]
+	);
+});
+
+test("booked occupancy is pre-filtered before AI and impossible rooms cost zero calls", async () => {
+	let calls = 0;
+	const client = {
+		chat: {
+			completions: {
+				create: async () => {
+					calls += 1;
+					throw new Error("AI must not be called");
+				},
+			},
+		},
+	};
+	const result = await matchOtaRoomWithOpenAi({
+		hotelDetails: {
+			_id: "occupancy-hotel",
+			roomCountDetails: [
+				{ _id: "single", roomType: "singleRooms", activeRoom: true },
+				{ _id: "double", roomType: "doubleRooms", activeRoom: true },
+			],
+		},
+		normalized: { roomName: "Unclassified OTA room", totalGuests: 3 },
+		deterministicMatch: { roomDetails: null, matchType: "ambiguous" },
+		minimumCapacity: 3,
+		candidateCapacities: { single: 1, double: 2 },
+		client,
+	});
+
+	assert.equal(calls, 0);
+	assert.equal(result.usedAI, false);
+	assert.equal(result.matched, false);
+	assert.equal(
+		result.skipReason,
+		"occupancy_has_no_compatible_pms_candidate"
 	);
 });
 

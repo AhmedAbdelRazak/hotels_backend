@@ -32,6 +32,12 @@ const reservationsSchema = new mongoose.Schema(
 			lowercase: true,
 			default: "",
 		},
+		otaCrossTransportIdentityKey: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
 		pms_number: {
 			type: String, //could be left blank
 			trim: true,
@@ -507,6 +513,10 @@ const reservationsSchema = new mongoose.Schema(
 				platformMarginTotal: 0,
 			},
 		},
+		ota_financial_summary: {
+			type: Object,
+			default: undefined,
+		},
 		adminPricingVisibility: {
 			type: Object,
 			default: {
@@ -670,6 +680,16 @@ reservationsSchema.index(
 			otaIdentityKey: { $type: "string", $gt: "" },
 		},
 		name: "uniq_ota_identity_key",
+	}
+);
+reservationsSchema.index(
+	{ otaCrossTransportIdentityKey: 1 },
+	{
+		unique: true,
+		partialFilterExpression: {
+			otaCrossTransportIdentityKey: { $type: "string", $gt: "" },
+		},
+		name: "uniq_ota_cross_transport_identity_key",
 	}
 );
 reservationsSchema.index(

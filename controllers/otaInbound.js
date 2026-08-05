@@ -10,6 +10,7 @@ const {
 	redactSensitive,
 	safeSnippet,
 	normalizeWhitespace,
+	evaluateTrustedSenderAuthentication,
 } = require("../services/otaReservationMapper");
 const {
 	orchestrateInboundReservationEmail,
@@ -210,6 +211,45 @@ const getRawMimeBodyFallback = (raw = "") => {
 	return normalizeWhitespace(body || text);
 };
 
+const validInboundMessageDate = (value, receivedAt = new Date()) => {
+	if (!value) return null;
+	const parsed = value instanceof Date ? new Date(value) : new Date(String(value));
+	if (Number.isNaN(parsed.getTime())) return null;
+	// A future sender-controlled Date must never advance the lifecycle watermark.
+	if (parsed.getTime() > receivedAt.getTime() + 5 * 60 * 1000) return null;
+	return parsed;
+};
+
+const withSendGridSenderAuthentication = (email = {}, body = {}) => {
+	const deliveryReceivedAt = new Date();
+	const senderAuthentication = evaluateTrustedSenderAuthentication({
+		from: email.from || "",
+		spf: body.SPF ?? body.spf ?? "",
+		dkim: body.dkim ?? body.DKIM ?? "",
+		envelope: body.envelope ?? null,
+	});
+	const messageDate = validInboundMessageDate(
+		email.date || body.date || getMimeHeader(body.headers || "", "date"),
+		deliveryReceivedAt
+	);
+	const usesAuthenticatedMessageDate = !!(
+		senderAuthentication.authenticatedAligned && messageDate
+	);
+	return {
+		...email,
+		date: messageDate,
+		deliveryReceivedAt,
+		sourceReceivedAt: usesAuthenticatedMessageDate
+			? messageDate
+			: deliveryReceivedAt,
+		sourceTimestampMethod: usesAuthenticatedMessageDate
+			? `authenticated_${String(senderAuthentication.method || "sender")
+					.replace(/\+/g, "_")}_message_date`
+			: "sendgrid_webhook_received_at",
+		senderAuthentication,
+	};
+};
+
 const parseSendGridPayload = async (body = {}, files = []) => {
 	const rawMime = body.email || body.raw || body.mime || body.rawEmail || "";
 	if (rawMime) {
@@ -221,7 +261,7 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 					: []),
 				...(Array.isArray(files) ? files.map(fileMetadata) : []),
 			];
-			return {
+			return withSendGridSenderAuthentication({
 				from: parsed.from?.text || body.from || "",
 				to: parsed.to?.text || body.to || "",
 				cc: parsed.cc?.text || body.cc || "",
@@ -231,16 +271,20 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 				html: parsed.html || body.html || "",
 				messageId:
 					parsed.messageId || body.messageId || getHeaderMessageId(body.headers),
+				date:
+					parsed.date ||
+					body.date ||
+					getMimeHeader(body.headers || "", "date"),
 				rawHash: hashText(rawMime),
 				hasRawMime: true,
 				attachments,
-			};
+			}, body);
 		}
 
 		console.warn(
 			"[ota-inbound] mailparser unavailable; using raw MIME fallback parser."
 		);
-		return {
+		return withSendGridSenderAuthentication({
 			from: body.from || getMimeHeader(rawMime, "from"),
 			to: body.to || getMimeHeader(rawMime, "to"),
 			cc: body.cc || getMimeHeader(rawMime, "cc"),
@@ -253,13 +297,17 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 				body["message-id"] ||
 				getMimeHeader(rawMime, "message-id") ||
 				getHeaderMessageId(body.headers),
+			date:
+				body.date ||
+				getMimeHeader(rawMime, "date") ||
+				getMimeHeader(body.headers || "", "date"),
 			rawHash: hashText(rawMime),
 			hasRawMime: true,
 			attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
-		};
+		}, body);
 	}
 
-	return {
+	return withSendGridSenderAuthentication({
 		from: body.from || "",
 		to: body.to || "",
 		cc: body.cc || "",
@@ -269,11 +317,14 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 		html: body.html || "",
 		messageId:
 			body.messageId || body["message-id"] || getHeaderMessageId(body.headers),
+		date: body.date || getMimeHeader(body.headers || "", "date"),
 		rawHash: "",
 		hasRawMime: false,
 		attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
-	};
+	}, body);
 };
+
+exports.parseSendGridPayload = parseSendGridPayload;
 
 const duplicateRecordSelection =
 	"_id processingStatus receivedAt dedupeKey reservationMongoId hotelId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel";
@@ -428,7 +479,8 @@ const createInboundEmailRecord = async (
 		bodyHtml: "",
 		safeSnippet: safeSnippet(redactedText, 800),
 		attachments: email.attachments || [],
-		receivedAt: new Date(),
+		senderAuthentication: email.senderAuthentication || undefined,
+		receivedAt: email.deliveryReceivedAt || new Date(),
 	};
 	if (dedupeKey) record.dedupeKey = dedupeKey;
 	return InboundEmail.create(record);
@@ -642,6 +694,13 @@ exports.handleSendGridInbound = async (req, res) => {
 			subject: email.subject,
 			messageId: email.messageId,
 			rawHash: shortHash(email.rawHash),
+			senderAuthenticated:
+				email.senderAuthentication?.authenticatedAligned === true,
+			senderAuthenticationMethod:
+				email.senderAuthentication?.method || "",
+			senderAuthenticationReason:
+				email.senderAuthentication?.reason || "",
+			sourceTimestampMethod: email.sourceTimestampMethod || "",
 			attachments: (email.attachments || []).map((attachment) => ({
 				filename: attachment.filename,
 				contentType: attachment.contentType,

@@ -14,6 +14,9 @@ const {
 } = require("./expediaReservationIdentity");
 
 const activeApplyJobs = new Set();
+const EXPEDIA_PROVIDER = "expedia";
+const EXPEDIA_EXISTING_RESERVATION_PROJECTION =
+	"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment";
 const WRITTEN_STATUSES = new Set([
 	"created",
 	"updated",
@@ -43,13 +46,19 @@ const normalizePaymentCollectionModel = (value = "") => {
 const candidateLookupValues = (candidate = {}) =>
 	getExpediaCandidateLookupValues(candidate);
 
-const findExistingForCandidate = async (candidate = {}) => {
+const findExistingForCandidate = async (
+	candidate = {},
+	{
+		findReservation = findReservationByOtaConfirmation,
+	} = {}
+) => {
 	const lookups = candidateLookupValues(candidate);
 	for (const lookupValue of lookups) {
 		// eslint-disable-next-line no-await-in-loop
-		const existing = await findReservationByOtaConfirmation(
+		const existing = await findReservation(
 			lookupValue,
-			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment"
+			EXPEDIA_PROVIDER,
+			EXPEDIA_EXISTING_RESERVATION_PROJECTION
 		);
 		if (existing) {
 			return { existing, matchedLookupValue: lookupValue };
@@ -57,6 +66,13 @@ const findExistingForCandidate = async (candidate = {}) => {
 	}
 	return { existing: null, matchedLookupValue: "" };
 };
+
+const detectExpediaConfirmationMatchFields = (reservation, confirmationNumber) =>
+	detectConfirmationMatchFields(
+		reservation,
+		confirmationNumber,
+		EXPEDIA_PROVIDER
+	);
 
 const money = (...values) => {
 	for (const value of values) {
@@ -223,6 +239,10 @@ const candidateToNormalized = ({ candidate = {}, job = {}, intent, eventType, st
 			messageId: `ota-sync:${job.jobNumber || job._id || ""}:${confirmationNumber}`,
 			textHash: "",
 			safeSnippet: candidate.sourceSnippet || "",
+			receivedAt:
+				job.createdAt ||
+				candidate.collectedAt ||
+				null,
 		},
 		warnings: [],
 		errors: [],
@@ -300,7 +320,7 @@ const applyNewCandidate = async ({ candidate, job }) => {
 				reservationId: existing._id,
 				hotelId: existing.hotelId,
 				pmsConfirmationNumber: existing.confirmation_number,
-				matchedReservationBy: detectConfirmationMatchFields(
+				matchedReservationBy: detectExpediaConfirmationMatchFields(
 					existing,
 					matchedLookupValue
 				),
@@ -367,7 +387,7 @@ const applyStatusCandidate = async ({ candidate, job }) => {
 				reservationId: existing._id,
 				hotelId: existing.hotelId,
 				pmsConfirmationNumber: existing.confirmation_number,
-				matchedReservationBy: detectConfirmationMatchFields(
+				matchedReservationBy: detectExpediaConfirmationMatchFields(
 					existing,
 					matchedLookupValue
 				),
@@ -606,4 +626,9 @@ module.exports = {
 	applyExpediaReservationSyncJob,
 	normalizePaymentCollectionModel,
 	candidateLookupValues,
+	__private: {
+		findExistingForCandidate,
+		detectExpediaConfirmationMatchFields,
+		candidateToNormalized,
+	},
 };
