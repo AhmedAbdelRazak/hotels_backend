@@ -1,6 +1,5 @@
 const Rooms = require("../models/rooms");
 const mongoose = require("mongoose");
-const fetch = require("node-fetch");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
@@ -485,27 +484,6 @@ exports.listOfRoomsSummary = async (req, res) => {
 	}
 };
 
-exports.hotelRunnerRoomList = async (req, res) => {
-	const token = process.env.HOTEL_RUNNER_TOKEN;
-	const hrId = process.env.HR_ID;
-
-	const url = `https://app.hotelrunner.com/api/v2/apps/rooms?token=${token}&hr_id=${hrId}`;
-
-	try {
-		const response = await fetch(url);
-		const data = await response.json();
-
-		if (response.ok) {
-			res.json(data.rooms);
-		} else {
-			throw new Error(`HTTP error! status: ${response.status}`);
-		}
-	} catch (error) {
-		console.error("Error fetching room list:", error);
-		res.status(500).json({ error: "Error fetching room list" });
-	}
-};
-
 exports.getDistinctRoomTypes = async (req, res) => {
 	try {
 		const distinctRoomTypes = await Rooms.distinct("room_type");
@@ -537,37 +515,6 @@ exports.getDistinctRoomTypesFromReservations = async (req, res) => {
 		res
 			.status(500)
 			.json({ error: "Error fetching distinct room types from reservations" });
-	}
-};
-
-exports.getDistinctHotelRunnerRooms = async (req, res) => {
-	const token = process.env.HOTEL_RUNNER_TOKEN;
-	const hrId = process.env.HR_ID;
-
-	const url = `https://app.hotelrunner.com/api/v2/apps/rooms?token=${token}&hr_id=${hrId}`;
-
-	try {
-		const response = await fetch(url);
-		const data = await response.json();
-
-		if (response.ok && data.rooms) {
-			const roomTypesAndCodes = data.rooms.map((room) => ({
-				roomType: room.name,
-				roomCode: room.rate_code,
-			}));
-
-			// Remove duplicates if any
-			const uniqueRoomTypesAndCodes = Array.from(
-				new Set(roomTypesAndCodes.map(JSON.stringify))
-			).map(JSON.parse);
-
-			res.json(uniqueRoomTypesAndCodes);
-		} else {
-			throw new Error(`HTTP error! status: ${response.status}`);
-		}
-	} catch (error) {
-		console.error("Error fetching room types and codes:", error);
-		res.status(500).json({ error: "Error fetching room types and codes" });
 	}
 };
 
