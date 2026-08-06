@@ -198,7 +198,14 @@ app.use((err, _req, res, next) => {
 });
 
 const port = process.env.PORT || 8080;
-server.listen(port, () => console.log(`Server is running on port ${port}`));
+// The public edge is Nginx. Loopback is the secure default so API callbacks,
+// authentication, TLS, and request logging policy cannot be bypassed through
+// the raw Node port. Set BIND_HOST explicitly only for a controlled topology
+// (for example, a container network with its own firewall boundary).
+const bindHost = String(process.env.BIND_HOST || "127.0.0.1").trim() || "127.0.0.1";
+server.listen(port, bindHost, () =>
+	console.log(`Server is running on ${bindHost}:${port}`)
+);
 
 /* ===== room-scoped relays + DB watcher for late-joiners ===== */
 const SupportCase = require("./models/supportcase");
