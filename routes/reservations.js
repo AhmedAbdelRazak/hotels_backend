@@ -142,7 +142,7 @@ router.post(
 
 router.get(
 	"/reservations/single-reservation/:reservationNumber/:hotelId/:belongsTo",
-	optionalSignin,
+	requireSignin,
 	singleReservation
 );
 

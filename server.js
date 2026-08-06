@@ -26,17 +26,20 @@ const {
 const {
 	ensureInboundDedupeIndex,
 } = require("./services/otaInboundDedupeIndex");
+const {
+	hotelRunnerCallbackPreflight,
+} = require("./controllers/hotelrunner");
+const {
+	sanitizeRequestUrlForLogs,
+} = require("./services/hotelrunnerLogSafety");
 
 const app = express();
 const server = http.createServer(app);
 
-// The SendGrid destination uses a query credential because Inbound Parse cannot
-// attach a custom header. Never let that credential reach PM2 access logs.
+// Some external callbacks authenticate through query parameters. Never let
+// those credentials reach PM2 access logs.
 morgan.token("url", (req) =>
-	String(req.originalUrl || req.url || "").replace(
-		/([?&](?:token|secret)=)[^&\s]*/gi,
-		"$1[REDACTED]"
-	)
+	sanitizeRequestUrlForLogs(req.originalUrl || req.url || "")
 );
 
 const splitEnvList = (value = "") =>
@@ -142,6 +145,10 @@ app.use(
 	/^\/api\/admin\/reservations\/[^/]+\/guest-card\/email\/[^/]+\/?$/,
 	guestCardJsonParser
 );
+// HotelRunner authenticates with callback query credentials and sends a small
+// form field. Reject unauthenticated or non-form bodies before the legacy
+// 50 MB JSON parser used by unrelated PMS upload endpoints.
+app.use("/api/hotelrunner/callback", hotelRunnerCallbackPreflight);
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (_req, res) => res.send("Hello From PMS API"));

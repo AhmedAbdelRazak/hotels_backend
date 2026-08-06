@@ -42,6 +42,7 @@ const {
 	getManualOtaHotelAssignmentReason,
 	hasAmbiguousMultiRoomEvidence,
 	isAuthoritativeSourceUpgrade,
+	lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi,
 	isStaleOtaLifecycleEvent,
 	isOtaInboundTotalOutlier,
 	isPlausibleOtaGuestName,
@@ -6928,6 +6929,256 @@ test("source authority distinguishes direct OTA confirmations from HotelRunner c
 	assert.equal(isAuthoritativeSourceUpgrade(3, 1), true);
 	assert.equal(isAuthoritativeSourceUpgrade(3, 3), false);
 	assert.equal(isAuthoritativeSourceUpgrade(4, 3), true);
+});
+
+test("lower-authority relay lifecycle events cannot overwrite a direct HotelRunner API projection", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	let mutationCalls = 0;
+	const existing = makeCancellationOverrideExisting("confirmed", {
+		supplierData: {
+			otaAutomationPipeline: "hotelrunner-background-worker",
+			otaProvider: "booking",
+			otaSourceAuthority: 4,
+			otaLastSourceReceivedAt: "2026-08-06T12:00:00.000Z",
+			hotelRunner: {
+				transport: "hotelrunner_api",
+				reservationId: "hr-direct-authority-1",
+			},
+		},
+	});
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return [existing];
+		},
+	});
+	Reservations.updateOne = async () => {
+		mutationCalls += 1;
+		throw new Error("lower-authority relay must not mutate the reservation");
+	};
+
+	try {
+		for (const lifecycle of [
+			{
+				intent: "reservation_status",
+				eventType: "cancelled",
+				statusToApply: "cancelled",
+			},
+			{
+				intent: "reservation_update",
+				eventType: "modified",
+				statusToApply: "",
+			},
+		]) {
+			const normalized = makeTrustedInboundCancellation({
+				...lifecycle,
+				source: {
+					from: '"HotelRunner" <noreply@hotelrunner.com>',
+					subject: "HotelRunner relayed lifecycle update",
+					receivedAt: "2026-08-06T12:05:00.000Z",
+					timestampMethod: "rfc2822_date_header",
+				},
+			});
+			assert.equal(
+				lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
+					normalized,
+					existing
+				),
+				true
+			);
+			assert.deepEqual(
+				buildExistingReservationUpdateSet({ normalized, existing }),
+				{}
+			);
+			const result = await reconcileOtaReservation(normalized);
+			assert.equal(result.status, "ignored");
+			assert.equal(result.actionTaken, "skipped");
+			assert.equal(
+				result.skipReason,
+				"lower_authority_ota_lifecycle_after_hotelrunner_api"
+			);
+		}
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+	}
+	assert.equal(mutationCalls, 0);
+});
+
+test("HotelRunner-managed hotel IDs disable only their alternate OTA inbound mutations", async () => {
+	const originalToken = process.env.HOTELRUNNER_API_TOKEN;
+	const originalHrId = process.env.HOTELRUNNER_API_HR_ID;
+	const originalSupported = process.env.HOTELRUNNER_SUPPORTED_HOTELIDS;
+	const originalProjection = process.env.HOTELRUNNER_PROJECTION_ENABLED;
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalReservationCreate = Reservations.create;
+	const originalHotelFind = HotelDetails.find;
+	const originalHotelFindById = HotelDetails.findById;
+	const managedHotelId = "64b0000000000000000000a1";
+	const ordinaryHotelId = "64b0000000000000000000b1";
+	let existing = makeCancellationOverrideExisting("confirmed", {
+		hotelId: managedHotelId,
+	});
+	let writes = 0;
+
+	process.env.HOTELRUNNER_API_TOKEN = "synthetic-hotelrunner-token";
+	process.env.HOTELRUNNER_API_HR_ID = "synthetic-hotelrunner-property";
+	process.env.HOTELRUNNER_SUPPORTED_HOTELIDS = ` ${managedHotelId} `;
+	process.env.HOTELRUNNER_PROJECTION_ENABLED = "true";
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return existing ? [existing] : [];
+		},
+	});
+	Reservations.updateOne = async () => {
+		writes += 1;
+		return { matchedCount: 1 };
+	};
+	Reservations.create = async () => {
+		writes += 1;
+		throw new Error("a HotelRunner-managed hotel must not create an OTA review");
+	};
+	HotelDetails.findById = () => {
+		throw new Error("an existing managed reservation must stop before hotel lookup");
+	};
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [
+				{
+					_id: managedHotelId,
+					hotelName: "Zad Ajyad",
+					belongsTo: "64b0000000000000000000c1",
+					activateHotel: true,
+					xHotelProActive: true,
+					currency: "SAR",
+					roomCountDetails: HOTEL_ROOMS,
+				},
+			];
+		},
+	});
+
+	try {
+		const managedLifecycle = await reconcileOtaReservation(
+			makeTrustedInboundCancellation()
+		);
+		assert.equal(managedLifecycle.status, "ignored");
+		assert.equal(managedLifecycle.actionTaken, "skipped");
+		assert.equal(
+			managedLifecycle.skipReason,
+			"hotelrunner_managed_hotel_ota_email_disabled"
+		);
+		assert.equal(managedLifecycle.hotelId, managedHotelId);
+		assert.equal(writes, 0);
+
+		existing = null;
+		HotelDetails.findById = originalHotelFindById;
+		const managedCreation = await reconcileOtaReservation({
+			inboundEmailId: "managed-hotel-new-email",
+			provider: "booking",
+			providerLabel: "Booking.com",
+			bookingSource: "Booking.com",
+			confirmationNumber: "MANAGED-NEW-1001",
+			reservationId: "MANAGED-NEW-1001",
+			intent: "new_reservation",
+			eventType: "new",
+			guestName: "Managed Hotel Guest",
+			hotelName: "Zad Ajyad",
+			roomName: "Double Room",
+			checkinDate: "2026-08-10",
+			checkoutDate: "2026-08-11",
+			amount: 100,
+			totalAmountSar: 100,
+			currency: "SAR",
+			roomCount: 1,
+			totalGuests: 2,
+			adults: 2,
+			children: 0,
+			sourceSenderTrusted: true,
+			sourceSenderAuthenticated: true,
+			sourcePresence: {
+				confirmationNumber: true,
+				guestName: true,
+				hotelName: true,
+				roomName: true,
+				checkinDate: true,
+				checkoutDate: true,
+				amount: true,
+				roomCount: true,
+				totalGuests: true,
+			},
+			source: {
+				from: "Booking.com <noreply@booking.com>",
+				subject: "New reservation for Zad Ajyad",
+				messageId: "managed-hotel-new-email-message",
+				receivedAt: "2026-08-06T13:00:00.000Z",
+				timestampMethod: "rfc2822_date_header",
+			},
+		});
+		assert.equal(managedCreation.status, "ignored");
+		assert.equal(
+			managedCreation.skipReason,
+			"hotelrunner_managed_hotel_ota_email_disabled"
+		);
+		assert.equal(managedCreation.hotelId, managedHotelId);
+		assert.equal(writes, 0);
+
+		existing = makeCancellationOverrideExisting("confirmed", {
+			hotelId: ordinaryHotelId,
+		});
+		HotelDetails.findById = () => {
+			throw new Error("ordinary lifecycle update should not need hotel lookup");
+		};
+		const ordinaryLifecycle = await reconcileOtaReservation(
+			makeTrustedInboundCancellation({
+				inboundEmailId: "ordinary-hotel-cancellation",
+				source: {
+					from: "Booking.com <noreply@booking.com>",
+					subject: "Reservation cancelled",
+					messageId: "ordinary-hotel-cancellation-message",
+					receivedAt: "2026-08-04T11:00:01.000Z",
+					timestampMethod: "rfc2822_date_header",
+				},
+			})
+		);
+		assert.equal(ordinaryLifecycle.status, "cancelled");
+		assert.equal(writes, 1);
+	} finally {
+		if (originalToken === undefined) {
+			delete process.env.HOTELRUNNER_API_TOKEN;
+		} else {
+			process.env.HOTELRUNNER_API_TOKEN = originalToken;
+		}
+		if (originalHrId === undefined) {
+			delete process.env.HOTELRUNNER_API_HR_ID;
+		} else {
+			process.env.HOTELRUNNER_API_HR_ID = originalHrId;
+		}
+		if (originalSupported === undefined) {
+			delete process.env.HOTELRUNNER_SUPPORTED_HOTELIDS;
+		} else {
+			process.env.HOTELRUNNER_SUPPORTED_HOTELIDS = originalSupported;
+		}
+		if (originalProjection === undefined) {
+			delete process.env.HOTELRUNNER_PROJECTION_ENABLED;
+		} else {
+			process.env.HOTELRUNNER_PROJECTION_ENABLED = originalProjection;
+		}
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		Reservations.create = originalReservationCreate;
+		HotelDetails.find = originalHotelFind;
+		HotelDetails.findById = originalHotelFindById;
+	}
 });
 
 test("a bounded authenticated direct-after-relay skew is eligible only with exact source-backed stay and identity evidence", () => {

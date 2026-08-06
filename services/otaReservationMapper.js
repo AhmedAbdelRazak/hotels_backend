@@ -24,6 +24,10 @@ const {
 	buildReservationSnapshotFilter,
 } = require("./otaReviewConcurrency");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
+const {
+	hotelRunnerManagedEmailSkipResult,
+	isHotelRunnerManagedHotelId,
+} = require("./hotelrunnerOtaEmailBoundary");
 
 dayjs.extend(customParseFormat);
 
@@ -7850,6 +7854,32 @@ function isAuthoritativeSourceUpgrade(incomingAuthority, existingAuthority) {
 	return incoming >= 3 && incoming > existing;
 }
 
+function lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
+	normalized = {},
+	existing = {}
+) {
+	const lifecycleMutation = Boolean(
+		normalized.intent === "reservation_update" ||
+		normalized.intent === "reservation_status" ||
+		normalized.eventType === "modified" ||
+		["cancelled", "no_show", "status"].includes(normalized.eventType)
+	);
+	if (!lifecycleMutation) return false;
+	const supplier = existing.supplierData || {};
+	const transport = normalizeComparable(
+		supplier.hotelRunner?.transport || ""
+	).replace(/\s+/g, "_");
+	const pipeline = normalizeComparable(
+		supplier.otaAutomationPipeline || ""
+	).replace(/\s+/g, "_");
+	const directHotelRunnerApplied = Boolean(
+		transport === "hotelrunner_api" ||
+		(Number(supplier.otaSourceAuthority || 0) >= 4 &&
+			pipeline === "hotelrunner_background_worker")
+	);
+	return directHotelRunnerApplied && otaSourceAuthority(normalized) < 4;
+}
+
 const MAX_DIRECT_AFTER_RELAY_SOURCE_SKEW_MS = 15 * 60 * 1000;
 
 function exactSourceBackedStayMatchesExisting(normalized = {}, existing = {}) {
@@ -9369,6 +9399,9 @@ function buildExistingReservationUpdateSet({
 	warnings = [],
 } = {}) {
 	const set = {};
+	if (lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(normalized, existing)) {
+		return set;
+	}
 	const confirmationNumber = normalizeConfirmation(
 		normalized.confirmationNumber || normalized.reservationId
 	);
@@ -11835,6 +11868,19 @@ async function createUnmappedOtaReviewReservation({
 	allowCreate = false,
 	resolvedHotel = null,
 } = {}) {
+	const boundaryHotelId = resolvedHotel?._id || normalized.hotelId || "";
+	if (isHotelRunnerManagedHotelId(boundaryHotelId)) {
+		logReconcile("ignored.hotelrunner_managed_hotel", {
+			confirmationNumber,
+			hotelId: normalizeId(boundaryHotelId),
+			stage: "unmapped_review_create",
+		});
+		return hotelRunnerManagedEmailSkipResult({
+			hotelId: boundaryHotelId,
+			warnings,
+			errors,
+		});
+	}
 	const crossTransportIdentityKey = buildOtaCrossTransportIdentityKey(
 		normalized,
 		confirmationNumber
@@ -12307,6 +12353,21 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				crossTransportIdentityKey
 		  )
 		: [];
+	if (existing && isHotelRunnerManagedHotelId(existing.hotelId)) {
+		logReconcile("ignored.hotelrunner_managed_hotel", {
+			confirmationNumber,
+			hotelId: normalizeId(existing.hotelId),
+			reservationId: String(existing._id || ""),
+			stage: "existing_reservation",
+		});
+		return hotelRunnerManagedEmailSkipResult({
+			hotelId: existing.hotelId,
+			reservation: existing,
+			warnings,
+			errors,
+			matchedReservationBy,
+		});
+	}
 	const authoritativeInboundEmailCancellation = !!(
 		existing &&
 		isAuthoritativeInboundEmailCancellation(normalized, statusToApply)
@@ -12319,6 +12380,34 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		hotelId: existing?.hotelId ? String(existing.hotelId) : "",
 		matchedReservationBy,
 	});
+	if (
+		existing &&
+		(isStatusIntent || isUpdateIntent) &&
+		lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(normalized, existing)
+	) {
+		logReconcile("lifecycle.ignored.lower_authority_after_hotelrunner_api", {
+			confirmationNumber,
+			intent,
+			eventType: normalized.eventType || "",
+			incomingAuthority: otaSourceAuthority(normalized),
+			existingAuthority: Number(
+				existing.supplierData?.otaSourceAuthority || 0
+			),
+		});
+		return {
+			status: "ignored",
+			actionTaken: "skipped",
+			skipReason: "lower_authority_ota_lifecycle_after_hotelrunner_api",
+			automationComment:
+				"A lower-authority OTA email lifecycle event cannot overwrite the direct HotelRunner API projection; no reservation fields were changed.",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
 
 	const mutationOrderingConflict =
 		existing && (isStatusIntent || isUpdateIntent)
@@ -13019,6 +13108,21 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			warnings,
 			errors,
 			allowCreate: true,
+		});
+	}
+	if (isHotelRunnerManagedHotelId(hotelDetails._id)) {
+		logReconcile("ignored.hotelrunner_managed_hotel", {
+			confirmationNumber,
+			hotelId: normalizeId(hotelDetails._id),
+			reservationId: existing?._id ? String(existing._id) : "",
+			stage: "resolved_hotel",
+		});
+		return hotelRunnerManagedEmailSkipResult({
+			hotelId: hotelDetails._id,
+			reservation: existing,
+			warnings,
+			errors,
+			matchedReservationBy,
 		});
 	}
 	if (existing && normalized.authoritativeExistingRefresh === true) {
@@ -14056,6 +14160,7 @@ module.exports = {
 	roomCapacityFromLabels,
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
+	lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi,
 	canUseDirectAfterRelaySourceSkew,
 	directAfterRelayInventoryConflict,
 	directAfterRelayUnmappedReviewGuard,

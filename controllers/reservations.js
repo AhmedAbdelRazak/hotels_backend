@@ -2,7 +2,6 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
 const ObjectId = mongoose.Types.ObjectId;
-const fetch = require("node-fetch");
 const Rooms = require("../models/rooms");
 const HouseKeeping = require("../models/housekeeping");
 const AgentWallet = require("../models/agent_wallet");
@@ -77,6 +76,12 @@ const {
 const {
 	attachAdminReservationRoomDetails,
 } = require("../services/adminReservationRoomDetails");
+const {
+	ADMIN_RESERVATION_LIST_PROJECTION,
+} = require("../services/adminReservationListProjection");
+const {
+	buildSafeLegacyLocalReservationPayload,
+} = require("../services/hotelrunnerLegacyLocalReservation");
 const {
 	canPlatformStaffOverrideReservationInventory,
 } = require("../services/reservationInventoryOverridePolicy");
@@ -5085,75 +5090,6 @@ exports.reservationSearch = async (req, res) => {
 	}
 };
 
-// Normalize room names
-function normalizeRoomName(apiRoomName) {
-	return apiRoomName.split(" - ")[0].trim();
-}
-
-// Mapping function for room type
-function mapRoomType(apiRoomName) {
-	const normalizedRoomName = normalizeRoomName(apiRoomName);
-	const roomTypeMappings = {
-		// Add mappings similar to your previous implementation
-	};
-	return roomTypeMappings[normalizedRoomName] || normalizedRoomName;
-}
-
-// Main mapping function for Hotel Runner response to reservationsSchema
-function mapHotelRunnerResponseToSchema(apiResponse) {
-	const mappedRooms = apiResponse.rooms.map((room) => ({
-		room_type: mapRoomType(room.name),
-		chosenPrice: room.total,
-		count: 1, // Assuming each room object represents one room
-	}));
-
-	return {
-		reservation_id: apiResponse.hr_number,
-		hr_number: apiResponse.hr_number,
-		confirmation_number: apiResponse.provider_number.toString(),
-		pms_number: apiResponse.pms_number,
-		booking_source: apiResponse.channel_display.toLowerCase(),
-		customer_details: {
-			name: `${apiResponse.firstname} ${apiResponse.lastname}`,
-			phone: apiResponse.address.phone,
-			email: apiResponse.address.email,
-			passport: apiResponse.guest_national_id,
-			nationality: apiResponse.country,
-		},
-		state: apiResponse.state,
-		reservation_status: apiResponse.state,
-		total_guests: apiResponse.total_guests,
-		total_rooms: apiResponse.total_rooms,
-		cancel_reason: apiResponse.cancel_reason,
-		booked_at: new Date(apiResponse.completed_at),
-		sub_total: apiResponse.sub_total,
-		extras_total: apiResponse.extras_total,
-		tax_total: apiResponse.tax_total,
-		total_amount: apiResponse.total,
-		currency: apiResponse.currency,
-		checkin_date: new Date(apiResponse.checkin_date),
-		checkout_date: new Date(apiResponse.checkout_date),
-		comment: apiResponse.note,
-		payment: apiResponse.payment,
-		payment_details: apiResponse.payment_details,
-		paid_amount: apiResponse.paid_amount,
-		payments: apiResponse.payments,
-		pickedRoomsType: mappedRooms,
-		days_of_residence: calculateDaysBetweenDates(
-			apiResponse.checkin_date,
-			apiResponse.checkout_date
-		),
-		// Assuming roomId, belongsTo, and hotelId will be set in the main function
-	};
-}
-
-// Helper function for date difference
-function calculateDaysBetweenDates(startDate, endDate) {
-	const start = new Date(startDate);
-	const end = new Date(endDate);
-	return (end - start) / (1000 * 60 * 60 * 24);
-}
-
 exports.getListOfReservations = async (req, res) => {
 	try {
 		const { page, records, filters, hotelId, date } = req.params;
@@ -6006,51 +5942,67 @@ exports.syncReservationRoomTypesByDisplayName = async (req, res) => {
 	}
 };
 
-exports.singleReservation = (req, res) => {
-	const token = process.env.HOTEL_RUNNER_TOKEN;
-	const hrId = process.env.HR_ID;
-	const reservationNumber = req.params.reservationNumber;
-	const hotelId = req.params.hotelId; // Assuming you are passing hotelId as a parameter
-	const belongsTo = req.params.belongsTo; // Assuming you are passing belongsTo as a parameter
+exports.singleReservation = async (req, res) => {
+	setSingleReservationNoStoreHeaders(res);
+	try {
+		const reservationNumber = String(req.params.reservationNumber || "").trim();
+		const hotelId = String(req.params.hotelId || "").trim();
+		const belongsTo = String(req.params.belongsTo || "").trim();
+		if (
+			!reservationNumber ||
+			reservationNumber.length > 200 ||
+			!ObjectId.isValid(hotelId) ||
+			!ObjectId.isValid(belongsTo)
+		) {
+			return res.status(400).json({ error: "Invalid reservation lookup." });
+		}
+		const actor = await resolveReservationVisibilityActor(req);
+		if (!actor) return res.status(401).json({ error: "Authentication required." });
+		if (actor.activeUser === false) {
+			return res.status(403).json({ error: "This account is inactive." });
+		}
+		if (!(await canViewReservationHotel(actor, hotelId))) {
+			return res.status(403).json({ error: "You do not have access to this hotel." });
+		}
 
-	const queryParams = new URLSearchParams({
-		token: token,
-		hr_id: hrId,
-		reservation_number: reservationNumber,
-		// ... other query params
-	}).toString();
-
-	const url = `https://app.hotelrunner.com/api/v2/apps/reservations?${queryParams}`;
-
-	fetch(url)
-		.then((apiResponse) => {
-			if (!apiResponse.ok) {
-				throw new Error(`HTTP error! status: ${apiResponse.status}`);
-			}
-			return apiResponse.json();
-		})
-		.then((data) => {
-			if (!data.reservations || data.reservations.length === 0) {
-				throw new Error("No reservations found");
-			}
-			const reservation = data.reservations[0]; // Assuming we are interested in the first reservation
-
-			const mappedReservation = mapHotelRunnerResponseToSchema(reservation);
-			mappedReservation.belongsTo = belongsTo;
-			mappedReservation.hotelId = hotelId;
-
-			// Create a new PreReservation document
-			return new PreReservation(mappedReservation).save();
-		})
-		.then((newReservation) => {
-			res.json(newReservation); // Send back the newly created PreReservation document
-		})
-		.catch((error) => {
-			console.error("API request error:", error);
-			res
-				.status(500)
-				.json({ error: "Error fetching and processing reservation" });
-		});
+		const query = {
+			hotelId,
+			belongsTo,
+			$or: [
+				{ confirmation_number: reservationNumber },
+				{ pms_number: reservationNumber },
+				{ reservation_id: reservationNumber },
+				{ hr_number: reservationNumber },
+				{ "customer_details.confirmation_number2": reservationNumber },
+				{ "supplierData.suppliedBookingNo": reservationNumber },
+				{ "supplierData.otaConfirmationNumber": reservationNumber },
+				{ "supplierData.platformConfirmationNumber": reservationNumber },
+				{ "supplierData.hotelRunner.reservationId": reservationNumber },
+			],
+		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
+		const matches = await Reservations.find(query)
+			.select(ADMIN_RESERVATION_LIST_PROJECTION)
+			.limit(2)
+			.lean()
+			.exec();
+		if (!matches.length) {
+			return res.status(404).json({ error: "Reservation is not available locally yet." });
+		}
+		if (matches.length > 1) {
+			return res.status(409).json({
+				error: "More than one local reservation matches this identifier.",
+			});
+		}
+		const visibleReservation = sanitizeReservationAuditLogsForViewer(
+			matches[0],
+			actor
+		);
+		return res.json(buildSafeLegacyLocalReservationPayload(visibleReservation));
+	} catch (error) {
+		console.error("Local reservation lookup error:", error);
+		return res.status(500).json({ error: "Unable to read the local reservation." });
+	}
 };
 
 const maskCardNumber = (cardNumber) => {
@@ -6226,6 +6178,7 @@ const setSingleReservationNoStoreHeaders = (res) => {
 
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	Object.assign(exports.__test || (exports.__test = {}), {
+		buildSafeLegacyLocalReservationPayload,
 		buildLegacyClientPaymentPayload,
 		canReadFullLegacyReservation,
 		legacyReservationActorHotelIds,
