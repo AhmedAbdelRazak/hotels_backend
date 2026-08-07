@@ -21,6 +21,21 @@ const hotelRunnerRoomMappingSchema = new mongoose.Schema(
 		// A payload alone cannot tell us whether an inventory code is HotelRunner's
 		// unmatched master fallback. Only the room-list endpoint may set this proof.
 		roomListVerifiedAt: { type: Date, default: null },
+		// Every complete room-list response receives one shared generation. This
+		// makes it possible to distinguish a current verification from an older
+		// mapping that disappeared from HotelRunner's latest complete response.
+		roomListSyncGeneration: { type: String, trim: true, default: "" },
+		roomListLastSeenAt: { type: Date, default: null },
+		roomListRetiredAt: { type: Date, default: null },
+		roomListVerificationState: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			enum: ["unverified", "refreshing", "verified", "conflict", "retired"],
+			default: "unverified",
+		},
+		variantConflict: { type: Boolean, default: false },
+		variantConflictFields: { type: [String], default: [] },
 		localRoomConfigId: { type: ObjectId, default: null },
 		status: {
 			type: String,
@@ -52,6 +67,10 @@ hotelRunnerRoomMappingSchema.index({
 	hotelId: 1,
 	status: 1,
 	invCode: 1,
+});
+hotelRunnerRoomMappingSchema.index({
+	hotelId: 1,
+	roomListSyncGeneration: 1,
 });
 
 module.exports = mongoose.model(

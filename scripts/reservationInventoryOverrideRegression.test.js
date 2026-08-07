@@ -114,6 +114,101 @@ test("admin edits stay unrestricted while OrderTaker edits remain restricted", (
 	);
 });
 
+test("generic reservation updates are scoped to the actor's exact hotel", () => {
+	const hotel = { _id: "hotel-a", belongsTo: "owner-a" };
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{
+				_id: "platform-staff",
+				role: 1000,
+				activeUser: true,
+				hotelIdsWork: ["hotel-a"],
+			},
+			hotel,
+		),
+		true,
+	);
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{ _id: "platform-staff", role: 1000, activeUser: true },
+			hotel,
+		),
+		false,
+	);
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{ _id: "owner-a", role: 2000, activeUser: true },
+			hotel,
+		),
+		true,
+	);
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{
+				_id: "inactive-staff",
+				role: 8000,
+				activeUser: false,
+				hotelIdWork: "hotel-a",
+			},
+			hotel,
+		),
+		false,
+	);
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{ _id: "configured-super-admin", activeUser: true },
+			hotel,
+		),
+		true,
+	);
+	assert.equal(
+		reservationAccess.canUpdateReservationHotelScope(
+			{ _id: "configured-super-admin", activeUser: false },
+			hotel,
+		),
+		false,
+	);
+});
+
+test("generic reservation updates cannot forge HotelRunner or OTA authority markers", () => {
+	const payload = {
+		otaIdentityKey: "booking:forged",
+		otaCrossTransportIdentityKey: "trip:forged",
+		otaPlatformReview: { status: "released" },
+		supplierData: {
+			supplierName: "Booking.com",
+			suppliedBookingNo: "SAFE-123",
+			customReference: "allowed-legacy-field",
+			hotelRunner: { transport: "hotelrunner_api" },
+			hotelRunnerEmailCommercialEvidence: { verified: true },
+			otaAutomationPipeline: "hotelrunner-background-worker",
+			otaSourceAuthority: 4,
+			otaProvider: "booking",
+		},
+		"supplierData.hotelRunner.transport": "hotelrunner_api",
+		"supplierData.otaAutomationPipeline": "hotelrunner-background-worker",
+	};
+
+	reservationAccess.stripServerManagedReservationUpdateFields(payload);
+	const normalized =
+		reservationAccess.normalizeSupplierDataUpdateFields(payload);
+
+	assert.equal(normalized.otaIdentityKey, undefined);
+	assert.equal(normalized.otaCrossTransportIdentityKey, undefined);
+	assert.equal(normalized.otaPlatformReview, undefined);
+	assert.equal(normalized["supplierData.hotelRunner"], undefined);
+	assert.equal(normalized["supplierData.hotelRunner.transport"], undefined);
+	assert.equal(normalized["supplierData.otaAutomationPipeline"], undefined);
+	assert.equal(normalized["supplierData.otaSourceAuthority"], undefined);
+	assert.equal(normalized["supplierData.otaProvider"], undefined);
+	assert.equal(normalized["supplierData.supplierName"], "Booking.com");
+	assert.equal(normalized["supplierData.suppliedBookingNo"], "SAFE-123");
+	assert.equal(
+		normalized["supplierData.customReference"],
+		"allowed-legacy-field",
+	);
+});
+
 const otaAdminManagedReservation = () => ({
 	adminPricingVisibility: {
 		rootOnlyForHotelManagement: true,

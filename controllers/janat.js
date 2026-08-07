@@ -118,6 +118,13 @@ const {
 const {
 	canUseEmployeeReservationInventoryOverride,
 } = require("../services/reservationInventoryOverridePolicy");
+const {
+	hasDirectHotelRunnerProjection,
+} = require("../services/hotelrunnerOtaEmailBoundary");
+const {
+	buildTrustedDirectHotelRunnerCommissionAssignment,
+	stripUntrustedDirectHotelRunnerFinanceFields,
+} = require("../services/hotelrunnerCommissionAssignment");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -3896,6 +3903,20 @@ exports.updateOtaReservationPricing = async (req, res) => {
 				},
 			);
 		}
+		const directHotelRunnerReservation =
+			hasDirectHotelRunnerProjection(reservation);
+		if (
+			directHotelRunnerReservation &&
+			commissionRequest.provided === true &&
+			!isConfiguredSuperAdmin(actor)
+		) {
+			return res.status(403).json({
+				success: false,
+				code: "hotelrunner_platform_commission_superadmin_only",
+				message:
+					"Only the configured super administrator can assign or change HotelRunner platform commission evidence.",
+			});
+		}
 		let normalizedUpdate = await normalizeReservationStayPricing(
 			reservation,
 			updatePayload,
@@ -4022,6 +4043,19 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			now,
 			auditActorId: auditActor._id || null,
 		});
+		if (
+			directHotelRunnerReservation &&
+			commissionRequest.provided === true
+		) {
+			normalizedUpdate =
+				buildTrustedDirectHotelRunnerCommissionAssignment({
+					update: normalizedUpdate,
+					existingReservation: reservation,
+					amount: commissionRequest.amount,
+					actorId: auditActor._id || null,
+					assignedAt: now,
+				});
+		}
 		const set = {
 			...normalizedUpdate,
 			adminPricingVisibility: {
@@ -6857,6 +6891,11 @@ exports.updateReservationDetails = async (req, res) => {
 		const reservation = await Reservations.findById(reservationId).exec();
 		if (!reservation) {
 			return res.status(404).send({ error: "Reservation not found" });
+		}
+		if (hasDirectHotelRunnerProjection(reservation)) {
+			// This public guest-edit endpoint may update guest/payment details, but it
+			// is never an authority for HotelRunner commission or finance evidence.
+			stripUntrustedDirectHotelRunnerFinanceFields(updateData);
 		}
 		delete updateData.booking_source;
 		delete updateData.bookingSource;

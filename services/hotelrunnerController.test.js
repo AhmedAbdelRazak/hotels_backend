@@ -10,6 +10,8 @@ const {
 	callbackCredentialsMatch,
 	createHandleHotelRunnerCallback,
 	hotelRunnerCallbackPreflight,
+	hotelRunnerAdminStatus,
+	listHotelRunnerRoomMappings,
 	parseCallbackEnvelope,
 	parseHotelRunnerCallbackForm,
 	requireHotelRunnerCallbackAuth,
@@ -18,13 +20,22 @@ const {
 } = require("../controllers/hotelrunner");
 const HotelDetails = require("../models/hotel_details");
 const HotelRunnerEvent = require("../models/hotelrunner_event");
+const HotelRunnerReservation = require("../models/hotelrunner_reservation");
 const HotelRunnerRoomMapping = require("../models/hotelrunner_room_mapping");
+const HotelRunnerSyncState = require("../models/hotelrunner_sync_state");
 
 const CONFIG_ENV_KEYS = [
 	"HOTELRUNNER_API_TOKEN",
 	"HOTELRUNNER_API_HR_ID",
 	"HOTELRUNNER_SUPPORTED_HOTELIDS",
 	"HOTELRUNNER_CALLBACK_BODY_LIMIT_BYTES",
+	"HOTELRUNNER_PULL_ENABLED",
+	"HOTELRUNNER_ROOM_LIST_SYNC_ENABLED",
+	"HOTELRUNNER_PROJECTION_ENABLED",
+	"HOTELRUNNER_PROJECTION_NOT_BEFORE",
+	"HOTELRUNNER_CONFIRM_DELIVERY_ENABLED",
+	"HOTELRUNNER_ROOM_LIST_INTERVAL_HOURS",
+	"SUPER_ADMIN_ID",
 ];
 
 async function withSyntheticConfig(callback) {
@@ -35,6 +46,13 @@ async function withSyntheticConfig(callback) {
 	process.env.HOTELRUNNER_API_HR_ID = "synthetic-hr-id";
 	process.env.HOTELRUNNER_SUPPORTED_HOTELIDS = "64b000000000000000000001";
 	process.env.HOTELRUNNER_CALLBACK_BODY_LIMIT_BYTES = "65536";
+	process.env.HOTELRUNNER_PULL_ENABLED = "false";
+	process.env.HOTELRUNNER_ROOM_LIST_SYNC_ENABLED = "false";
+	process.env.HOTELRUNNER_PROJECTION_ENABLED = "false";
+	delete process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE;
+	process.env.HOTELRUNNER_CONFIRM_DELIVERY_ENABLED = "false";
+	process.env.HOTELRUNNER_ROOM_LIST_INTERVAL_HOURS = "24";
+	process.env.SUPER_ADMIN_ID = "64b000000000000000000002";
 	try {
 		return await callback();
 	} finally {
@@ -137,7 +155,7 @@ function postToLocalServer(server, { contentType, body }) {
 
 test("callback credential comparison is exact, fail-closed, and rejects multi-value queries", () => {
 	const config = {
-		configured: true,
+		callbackConfigured: true,
 		token: "token-with-case-A",
 		hrId: "hr-id-001",
 	};
@@ -162,7 +180,7 @@ test("callback credential comparison is exact, fail-closed, and rejects multi-va
 	assert.equal(
 		callbackCredentialsMatch(
 			{ token: "token-with-case-A", hr_id: "hr-id-001" },
-			{ ...config, configured: false }
+			{ ...config, callbackConfigured: false }
 		),
 		false
 	);
@@ -399,6 +417,126 @@ test("an unconfigured callback returns retryable unavailability without revealin
 	});
 });
 
+test("worker-only configuration errors do not make an authentic callback unavailable", async () => {
+	await withSyntheticConfig(async () => {
+		process.env.HOTELRUNNER_PROJECTION_ENABLED = "tru";
+		const response = responseRecorder();
+		let called = false;
+		requireHotelRunnerCallbackAuth(
+			requestFor({
+				query: {
+					token: "synthetic-token-not-a-real-secret",
+					hr_id: "synthetic-hr-id",
+				},
+			}),
+			response,
+			() => {
+				called = true;
+			},
+		);
+		assert.equal(called, true);
+		assert.equal(response.body, undefined);
+	});
+});
+
+test("admin status counts only cutoff-eligible push events and archives every complement", async () => {
+	await withSyntheticConfig(async () => {
+		const cutoff = new Date("2026-08-06T12:00:00.000Z");
+		process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE = cutoff.toISOString();
+		const hotelId = "64b000000000000000000001";
+		const ownerId = "64b000000000000000000002";
+		const originals = {
+			hotelFindOne: HotelDetails.findOne,
+			eventAggregate: HotelRunnerEvent.aggregate,
+			eventFindOne: HotelRunnerEvent.findOne,
+			eventCountDocuments: HotelRunnerEvent.countDocuments,
+			reservationAggregate: HotelRunnerReservation.aggregate,
+			syncStateFindOne: HotelRunnerSyncState.findOne,
+		};
+		const query = (value) => ({
+			sort() {
+				return this;
+			},
+			select() {
+				return this;
+			},
+			lean() {
+				return this;
+			},
+			exec() {
+				return Promise.resolve(value);
+			},
+			then(resolve, reject) {
+				return Promise.resolve(value).then(resolve, reject);
+			},
+		});
+		let eligibleMatch = null;
+		let noneligibleMatch = null;
+		const eventSelections = [];
+		HotelDetails.findOne = () =>
+			query({
+				_id: hotelId,
+				belongsTo: ownerId,
+				activateHotel: true,
+				xHotelProActive: true,
+				roomCountDetails: [],
+			});
+		HotelRunnerEvent.aggregate = (pipeline) => {
+			eligibleMatch = pipeline[0].$match;
+			return Promise.resolve([{ _id: "pending", count: 2 }]);
+		};
+		HotelRunnerReservation.aggregate = () => Promise.resolve([]);
+		HotelRunnerEvent.findOne = () => {
+			const eventQuery = query(null);
+			eventQuery.select = (fields) => {
+				eventSelections.push(fields);
+				return eventQuery;
+			};
+			return eventQuery;
+		};
+		HotelRunnerEvent.countDocuments = (filter) => {
+			noneligibleMatch = filter;
+			return Promise.resolve(5);
+		};
+		HotelRunnerSyncState.findOne = () => query(null);
+		try {
+			const response = responseRecorder();
+			await hotelRunnerAdminStatus(
+				{ profile: { _id: ownerId, activeUser: true } },
+				response
+			);
+			assert.equal(response.statusCode, 200);
+			assert.equal(eligibleMatch.source, "push");
+			assert.equal(eligibleMatch.receivedAt.$gte.toISOString(), cutoff.toISOString());
+			assert.equal(
+				eligibleMatch.sourceUpdatedAt.$gte.toISOString(),
+				cutoff.toISOString()
+			);
+			assert.equal(String(noneligibleMatch.hotelId), hotelId);
+			assert.deepEqual(noneligibleMatch.$nor, [
+				{
+					source: "push",
+					receivedAt: { $gte: cutoff },
+					sourceUpdatedAt: { $gte: cutoff },
+				},
+			]);
+			assert.equal(response.body.queue.pending, 2);
+			assert.equal(response.body.archive.preActivationEventCount, 5);
+			assert.deepEqual(eventSelections, [
+				"receivedAt status source integrityConflict integrityConflictCount",
+				"processedAt status source integrityConflict integrityConflictCount",
+			]);
+		} finally {
+			HotelDetails.findOne = originals.hotelFindOne;
+			HotelRunnerEvent.aggregate = originals.eventAggregate;
+			HotelRunnerEvent.findOne = originals.eventFindOne;
+			HotelRunnerEvent.countDocuments = originals.eventCountDocuments;
+			HotelRunnerReservation.aggregate = originals.reservationAggregate;
+			HotelRunnerSyncState.findOne = originals.syncStateFindOne;
+		}
+	});
+});
+
 test("admin mapping activation requires room-list proof and repeats that proof in the CAS", async () => {
 	await withSyntheticConfig(async () => {
 		const hotelId = "64b000000000000000000001";
@@ -410,6 +548,7 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 			mappingFindOne: HotelRunnerRoomMapping.findOne,
 			mappingFindOneAndUpdate: HotelRunnerRoomMapping.findOneAndUpdate,
 			eventUpdateMany: HotelRunnerEvent.updateMany,
+			syncStateFindOne: HotelRunnerSyncState.findOne,
 		};
 		const query = (value) => ({
 			select() {
@@ -433,7 +572,16 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 			],
 		};
 		HotelDetails.findOne = () => query(hotel);
-		let mappingRecord = { isMaster: false, roomListVerifiedAt: null };
+		let activeGeneration = "";
+		HotelRunnerSyncState.findOne = () =>
+			query({ activeRoomListSyncGeneration: activeGeneration });
+		let mappingRecord = {
+			isMaster: false,
+			variantConflict: false,
+			roomListVerifiedAt: null,
+			roomListSyncGeneration: "",
+			roomListVerificationState: "unverified",
+		};
 		HotelRunnerRoomMapping.findOne = () => query(mappingRecord);
 		let updateFilter = null;
 		HotelRunnerRoomMapping.findOneAndUpdate = (filter) => {
@@ -454,6 +602,30 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 			body: { localRoomTypeId, enabled: true, expectedVersion: 3 },
 		});
 		try {
+			process.env.SUPER_ADMIN_ID = "64b000000000000000000099";
+			const ordinaryOwnerResponse = responseRecorder();
+			await updateHotelRunnerRoomMapping(request(), ordinaryOwnerResponse);
+			assert.equal(ordinaryOwnerResponse.statusCode, 403);
+			assert.equal(updateFilter, null);
+			process.env.SUPER_ADMIN_ID = ownerId;
+
+			process.env.HOTELRUNNER_PROJECTION_ENABLED = "true";
+			process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE =
+				"2026-08-06T23:45:12Z";
+			const activeProjectionResponse = responseRecorder();
+			await updateHotelRunnerRoomMapping(
+				request(),
+				activeProjectionResponse
+			);
+			assert.equal(activeProjectionResponse.statusCode, 409);
+			assert.equal(
+				activeProjectionResponse.body.code,
+				"hotelrunner_mapping_projection_active"
+			);
+			assert.equal(updateFilter, null);
+			process.env.HOTELRUNNER_PROJECTION_ENABLED = "false";
+			delete process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE;
+
 			const unverifiedResponse = responseRecorder();
 			await updateHotelRunnerRoomMapping(request(), unverifiedResponse);
 			assert.equal(unverifiedResponse.statusCode, 422);
@@ -462,12 +634,55 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 
 			mappingRecord = {
 				isMaster: false,
-				roomListVerifiedAt: new Date("2026-08-06T10:00:00.000Z"),
+				variantConflict: false,
+				roomListVerifiedAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+				roomListSyncGeneration: "stale-room-list-generation",
+				roomListVerificationState: "verified",
 			};
+			activeGeneration = "stale-room-list-generation";
+			const staleResponse = responseRecorder();
+			await updateHotelRunnerRoomMapping(request(), staleResponse);
+			assert.equal(staleResponse.statusCode, 422);
+			assert.equal(updateFilter, null);
+
+			mappingRecord = {
+				isMaster: false,
+				variantConflict: true,
+				roomListVerifiedAt: new Date(),
+				roomListSyncGeneration: "conflicting-room-list-generation",
+				roomListVerificationState: "verified",
+			};
+			activeGeneration = "conflicting-room-list-generation";
+			const conflictResponse = responseRecorder();
+			await updateHotelRunnerRoomMapping(request(), conflictResponse);
+			assert.equal(conflictResponse.statusCode, 422);
+			assert.equal(updateFilter, null);
+
+			mappingRecord = {
+				isMaster: false,
+				variantConflict: false,
+				roomListVerifiedAt: new Date(),
+				roomListSyncGeneration: "room-list-generation-1",
+				roomListVerificationState: "verified",
+			};
+			activeGeneration = "different-published-generation";
+			const unpublishedResponse = responseRecorder();
+			await updateHotelRunnerRoomMapping(request(), unpublishedResponse);
+			assert.equal(unpublishedResponse.statusCode, 422);
+			assert.equal(updateFilter, null);
+
+			activeGeneration = "room-list-generation-1";
 			const verifiedResponse = responseRecorder();
 			await updateHotelRunnerRoomMapping(request(), verifiedResponse);
 			assert.equal(verifiedResponse.statusCode, 200);
-			assert.deepEqual(updateFilter.roomListVerifiedAt, { $type: "date" });
+			assert.ok(updateFilter.roomListVerifiedAt.$gte instanceof Date);
+			assert.ok(updateFilter.roomListVerifiedAt.$lte instanceof Date);
+			assert.equal(
+				updateFilter.roomListSyncGeneration,
+				"room-list-generation-1"
+			);
+			assert.equal(updateFilter.roomListVerificationState, "verified");
+			assert.deepEqual(updateFilter.variantConflict, { $ne: true });
 			assert.deepEqual(updateFilter.isMaster, { $ne: true });
 		} finally {
 			HotelDetails.findOne = originals.hotelFindOne;
@@ -475,6 +690,101 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 			HotelRunnerRoomMapping.findOneAndUpdate =
 				originals.mappingFindOneAndUpdate;
 			HotelRunnerEvent.updateMany = originals.eventUpdateMany;
+			HotelRunnerSyncState.findOne = originals.syncStateFindOne;
+		}
+	});
+});
+
+test("admin mapping list marks only fresh conflict-free generation proof verified", async () => {
+	await withSyntheticConfig(async () => {
+		const hotelId = "64b000000000000000000001";
+		const ownerId = "64b000000000000000000002";
+		const originals = {
+			hotelFindOne: HotelDetails.findOne,
+			mappingFind: HotelRunnerRoomMapping.find,
+			syncStateFindOne: HotelRunnerSyncState.findOne,
+		};
+		const query = (value) => ({
+			select() {
+				return this;
+			},
+			sort() {
+				return this;
+			},
+			lean() {
+				return this;
+			},
+			exec: async () => value,
+			then(resolve, reject) {
+				return Promise.resolve(value).then(resolve, reject);
+			},
+		});
+		const now = Date.now();
+		HotelDetails.findOne = () =>
+			query({
+				_id: hotelId,
+				belongsTo: ownerId,
+				activateHotel: true,
+				xHotelProActive: true,
+				roomCountDetails: [],
+			});
+		HotelRunnerSyncState.findOne = () =>
+			query({ activeRoomListSyncGeneration: "generation-fresh" });
+		HotelRunnerRoomMapping.find = () =>
+			query([
+				{
+					_id: "64b000000000000000000011",
+					invCode: "FRESH",
+					status: "pending",
+					roomListVerifiedAt: new Date(now - 60 * 60 * 1000),
+					roomListSyncGeneration: "generation-fresh",
+					roomListVerificationState: "verified",
+					variantConflict: false,
+				},
+				{
+					_id: "64b000000000000000000012",
+					invCode: "STALE",
+					status: "pending",
+					roomListVerifiedAt: new Date(now - 8 * 24 * 60 * 60 * 1000),
+					roomListSyncGeneration: "generation-stale",
+					roomListVerificationState: "verified",
+					variantConflict: false,
+				},
+				{
+					_id: "64b000000000000000000013",
+					invCode: "CONFLICT",
+					status: "conflict",
+					roomListVerifiedAt: new Date(now - 60 * 60 * 1000),
+					roomListSyncGeneration: "generation-conflict",
+					roomListVerificationState: "verified",
+					variantConflict: true,
+				},
+				{
+					_id: "64b000000000000000000014",
+					invCode: "UNPUBLISHED",
+					status: "pending",
+					roomListVerifiedAt: new Date(now - 60 * 60 * 1000),
+					roomListSyncGeneration: "generation-unpublished",
+					roomListVerificationState: "verified",
+					variantConflict: false,
+				},
+			]);
+		try {
+			const response = responseRecorder();
+			await listHotelRunnerRoomMappings(
+				{ profile: { _id: ownerId, activeUser: true } },
+				response
+			);
+			assert.equal(response.statusCode, 200);
+			assert.equal(response.body.mappings[0].roomListVerified, true);
+			assert.equal(response.body.mappings[1].roomListVerified, false);
+			assert.equal(response.body.mappings[2].roomListVerified, false);
+			assert.equal(response.body.mappings[2].variantConflict, true);
+			assert.equal(response.body.mappings[3].roomListVerified, false);
+		} finally {
+			HotelDetails.findOne = originals.hotelFindOne;
+			HotelRunnerRoomMapping.find = originals.mappingFind;
+			HotelRunnerSyncState.findOne = originals.syncStateFindOne;
 		}
 	});
 });

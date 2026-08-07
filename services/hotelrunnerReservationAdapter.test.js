@@ -14,6 +14,7 @@ const {
 	findLinkedReservation,
 	hasFinanceOrSettlementActivity,
 	hasHousingOrTerminalProtection,
+	hotelRunnerCommercialProvider,
 	isLocalTerminal,
 	localRootPriceCents,
 	pmsWatermarkComparison,
@@ -25,6 +26,7 @@ const {
 const { normalizeHotelRunnerReservation } = require("./hotelrunnerPayload");
 const { normalizedFromStoredEvent } = require("./hotelrunnerWorker");
 const {
+	hotelRunnerEmailCommercialEvidenceHash,
 	validateReservationOtaIdentityConsistency,
 } = require("./otaReservationMapper");
 
@@ -54,11 +56,21 @@ const rawRoom = ({
 	child_ages: Array.from({ length: children }, () => 6),
 	price: String(prices.reduce((sum, value) => sum + Number(value), 0)),
 	total: String(prices.reduce((sum, value) => sum + Number(value), 0)),
+	room_base_price: String(prices.reduce((sum, value) => sum + Number(value), 0)),
+	room_sub_total: String(prices.reduce((sum, value) => sum + Number(value), 0)),
+	extras_total: "0",
+	fixed_adjustments_total: "0",
+	included_taxes_total: "0",
+	excluded_fees_and_taxes_total: "0",
+	cancelation_refund_total: "0",
+	cancelation_penalty_total: "0",
+	promotions_total: "0",
 	daily_prices: prices.map((price, index) => ({
 		date: `2026-08-${10 + index}`,
 		price,
 		original_price: price,
 		discount: "0",
+		version: "v2",
 	})),
 });
 
@@ -88,6 +100,8 @@ const normalizedMultiRoom = (overrides = {}) => {
 		total_rooms: 2,
 		sub_total: "100.01",
 		extras_total: "0",
+		adjustments_total: "0",
+		item_total: "100.01",
 		tax_total: "0",
 		total: "100.01",
 		currency: "SAR",
@@ -181,6 +195,17 @@ function queryResult(getValue) {
 		},
 	};
 	return query;
+}
+
+function syncStateModelFor(generation) {
+	return {
+		findOne() {
+			return queryResult(() => ({
+				activeRoomListSyncGeneration:
+					typeof generation === "function" ? generation() : generation,
+			}));
+		},
+	};
 }
 
 function setDotted(target, path, value) {
@@ -347,12 +372,16 @@ function createInMemoryProjectionSystem() {
 			invCode: "INV-DOUBLE",
 			status: "active",
 			roomListVerifiedAt: new Date("2026-08-06T09:00:00.000Z"),
+			roomListSyncGeneration: "synthetic-generation",
+			roomListVerificationState: "verified",
 			localRoomConfigId: LOCAL_DOUBLE_ID,
 		},
 		{
 			invCode: "INV-TRIPLE",
 			status: "active",
 			roomListVerifiedAt: new Date("2026-08-06T09:00:00.000Z"),
+			roomListSyncGeneration: "synthetic-generation",
+			roomListVerificationState: "verified",
 			localRoomConfigId: LOCAL_TRIPLE_ID,
 		},
 	];
@@ -367,6 +396,7 @@ function createInMemoryProjectionSystem() {
 			return queryResult(() => mappings);
 		},
 	};
+	const SyncStateModel = syncStateModelFor("synthetic-generation");
 
 	return {
 		MirrorModel,
@@ -387,17 +417,68 @@ function createInMemoryProjectionSystem() {
 			MirrorModel,
 			ReservationModel,
 			MappingModel,
+			SyncStateModel,
 			generateConfirmation: async () => "PMS-HR-SYNTHETIC-1",
 			createWithSnapshot: async (document) => {
 				reservations.push(document);
 				return document;
 			},
 			validateInventory: async () => ({ issues: [] }),
+			mappingNow: () => new Date("2026-08-06T12:00:00.000Z"),
 		},
 		get mirror() {
 			return mirror;
 		},
 	};
+}
+
+function attachVerifiedHotelRunnerEmailCommercialEvidence(reservation) {
+	const evidenceWithoutHash = {
+		version: 1,
+		verified: true,
+		source: "authenticated_ota_email",
+		provider: "booking",
+		otaIdentityKey: "booking:booking-101",
+		grossTotalSar: 100.01,
+		payoutTotalSar: 85.01,
+		otaExpenseTotalSar: 15,
+		currency: "SAR",
+		sourceReceivedAt: "2026-08-06T11:15:00.000Z",
+		appliedAt: new Date("2026-08-06T11:16:00.000Z"),
+	};
+	const evidence = {
+		...evidenceWithoutHash,
+		evidenceHash: hotelRunnerEmailCommercialEvidenceHash(evidenceWithoutHash),
+	};
+	const paymentSummary = {
+		sourceCurrency: "SAR",
+		sourceTotalGuestPaymentAmount: 100.01,
+		sourceTotalPayoutAmount: 85.01,
+		totalGuestPaymentAmount: 100.01,
+		totalPayoutAmount: 85.01,
+		currency: "SAR",
+		exchangeRateToSar: 1,
+	};
+	reservation.supplierData.hotelRunnerEmailCommercialEvidence = evidence;
+	reservation.supplierData.otaTotalPayoutSar = 85.01;
+	reservation.supplierData.otaExpenseTotalSar = 15;
+	reservation.supplierData.otaPayoutFallbackReason = "";
+	reservation.supplierData.otaPaymentSummary = paymentSummary;
+	reservation.adminPricing.clientTotal = 100.01;
+	reservation.adminPricing.netAfterExpensesTotal = 85.01;
+	reservation.adminPricing.otaExpenseTotal = 15;
+	reservation.adminPricing.defaultDeductionApplied = false;
+	reservation.adminPricing.payoutFallbackReason = "";
+	reservation.adminPricing.commercialVerified = true;
+	reservation.ota_financial_summary.clientTotal = 100.01;
+	reservation.ota_financial_summary.netAfterExpenses = 85.01;
+	reservation.ota_financial_summary.netAfterOtaExpenses = 85.01;
+	reservation.ota_financial_summary.otaExpenseTotal = 15;
+	reservation.ota_financial_summary.payoutFallbackReason = "";
+	reservation.ota_financial_summary.paymentSummary = paymentSummary;
+	reservation.ota_financial_summary.commercialVerified = true;
+	reservation.ota_financial_summary.show = true;
+	return evidence;
 }
 
 test("cent allocation is deterministic, weighted, and preserves the exact total", () => {
@@ -553,6 +634,42 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 		"SAR"
 	);
 	assert.equal(document.supplierData.hotelRunner.transport, "hotelrunner_api");
+	assert.deepEqual(
+		{
+			subTotal: document.supplierData.hotelRunner.pricing.subTotal,
+			extrasTotal: document.supplierData.hotelRunner.pricing.extrasTotal,
+			adjustmentsTotal:
+				document.supplierData.hotelRunner.pricing.adjustmentsTotal,
+			itemTotal: document.supplierData.hotelRunner.pricing.itemTotal,
+			taxTotal: document.supplierData.hotelRunner.pricing.taxTotal,
+			grandTotal: document.supplierData.hotelRunner.pricing.grandTotal,
+			paidAmount: document.supplierData.hotelRunner.pricing.paidAmount,
+		},
+		{
+			subTotal: 100.01,
+			extrasTotal: 0,
+			adjustmentsTotal: 0,
+			itemTotal: 100.01,
+			taxTotal: 0,
+			grandTotal: 100.01,
+			paidAmount: 100.01,
+		}
+	);
+	assert.equal(
+		document.supplierData.hotelRunner.pricing.hotelNetStatus,
+		"not_provided_by_hotelrunner"
+	);
+	assert.equal(document.supplierData.hotelRunner.pricing.hotelNetPayout, null);
+	assert.equal(document.supplierData.hotelRunner.pricing.otaCommission, null);
+	assert.equal(
+		document.supplierData.hotelRunner.pricing.rooms[0].nightly[0].version,
+		"v2"
+	);
+	assert.equal(
+		document.supplierData.hotelRunner.pricing.reconciliation
+			.roomTotalsMatchGrandTotal,
+		false
+	);
 	assert.equal(document.supplierData.otaSourceAuthority, 4);
 	assert.equal(document.supplierData.otaProvider, "booking");
 	assert.equal(
@@ -568,6 +685,18 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	assert.equal(document.adminPricing.netAfterExpensesTotal, null);
 	assert.equal(document.adminPricing.otaExpenseTotal, null);
 	assert.equal(document.adminPricing.platformMarginTotal, null);
+	assert.equal(
+		document.adminPricing.payoutFallbackReason,
+		"hotelrunner_payout_not_provided"
+	);
+	assert.equal(
+		document.ota_financial_summary.payoutFallbackReason,
+		"hotelrunner_payout_not_provided"
+	);
+	assert.equal(
+		document.supplierData.otaPayoutFallbackReason,
+		"hotelrunner_payout_not_provided"
+	);
 	assert.ok(
 		document.pickedRoomsType.every((room) =>
 			room.pricingByDay.every(
@@ -578,7 +707,11 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 			)
 		)
 	);
-	assert.equal(JSON.stringify(document).includes("reported-payment-1"), false);
+	assert.equal(
+		document.supplierData.hotelRunner.pricing.payments[0].id,
+		"reported-payment-1"
+	);
+	assert.equal(document.supplierData.hotelRunner.pricing.payments[0].amount, 100.01);
 	assert.deepEqual(
 		validateReservationOtaIdentityConsistency(
 			document,
@@ -590,12 +723,81 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	);
 });
 
+test("HotelRunner create surfaces the durable overbooking snapshot as attention data", async () => {
+	const system = createInMemoryProjectionSystem();
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-create-overbooking-attention",
+	});
+	system.dependencies.createWithSnapshot = async (document) => {
+		document.availabilitySnapshot = {
+			overbooked: true,
+			issueCount: 1,
+			rooms: [
+				{
+					room_type: "doubleRooms",
+					displayName: "Double Room",
+					requested: 1,
+					capacity: 1,
+					days: [
+						{
+							date: "2026-08-10",
+							capacity: 1,
+							reservedBefore: 1,
+							requested: 1,
+							availableAfterRaw: -1,
+						},
+					],
+				},
+			],
+		};
+		system.reservations.push(document);
+		return document;
+	};
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "created");
+	assert.equal(result.inventoryIssueCount, 1);
+	assert.deepEqual(result.inventorySummary, {
+		overbooked: true,
+		issueCount: 1,
+		issues: [
+			{
+				code: "inventory_overbook",
+				date: "2026-08-10",
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				capacity: 1,
+				reserved: 1,
+				requested: 1,
+			},
+		],
+	});
+	assert.equal(system.mirror.lastResult.inventoryIssueCount, 1);
+	assert.equal(system.mirror.lastResult.inventorySummary.overbooked, true);
+});
+
 test("automatic creation requires one deterministic identity shared with email ingestion", async () => {
 	for (const overrides of [
 		{
 			message_uid: "missing-all-shared-aliases",
 			provider_number: null,
 			hr_number: null,
+		},
+		{
+			message_uid: "relayed-ota-missing-provider-number",
+			provider_number: null,
+			channel: "bookingcom",
+			channel_display: "Booking.com",
+			source_display: "Booking.com",
 		},
 		{
 			message_uid: "unrecognized-provider-namespace",
@@ -794,9 +996,9 @@ test("concurrent email and HotelRunner creates converge through the unique OTA i
 	const system = createInMemoryProjectionSystem();
 	const normalized = normalizedMultiRoom({
 		message_uid: "adapter-concurrent-cross-transport-create",
-		provider_number: null,
+		provider_number: "BOOKING-CONCURRENT-101",
 	});
-	const sharedAlias = normalized.providerNumber || normalized.hrNumber;
+	const sharedAlias = normalized.providerNumber;
 	let insertedEmailWinner = false;
 	system.dependencies.createWithSnapshot = async (document) => {
 		if (insertedEmailWinner) {
@@ -895,7 +1097,10 @@ test("HotelRunner master fallback room mappings are never projection-safe", asyn
 				{ _id: LOCAL_DOUBLE_ID, roomType: "doubleRooms", activeRoom: true },
 			],
 		},
-		{ MappingModel }
+		{
+			MappingModel,
+			SyncStateModel: syncStateModelFor("published-master-generation"),
+		}
 	);
 	assert.equal(result.ok, false);
 	assert.deepEqual(result.unsafeMasterInvCodes, ["MASTER"]);
@@ -918,6 +1123,9 @@ test("payload-discovered inventory remains held until room-list non-master verif
 		sub_total: "100",
 	});
 	let roomListVerifiedAt = null;
+	let roomListSyncGeneration = "";
+	let roomListVerificationState = "unverified";
+	let activeRoomListSyncGeneration = "";
 	const MappingModel = {
 		findOneAndUpdate() {
 			return queryResult(() => null);
@@ -929,6 +1137,8 @@ test("payload-discovered inventory remains held until room-list non-master verif
 					status: "active",
 					isMaster: false,
 					roomListVerifiedAt,
+					roomListSyncGeneration,
+					roomListVerificationState,
 					localRoomConfigId: LOCAL_DOUBLE_ID,
 				},
 			]);
@@ -940,21 +1150,48 @@ test("payload-discovered inventory remains held until room-list non-master verif
 			{ _id: LOCAL_DOUBLE_ID, roomType: "doubleRooms", activeRoom: true },
 		],
 	};
+	const SyncStateModel = syncStateModelFor(
+		() => activeRoomListSyncGeneration
+	);
 
 	const payloadOnly = await discoverAndResolveRoomMappings(normalized, hotel, {
 		MappingModel,
+		SyncStateModel,
+		mappingNow: () => new Date("2026-08-06T12:00:00.000Z"),
 	});
 	assert.equal(payloadOnly.ok, false);
 	assert.deepEqual(payloadOnly.missingInvCodes, ["INV-UNVERIFIED"]);
 	assert.equal(payloadOnly.resolvedRooms.length, 0);
 
 	roomListVerifiedAt = new Date("2026-08-06T09:30:00.000Z");
+	roomListSyncGeneration = "verified-generation";
+	roomListVerificationState = "verified";
+	activeRoomListSyncGeneration = "different-unpublished-generation";
+	const unpublished = await discoverAndResolveRoomMappings(normalized, hotel, {
+		MappingModel,
+		SyncStateModel,
+		mappingNow: () => new Date("2026-08-06T12:00:00.000Z"),
+	});
+	assert.equal(unpublished.ok, false);
+	assert.deepEqual(unpublished.staleInvCodes, ["INV-UNVERIFIED"]);
+
+	activeRoomListSyncGeneration = "verified-generation";
 	const verified = await discoverAndResolveRoomMappings(normalized, hotel, {
 		MappingModel,
+		SyncStateModel,
+		mappingNow: () => new Date("2026-08-06T12:00:00.000Z"),
 	});
 	assert.equal(verified.ok, true);
 	assert.deepEqual(verified.missingInvCodes, []);
 	assert.equal(verified.resolvedRooms.length, 1);
+
+	const stale = await discoverAndResolveRoomMappings(normalized, hotel, {
+		MappingModel,
+		SyncStateModel,
+		mappingNow: () => new Date("2026-08-10T12:00:00.000Z"),
+	});
+	assert.equal(stale.ok, false);
+	assert.deepEqual(stale.staleInvCodes, ["INV-UNVERIFIED"]);
 });
 
 test("financial activity guard recognizes every local settlement and processor signal", () => {
@@ -1161,6 +1398,101 @@ test("cross-transport linking requires an exact alias, stay, provider, and non-c
 		false,
 		"only a Trip incoming identity may use the verified Trip bridge namespace"
 	);
+	assert.equal(
+		candidateMatchesStrongIdentity(
+			{
+				...candidate,
+				customer_details: { confirmation_number2: "R-101" },
+			},
+			normalizedMultiRoom({ provider_number: null })
+		),
+		false,
+		"HotelRunner hr_number must not masquerade as an OTA confirmation when provider_number is blank"
+	);
+});
+
+test("HotelRunner provider recognition uses explicit aliases without substring guessing", async () => {
+	assert.equal(
+		hotelRunnerCommercialProvider({ channelDisplay: "HotelRunner Booking Engine" }),
+		"hotelrunner"
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({ channel: "HotelRunnerBookingEngine" }),
+		"hotelrunner"
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({ channelDisplay: "Booking.com" }),
+		"booking"
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({ channelDisplay: "Trip.com" }),
+		"trip"
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({ channelDisplay: "Tripadvisor" }),
+		""
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({
+			channelDisplay: "Booking.com",
+			sourceDisplay: "Agoda",
+			channel: "bookingcom",
+		}),
+		"",
+		"contradictory recognized provider namespaces must fail closed"
+	);
+	assert.equal(
+		hotelRunnerCommercialProvider({
+			channelDisplay: "Booking.com",
+			sourceDisplay: "booking",
+			channel: "bookingcom",
+		}),
+		"booking",
+		"equivalent labels in one provider family remain valid"
+	);
+
+	const system = createInMemoryProjectionSystem();
+	const contradictory = normalizedMultiRoom({
+		message_uid: "adapter-contradictory-booking-agoda-provider",
+		channel: "bookingcom",
+		channel_display: "Booking.com",
+		source_display: "Agoda",
+	});
+	const contradictoryResult = await projectHotelRunnerReservation(
+		{
+			normalized: contradictory,
+			event: { payload: contradictory.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(contradictoryResult.status, "quarantined");
+	assert.equal(
+		contradictoryResult.code,
+		"hotelrunner_shared_identity_required"
+	);
+	assert.equal(system.reservations.length, 0);
+
+	const unknownSystem = createInMemoryProjectionSystem();
+	const unknown = normalizedMultiRoom({
+		message_uid: "adapter-unknown-tripadvisor-provider",
+		channel: "tripadvisor",
+		channel_display: "Tripadvisor",
+		source_display: "Tripadvisor",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: unknown,
+			event: { payload: unknown.storedPayload },
+			hotel: unknownSystem.hotel,
+			config: unknownSystem.config,
+		},
+		unknownSystem.dependencies
+	);
+	assert.equal(result.status, "quarantined");
+	assert.equal(result.code, "hotelrunner_shared_identity_required");
+	assert.equal(unknownSystem.reservations.length, 0);
 });
 
 test("first modified and cancellation events may use one unique exact alias without trusting stale stay dates", async () => {
@@ -1245,6 +1577,41 @@ test("relaxed lifecycle identity linking fails closed when the exact alias is no
 		findLinkedReservation(modified, candidates[0].hotelId, { ReservationModel }),
 		(error) => error?.code === "hotelrunner_identity_ambiguous"
 	);
+});
+
+test("alias linking quarantines when the bounded candidate query cannot prove uniqueness", async () => {
+	const candidates = Array.from({ length: 6 }, (_, index) => ({
+		_id: `legacy-overflow-${index}`,
+		hotelId: "64b000000000000000000001",
+		booking_source: index === 0 ? "Booking.com" : "Agoda",
+		checkin_date: "2026-08-10",
+		checkout_date: "2026-08-12",
+		customer_details: { confirmation_number2: "BOOKING-101" },
+		supplierData: {
+			otaProvider: index === 0 ? "booking" : "agoda",
+			otaAutomationPipeline: "ota-email",
+		},
+	}));
+	let requestedLimit = null;
+	const ReservationModel = {
+		findOne: () => queryResult(() => null),
+		find: () => {
+			const query = queryResult(() => candidates);
+			query.limit = (value) => {
+				requestedLimit = value;
+				return query;
+			};
+			return query;
+		},
+	};
+
+	await assert.rejects(
+		findLinkedReservation(normalizedMultiRoom(), candidates[0].hotelId, {
+			ReservationModel,
+		}),
+		(error) => error?.code === "hotelrunner_identity_ambiguous"
+	);
+	assert.equal(requestedLimit, 6);
 });
 
 test("critical ownership ignores transport room IDs but detects local room, date, and count changes", () => {
@@ -1451,6 +1818,338 @@ test("offline projection creates once, updates owned guest counts, preserves loc
 	assert.equal(system.reservations[0].payment_details.captured, false);
 });
 
+test("HotelRunner preserves verified email payout evidence until provider or gross facts change", async () => {
+	const system = createInMemoryProjectionSystem();
+	const first = normalizedMultiRoom();
+	assert.equal(
+		(
+			await projectHotelRunnerReservation(
+				{
+					normalized: first,
+					event: { payload: first.storedPayload },
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			)
+		).status,
+		"created"
+	);
+	const reservation = system.reservations[0];
+	const evidenceWithoutHash = {
+		version: 1,
+		verified: true,
+		source: "authenticated_ota_email",
+		provider: "booking",
+		otaIdentityKey: "booking:booking-101",
+		grossTotalSar: 100.01,
+		payoutTotalSar: 85.01,
+		otaExpenseTotalSar: 15,
+		currency: "SAR",
+		sourceReceivedAt: "2026-08-06T11:15:00.000Z",
+		appliedAt: new Date("2026-08-06T11:16:00.000Z"),
+	};
+	const evidence = {
+		...evidenceWithoutHash,
+		evidenceHash: hotelRunnerEmailCommercialEvidenceHash(evidenceWithoutHash),
+	};
+	const paymentSummary = {
+		sourceCurrency: "SAR",
+		sourceTotalGuestPaymentAmount: 100.01,
+		sourceTotalPayoutAmount: 85.01,
+		totalGuestPaymentAmount: 100.01,
+		totalPayoutAmount: 85.01,
+		currency: "SAR",
+		exchangeRateToSar: 1,
+	};
+	reservation.supplierData.hotelRunnerEmailCommercialEvidence = evidence;
+	reservation.supplierData.otaTotalPayoutSar = 85.01;
+	reservation.supplierData.otaExpenseTotalSar = 15;
+	reservation.supplierData.otaPayoutFallbackReason = "";
+	reservation.supplierData.otaPaymentSummary = paymentSummary;
+	reservation.adminPricing.clientTotal = 100.01;
+	reservation.adminPricing.netAfterExpensesTotal = 85.01;
+	reservation.adminPricing.otaExpenseTotal = 15;
+	reservation.adminPricing.defaultDeductionApplied = false;
+	reservation.adminPricing.payoutFallbackReason = "";
+	reservation.adminPricing.commercialVerified = true;
+	reservation.ota_financial_summary.clientTotal = 100.01;
+	reservation.ota_financial_summary.netAfterExpenses = 85.01;
+	reservation.ota_financial_summary.netAfterOtaExpenses = 85.01;
+	reservation.ota_financial_summary.otaExpenseTotal = 15;
+	reservation.ota_financial_summary.payoutFallbackReason = "";
+	reservation.ota_financial_summary.paymentSummary = paymentSummary;
+	reservation.ota_financial_summary.commercialVerified = true;
+	reservation.ota_financial_summary.show = true;
+
+	const sameCommercial = normalizedMultiRoom({
+		message_uid: "adapter-commercial-preserve",
+		modified: true,
+		updated_at: "2026-08-06T12:00:00.000Z",
+		guest: "Updated Guest",
+	});
+	const preserved = await projectHotelRunnerReservation(
+		{
+			normalized: sameCommercial,
+			event: { payload: sameCommercial.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(preserved.status, "updated");
+	assert.equal(reservation.adminPricing.netAfterExpensesTotal, 85.01);
+	assert.equal(reservation.adminPricing.otaExpenseTotal, 15);
+	assert.equal(reservation.adminPricing.commercialVerified, true);
+	assert.deepEqual(
+		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
+		evidence
+	);
+
+	const changedGross = normalizedMultiRoom({
+		message_uid: "adapter-commercial-invalidate",
+		modified: true,
+		updated_at: "2026-08-06T13:00:00.000Z",
+		total: "110.01",
+		sub_total: "110.01",
+		item_total: "110.01",
+	});
+	const invalidated = await projectHotelRunnerReservation(
+		{
+			normalized: changedGross,
+			event: { payload: changedGross.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(invalidated.status, "updated");
+	assert.equal(reservation.adminPricing.netAfterExpensesTotal, null);
+	assert.equal(reservation.adminPricing.otaExpenseTotal, null);
+	assert.equal(reservation.adminPricing.commercialVerified, false);
+	assert.equal(
+		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
+		null
+	);
+	assert.equal(
+		reservation.supplierData.otaPayoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(
+		reservation.adminPricing.payoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(
+		reservation.ota_financial_summary.payoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+});
+
+test("finance-protected gross changes stale payout evidence without overwriting money", async () => {
+	const system = createInMemoryProjectionSystem();
+	const initial = normalizedMultiRoom();
+	assert.equal(
+		(
+			await projectHotelRunnerReservation(
+				{
+					normalized: initial,
+					event: { payload: initial.storedPayload },
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			)
+		).status,
+		"created"
+	);
+	const reservation = system.reservations[0];
+	attachVerifiedHotelRunnerEmailCommercialEvidence(reservation);
+	reservation.paypal_details = { captured_total_usd: 100.01 };
+
+	const protectedAmounts = {
+		totalAmount: reservation.total_amount,
+		adminClientTotal: reservation.adminPricing.clientTotal,
+		adminNet: reservation.adminPricing.netAfterExpensesTotal,
+		adminExpense: reservation.adminPricing.otaExpenseTotal,
+		summaryClientTotal: reservation.ota_financial_summary.clientTotal,
+		summaryNet: reservation.ota_financial_summary.netAfterExpenses,
+		summaryExpense: reservation.ota_financial_summary.otaExpenseTotal,
+		supplierPayout: reservation.supplierData.otaTotalPayoutSar,
+		supplierExpense: reservation.supplierData.otaExpenseTotalSar,
+	};
+	const changedGross = normalizedMultiRoom({
+		message_uid: "adapter-finance-protected-gross",
+		modified: true,
+		updated_at: "2026-08-06T13:00:00.000Z",
+		total: "110.01",
+		sub_total: "110.01",
+		item_total: "110.01",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: changedGross,
+			event: { payload: changedGross.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.commercialProtected, true);
+	assert.equal(result.commercialEvidenceStale, true);
+	assert.equal(
+		result.attentionCode,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(reservation.total_amount, protectedAmounts.totalAmount);
+	assert.equal(
+		reservation.adminPricing.clientTotal,
+		protectedAmounts.adminClientTotal
+	);
+	assert.equal(
+		reservation.adminPricing.netAfterExpensesTotal,
+		protectedAmounts.adminNet
+	);
+	assert.equal(
+		reservation.adminPricing.otaExpenseTotal,
+		protectedAmounts.adminExpense
+	);
+	assert.equal(
+		reservation.ota_financial_summary.clientTotal,
+		protectedAmounts.summaryClientTotal
+	);
+	assert.equal(
+		reservation.ota_financial_summary.netAfterExpenses,
+		protectedAmounts.summaryNet
+	);
+	assert.equal(
+		reservation.ota_financial_summary.otaExpenseTotal,
+		protectedAmounts.summaryExpense
+	);
+	assert.equal(
+		reservation.supplierData.otaTotalPayoutSar,
+		protectedAmounts.supplierPayout
+	);
+	assert.equal(
+		reservation.supplierData.otaExpenseTotalSar,
+		protectedAmounts.supplierExpense
+	);
+	assert.equal(reservation.adminPricing.commercialVerified, false);
+	assert.equal(reservation.ota_financial_summary.commercialVerified, false);
+	assert.equal(reservation.ota_financial_summary.show, false);
+	assert.equal(
+		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
+		null
+	);
+	assert.equal(
+		reservation.supplierData.otaPayoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(
+		reservation.adminPricing.payoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(
+		reservation.ota_financial_summary.payoutFallbackReason,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(
+		reservation.supplierData.hotelRunner.pricing.grandTotal,
+		110.01,
+		"the new HotelRunner gross remains archived separately from protected PMS money"
+	);
+	assert.equal(system.mirror.lastResult.commercialEvidenceStale, true);
+});
+
+test("critical conflicts hide stale payout evidence while preserving protected finance", async () => {
+	const system = createInMemoryProjectionSystem();
+	const initial = normalizedMultiRoom();
+	assert.equal(
+		(
+			await projectHotelRunnerReservation(
+				{
+					normalized: initial,
+					event: { payload: initial.storedPayload },
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			)
+		).status,
+		"created"
+	);
+	const reservation = system.reservations[0];
+	attachVerifiedHotelRunnerEmailCommercialEvidence(reservation);
+	reservation.paypal_details = { captured_total_usd: 100.01 };
+	const protectedNet = reservation.adminPricing.netAfterExpensesTotal;
+	const protectedExpense = reservation.adminPricing.otaExpenseTotal;
+
+	const criticalChange = normalizedMultiRoom({
+		message_uid: "adapter-finance-protected-critical",
+		modified: true,
+		updated_at: "2026-08-06T13:30:00.000Z",
+		checkin_date: "2026-08-11",
+		checkout_date: "2026-08-13",
+		total: "120.01",
+		sub_total: "120.01",
+		item_total: "120.01",
+		rooms: [
+			rawRoom({
+				id: "external-room-1",
+				invCode: "INV-DOUBLE",
+				name: "Double Room",
+				prices: ["100", "200"],
+			}),
+			rawRoom({
+				id: "external-room-2",
+				invCode: "INV-TRIPLE",
+				name: "Triple Room",
+				prices: ["300", "400"],
+				adults: 2,
+				children: 1,
+			}),
+		].map((room) => ({
+			...room,
+			checkin_date: "2026-08-11",
+			checkout_date: "2026-08-13",
+			daily_prices: room.daily_prices.map((day, index) => ({
+				...day,
+				date: `2026-08-${11 + index}`,
+			})),
+		})),
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: criticalChange,
+			event: { payload: criticalChange.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "quarantined");
+	assert.equal(result.code, "hotelrunner_local_room_or_stay_conflict");
+	assert.equal(result.commercialEvidenceStale, true);
+	assert.equal(reservation.adminPricing.netAfterExpensesTotal, protectedNet);
+	assert.equal(reservation.adminPricing.otaExpenseTotal, protectedExpense);
+	assert.equal(reservation.adminPricing.commercialVerified, false);
+	assert.equal(reservation.ota_financial_summary.show, false);
+	assert.equal(
+		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
+		null
+	);
+	assert.equal(
+		reservation.reservationAuditLog.at(-1).action,
+		"hotelrunner-commercial-evidence-invalidated"
+	);
+	assert.equal(
+		system.mirror.lastErrorCode,
+		"hotelrunner_local_room_or_stay_conflict"
+	);
+});
+
 test("minimal cancellation preserves canonical provider and prior HotelRunner identity metadata", async () => {
 	const system = createInMemoryProjectionSystem();
 	const initial = normalizedMultiRoom({
@@ -1467,12 +2166,22 @@ test("minimal cancellation preserves canonical provider and prior HotelRunner id
 		system.dependencies
 	);
 	assert.equal(created.status, "created");
+	const completePricingSnapshot = structuredClone(
+		system.reservations[0].supplierData.hotelRunner.pricing
+	);
 
 	const cancellation = normalizeHotelRunnerReservation({
 		message_uid: "minimal-cancellation-final",
 		reservation_id: initial.hotelRunnerReservationId,
 		state: "canceled",
 		updated_at: "2026-08-06T12:00:00.000Z",
+		rooms: [
+			{
+				id: "external-room-1",
+				inv_code: "INV-DOUBLE",
+				state: "canceled",
+			},
+		],
 	});
 	assert.deepEqual(cancellation.issues, []);
 	const cancelled = await projectHotelRunnerReservation(
@@ -1496,6 +2205,11 @@ test("minimal cancellation preserves canonical provider and prior HotelRunner id
 	assert.equal(local.supplierData.hotelRunner.reportedPaidAmount, 100.01);
 	assert.equal(local.supplierData.hotelRunner.reportedPaidAmountCurrency, "SAR");
 	assert.equal(local.supplierData.hotelRunner.sourceState, "canceled");
+	assert.deepEqual(
+		local.supplierData.hotelRunner.pricing,
+		completePricingSnapshot,
+		"room identity without monetary facts must not replace a complete pricing snapshot"
+	);
 });
 
 test("first alias-only cancellation with conflicting stay dates is quarantined", async () => {

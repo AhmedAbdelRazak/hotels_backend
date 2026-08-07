@@ -22,6 +22,10 @@ const {
 	resolveAuditViewerFromRequest,
 	sanitizeReservationAuditLogsCollectionForViewer,
 } = require("../services/auditPrivacy");
+const {
+	resolveHotelRunnerPlatformCommission,
+	summarizeHotelRunnerFinanceUnavailable,
+} = require("../services/hotelrunnerPlatformFinance");
 
 /* ─────────── Env & PayPal client ─────────── */
 const IS_PROD = /prod/i.test(process.env.NODE_ENV);
@@ -71,12 +75,10 @@ const idSig = (s) => {
 
 /* ───────── Small helpers ───────── */
 function getOwnerActor(req) {
-	const u = req.user || req.auth || {};
-	const b = req.body || {};
-	const h = req.headers || {};
-	const id = u?._id || b?.ownerId || h["x-owner-id"] || undefined;
-	const name = u?.name || b?.ownerName || h["x-owner-name"] || undefined;
-	const role = u?.role || b?.ownerRole || h["x-owner-role"] || "owner"; // will show in logs
+	const u = req.profile || req.user || req.auth || {};
+	const id = u?._id || req.auth?._id || undefined;
+	const name = u?.name || undefined;
+	const role = u?.roleDescription || u?.role || "owner";
 	return { _id: id, name, role };
 }
 
@@ -491,6 +493,67 @@ function computeCommissionFromPickedRooms(pickedRoomsType = []) {
 	}, 0);
 }
 
+const roundMoney = (value) => Number(Number(value || 0).toFixed(2));
+
+const deriveOwnerPayoutFinance = (
+	reservation = {},
+	{ preferStoredCommission = true } = {}
+) => {
+	const hotelRunnerCommission =
+		resolveHotelRunnerPlatformCommission(reservation);
+	if (
+		hotelRunnerCommission.isHotelRunner &&
+		!hotelRunnerCommission.available
+	) {
+		return {
+			available: false,
+			commissionSAR: null,
+			payoutSAR: null,
+			reason: hotelRunnerCommission.reason,
+		};
+	}
+
+	const stored = Number(reservation?.commission || 0);
+	const commissionSAR = roundMoney(
+		hotelRunnerCommission.isHotelRunner
+			? hotelRunnerCommission.amount
+			: preferStoredCommission && Number.isFinite(stored) && stored > 0
+			? stored
+			: computeCommissionFromPickedRooms(
+					reservation?.pickedRoomsType || []
+			  )
+	);
+	return {
+		available: true,
+		commissionSAR,
+		payoutSAR: roundMoney(
+			Number(reservation?.total_amount || 0) - commissionSAR
+		),
+		reason: "",
+	};
+};
+
+const withDerivedOwnerPayoutFinance = (reservation = {}, options = {}) => {
+	const finance = deriveOwnerPayoutFinance(reservation, options);
+	return {
+		...reservation,
+		hotelrunner_finance_available: finance.available,
+		hotelrunner_finance_unavailable_reason: finance.reason || undefined,
+		computed_commission_sar: finance.commissionSAR,
+		computed_online_payout_sar: finance.payoutSAR,
+	};
+};
+
+const selectedHotelRunnerFinanceUnavailable = (reservations = []) =>
+	(Array.isArray(reservations) ? reservations : [])
+		.map((reservation) => ({
+			reservation,
+			finance: resolveHotelRunnerPlatformCommission(reservation),
+		}))
+		.filter(
+			(item) => item.finance.isHotelRunner && !item.finance.available
+		);
+
 function summarizePayment(r) {
 	const pd = r?.paypal_details || {};
 	const pmt = String(r?.payment || "").toLowerCase();
@@ -586,6 +649,10 @@ exports.listHotelCommissions = async (req, res) => {
 				commissionPaid: 1,
 				commissionStatus: 1,
 				commissionPaidAt: 1,
+				financial_cycle: 1,
+				"adminPricing.mode": 1,
+				"supplierData.hotelRunner.transport": 1,
+				"supplierData.otaAutomationPipeline": 1,
 				moneyTransferredToHotel: 1,
 				moneyTransferredAt: 1, // <<< ADDED
 				commissionData: 1, // <<< ADDED (for USD + manual note)
@@ -601,30 +668,24 @@ exports.listHotelCommissions = async (req, res) => {
 			auditViewer
 		);
 
-		const derived = raw
+		const allDerived = raw
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const pay = summarizePayment(r);
-				const stored = Number(r?.commission || 0);
-				const comm =
-					Number.isFinite(stored) && stored > 0
-						? stored
-						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-				const commissionSAR = Number(Number(comm).toFixed(2));
-				const payoutOnlineSAR = Number(
-					Number(Number(r?.total_amount || 0) - commissionSAR).toFixed(2)
-				);
-
 				return {
-					...r,
+					...withDerivedOwnerPayoutFinance(r),
 					computed_payment_status: pay.status, // "Captured" | "Paid Offline" | "Not Paid"
 					computed_payment_channel: pay.channel, // "online" | "offline" | "none"
-					computed_commission_sar: commissionSAR,
-					computed_online_payout_sar: payoutOnlineSAR, // total - commission (for online lists)
 					commissionPaid: isCommissionPaid(r),
 					eligibleForHotelTransfer: pay.channel === "online", // **no dependency on paid_amount**
 				};
 			});
+		const financeUnavailable = allDerived.filter(
+			(r) => r.hotelrunner_finance_available === false
+		);
+		const derived = allDerived.filter(
+			(r) => r.hotelrunner_finance_available !== false
+		);
 
 		// ---- Buckets -------------------------------------------------------
 		const offlinePredicate = (r) =>
@@ -659,6 +720,7 @@ exports.listHotelCommissions = async (req, res) => {
 		});
 
 		const summary = {
+			unavailable: summarizeHotelRunnerFinanceUnavailable(financeUnavailable),
 			pending: {
 				offline: collect(pendingOffline),
 				online: collect(onlineNotTransferred),
@@ -738,13 +800,33 @@ exports.markCommissionsPaid = async (req, res) => {
 		const docs = await Reservations.find(
 			{ _id: { $in: ids }, hotelId },
 			{
+				commission: 1,
 				commissionPaid: 1,
 				commissionStatus: 1,
 				commissionPaidAt: 1,
 				moneyTransferredToHotel: 1,
 				financial_cycle: 1,
+				commissionData: 1,
+				"adminPricing.mode": 1,
+				"supplierData.hotelRunner.transport": 1,
+				"supplierData.otaAutomationPipeline": 1,
 			}
 		).lean();
+		const unavailableSelected =
+			selectedHotelRunnerFinanceUnavailable(docs);
+		if (unavailableSelected.length > 0) {
+			return res.status(409).json({
+				message:
+					"HotelRunner platform commission must be explicitly reviewed before it can be marked paid.",
+				code: "hotelrunner_platform_finance_review_required",
+				unavailable: summarizeHotelRunnerFinanceUnavailable(
+					unavailableSelected.map(({ reservation, finance }) => ({
+						...reservation,
+						hotelrunner_finance_unavailable_reason: finance.reason,
+					}))
+				),
+			});
+		}
 
 		let updated = 0;
 		for (const r of docs) {
@@ -846,27 +928,49 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				payment_details: 1,
 				paid_amount_breakdown: 1,
 				paypal_details: 1,
+				commission: 1,
 				commissionPaid: 1,
 				commissionStatus: 1,
 				commissionPaidAt: 1, // <<< ADDED (for accurate 'from' in changes)
 				moneyTransferredToHotel: 1,
 				financial_cycle: 1,
+				commissionData: 1,
+				"adminPricing.mode": 1,
+				"supplierData.hotelRunner.transport": 1,
+				"supplierData.otaAutomationPipeline": 1,
 				total_amount: 1,
 				paid_amount: 1,
 				createdAt: 1,
 			}
 		).lean();
+		const unavailableSelected =
+			selectedHotelRunnerFinanceUnavailable(raw);
+		if (unavailableSelected.length > 0) {
+			return res.status(409).json({
+				message:
+					"HotelRunner platform commission must be explicitly reviewed before an owner charge.",
+				code: "hotelrunner_platform_finance_review_required",
+				unavailable: summarizeHotelRunnerFinanceUnavailable(
+					unavailableSelected.map(({ reservation, finance }) => ({
+						...reservation,
+						hotelrunner_finance_unavailable_reason: finance.reason,
+					}))
+				),
+			});
+		}
 
 		const rawMap = new Map(raw.map((d) => [String(d._id), d])); // <<< ADDED
 
 		const deriv = raw
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
-				const comm = computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
+				const finance = deriveOwnerPayoutFinance(r, {
+					preferStoredCommission: false,
+				});
 				const pay = summarizePayment(r);
 				return {
 					...r,
-					commissionSAR: Math.max(0, Number(comm.toFixed(2))),
+					commissionSAR: finance.commissionSAR,
 					channel: pay.channel,
 					alreadyPaid: isCommissionPaid(r),
 				};
@@ -1190,6 +1294,11 @@ exports.getHotelFinanceOverview = async (req, res) => {
 				commission: 1,
 				commissionPaid: 1,
 				commissionStatus: 1,
+				commissionData: 1,
+				financial_cycle: 1,
+				"adminPricing.mode": 1,
+				"supplierData.hotelRunner.transport": 1,
+				"supplierData.otaAutomationPipeline": 1,
 				moneyTransferredToHotel: 1,
 				checkin_date: 1,
 				checkout_date: 1,
@@ -1197,25 +1306,25 @@ exports.getHotelFinanceOverview = async (req, res) => {
 			}
 		).lean();
 
-		const derived = raw
+		const allDerived = raw
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const pay = summarizePayment(r);
-				const stored = Number(r?.commission || 0);
-				const commSar =
-					Number.isFinite(stored) && stored > 0
-						? stored
-						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
 				return {
-					...r,
+					...withDerivedOwnerPayoutFinance(r),
 					computed_payment_status: pay.status,
 					computed_payment_channel: pay.channel,
-					computed_commission_sar: Number(Number(commSar).toFixed(2)),
 					commissionPaid: isCommissionPaid(r),
 					// **Important change:** "eligible" = any ONLINE capture/keyword
 					eligibleForHotelTransfer: pay.channel === "online",
 				};
 			});
+		const financeUnavailable = allDerived.filter(
+			(r) => r.hotelrunner_finance_available === false
+		);
+		const derived = allDerived.filter(
+			(r) => r.hotelrunner_finance_available !== false
+		);
 
 		const sum = (arr, get) => arr.reduce((a, x) => a + Number(get(x) || 0), 0);
 
@@ -1242,6 +1351,7 @@ exports.getHotelFinanceOverview = async (req, res) => {
 		);
 
 		const summary = {
+			unavailable: summarizeHotelRunnerFinanceUnavailable(financeUnavailable),
 			commissionDueFromHotel: {
 				count: commissionDueFromHotel.length,
 				totalSAR: sum(commissionDueFromHotel, (r) => r.total_amount),
@@ -1266,10 +1376,7 @@ exports.getHotelFinanceOverview = async (req, res) => {
 					(r) => r.computed_commission_sar
 				),
 				netSAR: transfersDueToHotel.reduce(
-					(a, r) =>
-						a +
-						(Number(r?.total_amount || 0) -
-							Number(r?.computed_commission_sar || 0)),
+					(a, r) => a + Number(r?.computed_online_payout_sar || 0),
 					0
 				),
 			},
@@ -1281,10 +1388,7 @@ exports.getHotelFinanceOverview = async (req, res) => {
 					(r) => r.computed_commission_sar
 				),
 				netSAR: transfersCompletedToHotel.reduce(
-					(a, r) =>
-						a +
-						(Number(r?.total_amount || 0) -
-							Number(r?.computed_commission_sar || 0)),
+					(a, r) => a + Number(r?.computed_online_payout_sar || 0),
 					0
 				),
 			},
@@ -1298,4 +1402,10 @@ exports.getHotelFinanceOverview = async (req, res) => {
 		console.error("getHotelFinanceOverview:", e);
 		return res.status(500).json({ message: "Failed to build overview." });
 	}
+};
+
+exports.__hotelRunnerPlatformFinanceTest = {
+	deriveOwnerPayoutFinance,
+	selectedHotelRunnerFinanceUnavailable,
+	withDerivedOwnerPayoutFinance,
 };

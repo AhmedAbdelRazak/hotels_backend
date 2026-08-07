@@ -28,9 +28,25 @@ const hotelRunnerSyncStateSchema = new mongoose.Schema(
 		historyCursorPage: { type: Number, min: 1, default: 1 },
 		historyCycleStartedAt: { type: Date, default: null },
 		lastRoomListSyncAt: { type: Date, default: null },
+		lastRoomListStartedAt: { type: Date, default: null },
+		lastRoomListCompletedAt: { type: Date, default: null },
 		nextRoomListSyncAt: { type: Date, default: Date.now },
+		activeRoomListSyncGeneration: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+		activeRoomListPublishedAt: { type: Date, default: null },
+		roomListRequeuePendingGeneration: {
+			type: String,
+			trim: true,
+			default: "",
+		},
 		leaseOwner: { type: String, trim: true, default: "" },
 		leaseUntil: { type: Date, default: null, index: true },
+		projectionLeaseOwner: { type: String, trim: true, default: "" },
+		projectionLeaseAcquiredAt: { type: Date, default: null },
+		projectionLeaseUntil: { type: Date, default: null, index: true },
 		lastErrorCode: { type: String, trim: true, default: "" },
 		lastErrorMessage: { type: String, trim: true, default: "" },
 		disabledConfigFingerprint: {
@@ -43,6 +59,7 @@ const hotelRunnerSyncStateSchema = new mongoose.Schema(
 		metrics: {
 			pulls: { type: Number, default: 0 },
 			pullFailures: { type: Number, default: 0 },
+			roomListPulls: { type: Number, default: 0 },
 			eventsReceived: { type: Number, default: 0 },
 			eventsProcessed: { type: Number, default: 0 },
 		},

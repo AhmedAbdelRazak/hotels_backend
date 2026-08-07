@@ -3,77 +3,97 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-	hotelRunnerManagedEmailSkipResult,
-	hotelRunnerManagedHotelIds,
-	isHotelRunnerManagedHotelId,
+	hasDirectHotelRunnerProjection,
+	normalizeMarker,
 } = require("./hotelrunnerOtaEmailBoundary");
 
-const HOTEL_A = "64B000000000000000000001";
-const HOTEL_B = "64b000000000000000000002";
-
-test("OTA email suppression is exact and requires one runnable property binding", () => {
-	const disabled = {
-		HOTELRUNNER_API_TOKEN: "synthetic-token",
-		HOTELRUNNER_API_HR_ID: "synthetic-hr-id",
-		HOTELRUNNER_SUPPORTED_HOTELIDS: ` ${HOTEL_A} `,
-		HOTELRUNNER_PROJECTION_ENABLED: "false",
-	};
-	assert.equal(isHotelRunnerManagedHotelId(HOTEL_A, disabled), false);
-
-	const enabled = {
-		...disabled,
-		HOTELRUNNER_PROJECTION_ENABLED: "true",
-	};
-	assert.deepEqual(
-		[...hotelRunnerManagedHotelIds(enabled)],
-		[HOTEL_A.toLowerCase()]
-	);
-	assert.equal(isHotelRunnerManagedHotelId(HOTEL_A.toLowerCase(), enabled), true);
+test("direct HotelRunner ownership requires a reservation-level projection marker", () => {
+	assert.equal(hasDirectHotelRunnerProjection(), false);
+	assert.equal(hasDirectHotelRunnerProjection({ supplierData: {} }), false);
 	assert.equal(
-		isHotelRunnerManagedHotelId("64b000000000000000000003", enabled),
+		hasDirectHotelRunnerProjection({
+			hotelId: "configured-property-is-not-enough",
+			supplierData: {
+				otaAutomationPipeline: "ota-inbound-email",
+				otaSourceAuthority: 3,
+			},
+		}),
+		false,
+		"property membership or ordinary OTA metadata must not disable email ingestion"
+	);
+});
+
+test("direct ownership requires the complete atomic HotelRunner projection stamp", () => {
+	assert.equal(
+		hasDirectHotelRunnerProjection({
+			supplierData: {
+				hotelRunner: { transport: " HotelRunner API " },
+			},
+		}),
+		false,
+		"transport alone may be partial or malformed metadata"
+	);
+	assert.equal(
+		hasDirectHotelRunnerProjection({
+			supplierData: {
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-reservation-1",
+				},
+				otaAutomationPipeline: "hotelrunner-background-worker",
+				otaSourceAuthority: 4,
+			},
+		}),
+		true
+	);
+});
+
+test("none of the worker ownership fields is sufficient when another is missing", () => {
+	assert.equal(
+		hasDirectHotelRunnerProjection({
+			supplierData: {
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-reservation-1",
+				},
+				otaAutomationPipeline: "HotelRunner Background Worker",
+				otaSourceAuthority: 3,
+			},
+		}),
 		false
 	);
-	assert.equal(isHotelRunnerManagedHotelId("", enabled), false);
-
-	const unsafeMultipleProperties = {
-		...enabled,
-		HOTELRUNNER_SUPPORTED_HOTELIDS: `${HOTEL_A},${HOTEL_B}`,
-	};
 	assert.equal(
-		isHotelRunnerManagedHotelId(HOTEL_A, unsafeMultipleProperties),
-		false,
-		"email must remain available when the singular worker cannot run"
+		hasDirectHotelRunnerProjection({
+			supplierData: {
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-reservation-1",
+				},
+				otaAutomationPipeline: "hotelrunner-background-worker",
+				otaSourceAuthority: 4,
+			},
+		}),
+		true
 	);
 	assert.equal(
-		isHotelRunnerManagedHotelId(HOTEL_B, unsafeMultipleProperties),
+		hasDirectHotelRunnerProjection({
+			supplierData: {
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-reservation-1",
+				},
+				otaAutomationPipeline: "another-background-worker",
+				otaSourceAuthority: 4,
+			},
+		}),
 		false
 	);
 });
 
-test("the boundary result is an audit-only skip and never claims a mutation", () => {
-	assert.deepEqual(
-		hotelRunnerManagedEmailSkipResult({
-			hotelId: HOTEL_A,
-			reservation: {
-				_id: "reservation-1",
-				hotelId: HOTEL_A,
-				confirmation_number: "PMS-1",
-			},
-			warnings: ["kept"],
-			matchedReservationBy: ["otaIdentityKey"],
-		}),
-		{
-			status: "ignored",
-			actionTaken: "skipped",
-			skipReason: "hotelrunner_managed_hotel_ota_email_disabled",
-			automationComment:
-				"This hotel is managed by the direct HotelRunner integration. The OTA email remains archived for audit only and cannot create or change a PMS reservation.",
-			warnings: ["kept"],
-			errors: [],
-			reservationId: "reservation-1",
-			hotelId: HOTEL_A,
-			pmsConfirmationNumber: "PMS-1",
-			matchedReservationBy: ["otaIdentityKey"],
-		}
+test("marker normalization is exact across supported separators", () => {
+	assert.equal(
+		normalizeMarker(" HotelRunner-Background Worker "),
+		"hotelrunner_background_worker"
 	);
+	assert.equal(normalizeMarker(null), "");
 });

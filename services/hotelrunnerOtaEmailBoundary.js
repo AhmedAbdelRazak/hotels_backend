@@ -1,69 +1,36 @@
 /** @format */
 
-const {
-	getHotelRunnerConfig,
-	parseSupportedHotelIds,
-} = require("./hotelrunnerConfig");
-
-const normalizeHotelId = (value) =>
-	String(value?._id || value || "")
+const normalizeMarker = (value) =>
+	String(value || "")
 		.trim()
-		.toLowerCase();
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
 
-function hotelRunnerManagedHotelIds(env = process.env) {
-	return new Set(
-		parseSupportedHotelIds(env.HOTELRUNNER_SUPPORTED_HOTELIDS)
-			.map(normalizeHotelId)
-			.filter(Boolean)
-	);
-}
-
-function hotelRunnerOtaEmailBoundaryEnabled(env = process.env) {
-	// The same fail-closed projection switch makes authority change atomically:
-	// room discovery/bootstrap can run while email ingestion remains unchanged,
-	// then one activation turns on both local projection and email suppression.
-	// Suppression also requires a runnable one-property credential binding. A
-	// malformed or future multi-property configuration must never create a gap
-	// where email is disabled but no HotelRunner worker can own the reservation.
-	const config = getHotelRunnerConfig(env);
-	return config.configured && config.projectionEnabled;
-}
-
-function isHotelRunnerManagedHotelId(hotelId, env = process.env) {
-	const normalized = normalizeHotelId(hotelId);
+/**
+ * Returns true only after the local reservation itself has been projected by
+ * the authenticated HotelRunner worker.
+ *
+ * Hotel-level configuration is intentionally not enough. Some reservations at
+ * a HotelRunner-connected property can arrive only through an OTA mailbox (for
+ * example, a listing/account that is not connected to HotelRunner). Those
+ * emails must continue through the normal local ingestion path. Once a direct
+ * projection has stamped the reservation, lower-authority lifecycle emails may
+ * be retained for audit without overwriting the API-owned lifecycle state.
+ */
+function hasDirectHotelRunnerProjection(reservation = {}) {
+	const supplier = reservation?.supplierData || {};
+	const transport = normalizeMarker(supplier.hotelRunner?.transport);
+	const pipeline = normalizeMarker(supplier.otaAutomationPipeline);
+	const reservationId = String(supplier.hotelRunner?.reservationId || "").trim();
 	return Boolean(
-		normalized &&
-		hotelRunnerOtaEmailBoundaryEnabled(env) &&
-		hotelRunnerManagedHotelIds(env).has(normalized)
+		transport === "hotelrunner_api" &&
+			reservationId &&
+			Number(supplier.otaSourceAuthority || 0) >= 4 &&
+			pipeline === "hotelrunner_background_worker"
 	);
-}
-
-function hotelRunnerManagedEmailSkipResult({
-	hotelId,
-	reservation = null,
-	warnings = [],
-	errors = [],
-	matchedReservationBy = [],
-} = {}) {
-	return {
-		status: "ignored",
-		actionTaken: "skipped",
-		skipReason: "hotelrunner_managed_hotel_ota_email_disabled",
-		automationComment:
-			"This hotel is managed by the direct HotelRunner integration. The OTA email remains archived for audit only and cannot create or change a PMS reservation.",
-		warnings: [...warnings],
-		errors: [...errors],
-		reservationId: reservation?._id || null,
-		hotelId: reservation?.hotelId || hotelId || null,
-		pmsConfirmationNumber: reservation?.confirmation_number || "",
-		matchedReservationBy: [...matchedReservationBy],
-	};
 }
 
 module.exports = {
-	hotelRunnerManagedEmailSkipResult,
-	hotelRunnerManagedHotelIds,
-	hotelRunnerOtaEmailBoundaryEnabled,
-	isHotelRunnerManagedHotelId,
-	normalizeHotelId,
+	hasDirectHotelRunnerProjection,
+	normalizeMarker,
 };

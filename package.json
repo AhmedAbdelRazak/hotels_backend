@@ -25,6 +25,10 @@
 		"test:hotelrunner": "node --test services/hotelrunner*.test.js",
 		"hotelrunner:worker": "node workers/hotelrunnerSyncWorker.js",
 		"hotelrunner:worker:once": "node workers/hotelrunnerSyncWorker.js --once",
+		"hotelrunner:rooms:once": "node workers/hotelrunnerSyncWorker.js --rooms-only",
+		"hotelrunner:indexes:verify": "node scripts/verifyHotelRunnerReservationIndexes.js",
+		"hotelrunner:env-gate": "node scripts/hotelrunnerEnvGate.js",
+		"test:hotelrunner-env-gate": "node --test scripts/hotelrunnerEnvGate.test.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
 	},

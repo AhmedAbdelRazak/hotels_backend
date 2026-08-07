@@ -14,11 +14,29 @@ const {
 
 const HOTEL_SELECT =
 	"_id hotelName belongsTo activateHotel xHotelProActive currency roomCountDetails";
+const CONFLICT_ATTENTION_STATUSES = ["completed", "ignored", "attention"];
 
 let hotelRunnerIndexesPromise = null;
 
-function ensureHotelRunnerIndexes(models = {}) {
-	if (hotelRunnerIndexesPromise) return hotelRunnerIndexesPromise;
+const HOTELRUNNER_INDEX_MODEL_KEYS = Object.freeze([
+	"EventModel",
+	"MirrorModel",
+	"MappingModel",
+	"BudgetModel",
+	"SyncStateModel",
+]);
+
+function ensureHotelRunnerIndexes(models = {}, options = {}) {
+	const hasModelOverrides = HOTELRUNNER_INDEX_MODEL_KEYS.some((key) =>
+		Object.prototype.hasOwnProperty.call(models || {}, key)
+	);
+	const useCachedPromise =
+		options.useCachedPromise === undefined
+			? !hasModelOverrides
+			: options.useCachedPromise === true;
+	if (useCachedPromise && hotelRunnerIndexesPromise) {
+		return hotelRunnerIndexesPromise;
+	}
 	const modelList = [
 		models.EventModel || HotelRunnerEvent,
 		models.MirrorModel || HotelRunnerReservation,
@@ -26,14 +44,21 @@ function ensureHotelRunnerIndexes(models = {}) {
 		models.BudgetModel || HotelRunnerApiBudget,
 		models.SyncStateModel || HotelRunnerSyncState,
 	];
-	hotelRunnerIndexesPromise = Promise.all(modelList.map((model) => model.init())).catch(
-		(error) => {
-			hotelRunnerIndexesPromise = null;
-			throw error;
-		}
+	const createPromise = Promise.all(
+		modelList.map((model) => model.createIndexes())
 	);
+	if (!useCachedPromise) return createPromise;
+
+	hotelRunnerIndexesPromise = createPromise.catch((error) => {
+		hotelRunnerIndexesPromise = null;
+		throw error;
+	});
 	return hotelRunnerIndexesPromise;
 }
+
+const resetHotelRunnerIndexesPromiseForTests = () => {
+	hotelRunnerIndexesPromise = null;
+};
 
 function safeErrorMessage(error, fallback = "HotelRunner operation failed.") {
 	const text = String(error?.message || fallback)
@@ -50,8 +75,15 @@ function safeErrorMessage(error, fallback = "HotelRunner operation failed.") {
 	return text.slice(0, 500) || fallback;
 }
 
-async function loadConfiguredHotel(config, { HotelModel = HotelDetails } = {}) {
-	if (!config?.configured || !config.hotelId) {
+async function loadConfiguredHotel(
+	config,
+	{ HotelModel = HotelDetails, readiness = "worker" } = {},
+) {
+	const configurationReady =
+		readiness === "callback"
+			? config?.callbackConfigured === true
+			: config?.configured === true;
+	if (!configurationReady || !config.hotelId) {
 		const error = new Error("HotelRunner integration is not configured.");
 		error.code = "HOTELRUNNER_CONFIG_INVALID";
 		throw error;
@@ -75,7 +107,7 @@ async function loadConfiguredHotel(config, { HotelModel = HotelDetails } = {}) {
 }
 
 function eventInsertDocument({ config, hotel, rawReservation, source, receivedAt }) {
-	const normalized = normalizeHotelRunnerReservation(rawReservation);
+	const normalized = normalizeHotelRunnerReservation(rawReservation, { receivedAt });
 	const processable = normalized.issues.length === 0;
 	return {
 		normalized,
@@ -131,35 +163,112 @@ async function persistHotelRunnerDelivery(
 	).exec();
 
 	if (event.payloadHash !== prepared.document.payloadHash) {
-		await EventModel.updateOne(
-			{ _id: event._id },
-			{
-				$set: {
-					status: "quarantined",
-					integrityReason: "message_uid_payload_conflict",
-					processedAt: receivedAt,
+		const conflictRecord = {
+			payloadHash: prepared.document.payloadHash,
+			canonicalHash: prepared.document.canonicalHash,
+			receivedAt,
+			payload: prepared.document.payload,
+		};
+		// A different payload for one message UID is handled in one server-side
+		// state transition. Only a processing event with a named, unexpired lease
+		// may keep projecting the first payload. Every unclaimed, retryable, mapping-
+		// blocked, ownerless, or expired event is quarantined. Already processed work
+		// becomes attention without losing its result or PMS link.
+		const activeProcessing = {
+			$and: [
+				{ $eq: ["$status", "processing"] },
+				{
+					$ne: [
+						{ $trim: { input: { $ifNull: ["$leaseOwner", ""] } } },
+						"",
+					],
 				},
-				$push: {
-					integrityConflicts: {
-						$each: [
-							{
-								payloadHash: prepared.document.payloadHash,
-								canonicalHash: prepared.document.canonicalHash,
-								receivedAt,
-								payload: prepared.document.payload,
-							},
-						],
-						$slice: -5,
+				{ $eq: [{ $type: "$leaseUntil" }, "date"] },
+				{ $gt: ["$leaseUntil", { $literal: receivedAt }] },
+			],
+		};
+		const alreadyProcessed = {
+			$in: ["$status", CONFLICT_ATTENTION_STATUSES],
+		};
+		const quarantineConflict = {
+			$not: [{ $or: [activeProcessing, alreadyProcessed] }],
+		};
+		const conflictEvent = await EventModel.findOneAndUpdate(
+			{ _id: event._id, payloadHash: event.payloadHash },
+			[
+				{
+					$set: {
+						integrityConflict: true,
+						integrityConflictCount: {
+							$add: [{ $ifNull: ["$integrityConflictCount", 0] }, 1],
+						},
+						integrityConflicts: {
+							$slice: [
+								{
+									$concatArrays: [
+										{ $ifNull: ["$integrityConflicts", []] },
+										[{ $literal: conflictRecord }],
+									],
+								},
+								-5,
+							],
+						},
+						status: {
+							$cond: [
+								activeProcessing,
+								"processing",
+								{
+									$cond: [alreadyProcessed, "attention", "quarantined"],
+								},
+							],
+						},
+						integrityReason: {
+							$cond: [
+								quarantineConflict,
+								"message_uid_payload_conflict",
+								{ $ifNull: ["$integrityReason", ""] },
+							],
+						},
+						processedAt: {
+							$cond: [
+								quarantineConflict,
+								{ $literal: receivedAt },
+								"$processedAt",
+							],
+						},
+						leaseOwner: {
+							$cond: [activeProcessing, "$leaseOwner", ""],
+						},
+						leaseAcquiredAt: {
+							$cond: [activeProcessing, "$leaseAcquiredAt", null],
+						},
+						leaseUntil: {
+							$cond: [activeProcessing, "$leaseUntil", null],
+						},
 					},
 				},
-				$unset: { leaseOwner: 1, leaseAcquiredAt: 1, leaseUntil: 1 },
-			}
+			],
+			{ new: true }
 		).exec();
+		if (!conflictEvent) {
+			const error = new Error(
+				"HotelRunner event changed while recording a payload integrity conflict."
+			);
+			error.code = "HOTELRUNNER_EVENT_CONFLICT_CAS_LOST";
+			error.retryable = true;
+			throw error;
+		}
+		const firstPayloadWins = conflictEvent.status === "processing";
 		return {
 			eventId: event._id,
-			status: "quarantined",
+			status: conflictEvent.status,
 			duplicate: false,
 			integrityConflict: true,
+			firstPayloadWins,
+			activeProcessing: conflictEvent.status === "processing",
+			integrityConflictCount: Number(
+				conflictEvent.integrityConflictCount || 0
+			),
 		};
 	}
 
@@ -254,5 +363,6 @@ module.exports = {
 	loadConfiguredHotel,
 	persistHotelRunnerBatch,
 	persistHotelRunnerDelivery,
+	resetHotelRunnerIndexesPromiseForTests,
 	safeErrorMessage,
 };

@@ -25,8 +25,8 @@ const {
 } = require("./otaReviewConcurrency");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 const {
-	hotelRunnerManagedEmailSkipResult,
-	isHotelRunnerManagedHotelId,
+	hasDirectHotelRunnerProjection,
+	normalizeMarker,
 } = require("./hotelrunnerOtaEmailBoundary");
 
 dayjs.extend(customParseFormat);
@@ -7865,19 +7865,10 @@ function lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
 		["cancelled", "no_show", "status"].includes(normalized.eventType)
 	);
 	if (!lifecycleMutation) return false;
-	const supplier = existing.supplierData || {};
-	const transport = normalizeComparable(
-		supplier.hotelRunner?.transport || ""
-	).replace(/\s+/g, "_");
-	const pipeline = normalizeComparable(
-		supplier.otaAutomationPipeline || ""
-	).replace(/\s+/g, "_");
-	const directHotelRunnerApplied = Boolean(
-		transport === "hotelrunner_api" ||
-		(Number(supplier.otaSourceAuthority || 0) >= 4 &&
-			pipeline === "hotelrunner_background_worker")
+	return (
+		hasDirectHotelRunnerProjection(existing) &&
+		otaSourceAuthority(normalized) < 4
 	);
-	return directHotelRunnerApplied && otaSourceAuthority(normalized) < 4;
 }
 
 const MAX_DIRECT_AFTER_RELAY_SOURCE_SKEW_MS = 15 * 60 * 1000;
@@ -8987,6 +8978,20 @@ function hasCompleteDirectCommercialEvidence(normalized = {}) {
 		Math.abs(round2(sourceGuestTotal * exchangeRate) - guestTotal) <= 0.02;
 	const sourcePayoutConvertsExactly =
 		Math.abs(round2(sourcePayoutTotal * exchangeRate) - payoutTotal) <= 0.02;
+	const exchangeRateSources = [
+		normalized.sourceExchangeRateSource,
+		normalized.exchangeRateSource,
+		paymentSummary.exchangeRateSource,
+	]
+		.map((value) => normalizeMarker(value))
+		.filter(Boolean);
+	const verifiedExchangeRate =
+		sourceCurrency === "SAR"
+			? Math.abs(exchangeRate - 1) <= 0.000001
+			: exchangeRateSources.length > 0 &&
+			  exchangeRateSources.every((source) =>
+					["exchange_rate_api", "exchange_rate_api_cached"].includes(source)
+			  );
 	return !!(
 		hasSourceField(normalized, "amount") &&
 		hasSourceField(normalized, "paymentCollectionModel") &&
@@ -9004,12 +9009,804 @@ function hasCompleteDirectCommercialEvidence(normalized = {}) {
 		summaryCurrency === "SAR" &&
 		normalizedSourceAmount === sourceGuestTotal &&
 		exchangeRate > 0 &&
+		verifiedExchangeRate &&
 		sourceGuestConvertsExactly &&
 		sourcePayoutConvertsExactly &&
 		normalized.paymentCollectionModel &&
 		normalized.paymentCollectionModel !== "unknown" &&
 		normalizeWhitespace(normalized.paymentInstructions || "")
 	);
+}
+
+function hotelRunnerEmailCommercialEvidenceHash(evidence = {}) {
+	const sourceReceivedAt = validOtaEventDate(evidence.sourceReceivedAt);
+	return hashText(
+		JSON.stringify([
+			1,
+			"authenticated_ota_email",
+			normalizeOtaIdentityProvider(evidence.provider),
+			normalizeWhitespace(evidence.otaIdentityKey || "").toLowerCase(),
+			round2(evidence.grossTotalSar),
+			round2(evidence.payoutTotalSar),
+			round2(evidence.otaExpenseTotalSar),
+			String(evidence.currency || "").trim().toUpperCase(),
+			sourceReceivedAt ? sourceReceivedAt.toISOString() : "",
+		])
+	);
+}
+
+function constantTimeEvidenceHashMatches(actual = "", expected = "") {
+	const left = String(actual || "").trim().toLowerCase();
+	const right = String(expected || "").trim().toLowerCase();
+	if (!/^[a-f0-9]{64}$/.test(left) || !/^[a-f0-9]{64}$/.test(right)) {
+		return false;
+	}
+	return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+function buildHotelRunnerEmailCommercialEvidence(
+	normalized = {},
+	{ appliedAt = new Date() } = {}
+) {
+	const provider = normalizeOtaIdentityProvider(normalized.provider);
+	const confirmationNumber = normalizeConfirmation(
+		normalized.confirmationNumber || normalized.reservationId
+	);
+	const otaIdentityKey = buildOtaIdentityKey(provider, confirmationNumber);
+	const sourceReceivedAt = otaSourceReceivedAt(normalized);
+	const requiredSourceFacts = [
+		"confirmationNumber",
+		"hotelName",
+		"roomName",
+		"checkinDate",
+		"checkoutDate",
+		"roomCount",
+		"amount",
+	];
+	if (
+		!isOtaInboundEmail(normalized) ||
+		normalized.sourceSenderTrusted !== true ||
+		normalized.sourceSenderAuthenticated !== true ||
+		normalized.requiresManualReview === true ||
+		!provider ||
+		!otaIdentityKey ||
+		!sourceReceivedAt ||
+		requiredSourceFacts.some((field) => !hasSourceField(normalized, field)) ||
+		!hasCompleteDirectCommercialEvidence(normalized)
+	) {
+		return null;
+	}
+	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const grossTotalSar = round2(
+		normalized.totalAmountSar || normalized.amount || 0
+	);
+	const payoutTotalSar = round2(
+		normalized.totalPayoutSar ||
+			normalized.netAfterExpensesTotal ||
+			paymentSummary.totalPayoutAmount ||
+			0
+	);
+	const otaExpenseTotalSar = round2(grossTotalSar - payoutTotalSar);
+	const evidence = {
+		version: 1,
+		verified: true,
+		source: "authenticated_ota_email",
+		provider,
+		otaIdentityKey,
+		grossTotalSar,
+		payoutTotalSar,
+		otaExpenseTotalSar,
+		currency: "SAR",
+		sourceReceivedAt: sourceReceivedAt.toISOString(),
+		appliedAt,
+	};
+	return {
+		...evidence,
+		evidenceHash: hotelRunnerEmailCommercialEvidenceHash(evidence),
+	};
+}
+
+function commercialEvidenceAmountMatches(actual, expected) {
+	const numeric = Number(actual);
+	return Number.isFinite(numeric) && Math.abs(round2(numeric) - expected) <= 0.02;
+}
+
+function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
+	if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
+	const safe = safeOtaPaymentSummary(summary);
+	return !!(
+		commercialEvidenceAmountMatches(
+			safe.totalGuestPaymentAmount,
+			round2(marker.grossTotalSar)
+		) &&
+		commercialEvidenceAmountMatches(
+			safe.totalPayoutAmount,
+			round2(marker.payoutTotalSar)
+		) &&
+		String(safe.currency || "").trim().toUpperCase() === "SAR" &&
+		hasCompleteDirectCommercialEvidence({
+			sourcePresence: {
+				amount: true,
+				paymentCollectionModel: true,
+				paymentInstructions: true,
+			},
+			amount: marker.grossTotalSar,
+			totalAmountSar: marker.grossTotalSar,
+			sourceAmount: safe.sourceTotalGuestPaymentAmount,
+			sourceCurrency: safe.sourceCurrency,
+			totalPayoutSar: marker.payoutTotalSar,
+			netAfterExpensesTotal: marker.payoutTotalSar,
+			currency: safe.sourceCurrency,
+			sourceExchangeRateToSar: safe.exchangeRateToSar,
+			sourceExchangeRateSource: safe.exchangeRateSource,
+			exchangeRateToSar: safe.exchangeRateToSar,
+			exchangeRateSource: safe.exchangeRateSource,
+			paymentCollectionModel: "verified_evidence",
+			paymentInstructions: "verified source evidence",
+			paymentSummary: safe,
+		})
+	);
+}
+
+function hotelRunnerEmailCommercialEvidenceIsMaterialized(
+	reservation = {},
+	marker = {}
+) {
+	const pricing = reservation.adminPricing || {};
+	const summary = reservation.ota_financial_summary || {};
+	const supplier = reservation.supplierData || {};
+	const gross = round2(marker.grossTotalSar);
+	const payout = round2(marker.payoutTotalSar);
+	const expense = round2(marker.otaExpenseTotalSar);
+	return !!(
+		commercialEvidenceAmountMatches(pricing.clientTotal, gross) &&
+		commercialEvidenceAmountMatches(summary.clientTotal, gross) &&
+		commercialEvidenceAmountMatches(pricing.netAfterExpensesTotal, payout) &&
+		commercialEvidenceAmountMatches(pricing.otaExpenseTotal, expense) &&
+		pricing.defaultDeductionApplied === false &&
+		pricing.commercialVerified === true &&
+		!normalizeWhitespace(pricing.payoutFallbackReason || "") &&
+		summary.show === true &&
+		commercialEvidenceAmountMatches(summary.netAfterExpenses, payout) &&
+		commercialEvidenceAmountMatches(summary.netAfterOtaExpenses, payout) &&
+		commercialEvidenceAmountMatches(summary.otaExpenseTotal, expense) &&
+		summary.commercialVerified === true &&
+		!normalizeWhitespace(summary.payoutFallbackReason || "") &&
+		commercialEvidenceAmountMatches(supplier.otaTotalPayoutSar, payout) &&
+		commercialEvidenceAmountMatches(supplier.otaExpenseTotalSar, expense) &&
+		!normalizeWhitespace(supplier.otaPayoutFallbackReason || "") &&
+		commercialEvidencePaymentSummaryMatches(summary.paymentSummary, marker) &&
+		commercialEvidencePaymentSummaryMatches(supplier.otaPaymentSummary, marker)
+	);
+}
+
+function verifiedHotelRunnerEmailCommercialEvidence(
+	reservation = {},
+	{ provider = "", grossTotalSar, currency = "" } = {}
+) {
+	const marker = reservation?.supplierData?.hotelRunnerEmailCommercialEvidence;
+	if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
+	const markerProvider = normalizeOtaIdentityProvider(marker.provider);
+	const requestedProvider = provider
+		? normalizeOtaIdentityProvider(provider)
+		: markerProvider;
+	const markerIdentity = normalizeWhitespace(marker.otaIdentityKey || "").toLowerCase();
+	const reservationIdentities = new Set(
+		[
+			reservation.otaIdentityKey,
+			reservation.otaCrossTransportIdentityKey,
+		]
+			.map((value) => normalizeWhitespace(value || "").toLowerCase())
+			.filter(Boolean)
+	);
+	const markerGross = round2(marker.grossTotalSar);
+	const markerPayout = round2(marker.payoutTotalSar);
+	const markerExpense = round2(marker.otaExpenseTotalSar);
+	const markerCurrency = String(marker.currency || "").trim().toUpperCase();
+	const requestedCurrency = String(currency || markerCurrency)
+		.trim()
+		.toUpperCase();
+	const requestedGross =
+		grossTotalSar === undefined || grossTotalSar === null
+			? markerGross
+			: round2(grossTotalSar);
+	if (
+		marker.version !== 1 ||
+		marker.verified !== true ||
+		marker.source !== "authenticated_ota_email" ||
+		!markerProvider ||
+		!requestedProvider ||
+		markerProvider !== requestedProvider ||
+		!markerIdentity ||
+		!markerIdentity.startsWith(`${markerProvider}:`) ||
+		!reservationIdentities.has(markerIdentity) ||
+		markerCurrency !== "SAR" ||
+		requestedCurrency !== markerCurrency ||
+		markerGross <= 0 ||
+		markerPayout <= 0 ||
+		markerPayout > markerGross + 0.02 ||
+		markerExpense < 0 ||
+		Math.abs(round2(markerGross - markerPayout) - markerExpense) > 0.02 ||
+		requestedGross <= 0 ||
+		Math.abs(markerGross - requestedGross) > 0.02 ||
+		!validOtaEventDate(marker.sourceReceivedAt) ||
+		!validOtaEventDate(marker.appliedAt) ||
+		!constantTimeEvidenceHashMatches(
+			marker.evidenceHash,
+			hotelRunnerEmailCommercialEvidenceHash(marker)
+		) ||
+		!hotelRunnerEmailCommercialEvidenceIsMaterialized(reservation, marker)
+	) {
+		return null;
+	}
+	return { ...marker };
+}
+
+function directHotelRunnerAuthoritativeGrossTotal(existing = {}) {
+	const pricing = existing.adminPricing || {};
+	const summary = existing.ota_financial_summary || {};
+	const pricingMode = normalizeComparable(pricing.mode || "");
+	const pricingSource = normalizeComparable(pricing.source || "");
+	const summarySource = normalizeComparable(summary.source || "");
+	if (
+		pricingMode !== "hotelrunner api" ||
+		pricingSource !== "hotelrunner api" ||
+		(summarySource && summarySource !== "hotelrunner api") ||
+		String(existing.currency || "").trim().toUpperCase() !== "SAR"
+	) {
+		return 0;
+	}
+	const candidates = [
+		Number(existing.total_amount),
+		Number(pricing.clientTotal),
+		Number(summary.clientTotal),
+	];
+	if (!candidates.every((value) => Number.isFinite(value) && value > 0)) {
+		return 0;
+	}
+	const gross = round2(candidates[0]);
+	return candidates.every((value) => Math.abs(round2(value) - gross) <= 0.02)
+		? gross
+		: 0;
+}
+
+function directHotelRunnerEmailIdentityMatches(
+	normalized = {},
+	existing = {},
+	matchedReservationBy = []
+) {
+	const provider = normalizeOtaIdentityProvider(normalized.provider);
+	const existingProvider = normalizeOtaIdentityProvider(
+		existing?.supplierData?.otaProvider ||
+			existing?.supplierData?.supplierName ||
+			existing.booking_source
+	);
+	const confirmationNumber = normalizeConfirmation(
+		normalized.confirmationNumber || normalized.reservationId
+	);
+	const expectedIdentity = buildOtaIdentityKey(provider, confirmationNumber);
+	const existingIdentities = new Set(
+		[existing.otaIdentityKey, existing.otaCrossTransportIdentityKey]
+			.map((value) => normalizeWhitespace(value || "").toLowerCase())
+			.filter(Boolean)
+	);
+	return Boolean(
+		provider &&
+		existingProvider === provider &&
+		hasSourceField(normalized, "confirmationNumber") &&
+		expectedIdentity &&
+		existingIdentities.has(expectedIdentity.toLowerCase()) &&
+		Array.isArray(matchedReservationBy) &&
+		matchedReservationBy.some((field) =>
+			["otaIdentityKey", "otaCrossTransportIdentityKey"].includes(field)
+		)
+	);
+}
+
+function directHotelRunnerEmailHotelMatches(
+	normalized = {},
+	existing = {},
+	hotelDetails = null
+) {
+	const existingOwnerId = normalizeId(existing.belongsTo);
+	const hotelOwnerId = normalizeId(hotelDetails?.belongsTo);
+	if (
+		!hotelDetails?._id ||
+		hotelDetails.activateHotel !== true ||
+		hotelDetails.xHotelProActive === false ||
+		normalizeId(existing.hotelId) !== normalizeId(hotelDetails._id) ||
+		!existingOwnerId ||
+		!hotelOwnerId ||
+		existingOwnerId !== hotelOwnerId
+	) {
+		return false;
+	}
+	const exactHotel = findExactHotelNameMatch(
+		[hotelDetails],
+		expandHotelNameCandidates([
+			normalized.hotelName,
+			...(Array.isArray(normalized.hotelNameAliases)
+				? normalized.hotelNameAliases
+				: []),
+		])
+	);
+	return Boolean(
+		normalizeId(exactHotel?._id) === normalizeId(hotelDetails._id) ||
+			hasVerifiedSourceBackedDirectHotelId(normalized, hotelDetails)
+	);
+}
+
+function directHotelRunnerEmailRoomMatches(
+	normalized = {},
+	existing = {},
+	hotelDetails = null
+) {
+	if (!hasSourceField(normalized, "roomName")) return false;
+	const sourceRoomName = normalizeComparable(normalized.roomName || "");
+	const existingRooms = Array.isArray(existing.pickedRoomsType)
+		? existing.pickedRoomsType
+		: [];
+	const pricingRooms = Array.isArray(existing.pickedRoomsPricing)
+		? existing.pickedRoomsPricing
+		: [];
+	const expectedRoomCount = Number(existing.total_rooms || 0);
+	if (
+		!sourceRoomName ||
+		!Number.isInteger(expectedRoomCount) ||
+		expectedRoomCount <= 0 ||
+		roomBlockCount(existingRooms) !== expectedRoomCount ||
+		roomBlockCount(pricingRooms) !== expectedRoomCount ||
+		!protectedValuesEqual(existingRooms, pricingRooms)
+	) {
+		return false;
+	}
+	const roomConfigIds = new Set(
+		existingRooms
+			.map((room) => normalizeId(room?.hotelRoomConfigId || room?.localRoomConfigId))
+			.filter(Boolean)
+	);
+	// One source-backed room name cannot prove a heterogeneous room allocation.
+	if (roomConfigIds.size !== 1) return false;
+	const [roomConfigId] = roomConfigIds;
+	const configuredRooms = Array.isArray(hotelDetails?.roomCountDetails)
+		? hotelDetails.roomCountDetails
+		: [];
+	const exactConfiguredMatches = configuredRooms.filter(
+		(room) =>
+			room?.activeRoom !== false &&
+			[room?.displayName, room?.displayName_OtherLanguage]
+				.map((value) => normalizeComparable(value || ""))
+				.filter(Boolean)
+				.includes(sourceRoomName)
+	);
+	return !!(
+		exactConfiguredMatches.length === 1 &&
+		normalizeId(exactConfiguredMatches[0]?._id) === roomConfigId
+	);
+}
+
+function directHotelRunnerTopLevelPaymentStateProtected(existing = {}) {
+	const financeStatus = normalizeComparable(existing.financeStatus || "");
+	const payment = normalizeComparable(existing.payment || "");
+	const reportedPayment = normalizeComparable(
+		existing?.supplierData?.hotelRunner?.reportedPaymentMethod || ""
+	);
+	return financeStatus !== "not paid" || payment !== reportedPayment;
+}
+
+function directHotelRunnerCommercialOperationalStateProtected(existing = {}) {
+	if (
+		hasTerminalOtaReservationStatus(existing) ||
+		hasInhouseOtaReservationStatus(existing)
+	) {
+		return true;
+	}
+	const states = [existing.state, existing.reservation_status]
+		.map((value) => normalizeComparable(value || ""))
+		.filter(Boolean);
+	if (
+		states.length !== 2 ||
+		states[0] !== states[1] ||
+		!["confirmed", "pending confirmation"].includes(states[0])
+	) {
+		return true;
+	}
+	const pending = existing.pendingConfirmation;
+	if (!pending || typeof pending !== "object") return false;
+	const pendingStatus = normalizeComparable(pending.status || "");
+	if (
+		(pendingStatus && !["pending", "confirmed"].includes(pendingStatus)) ||
+		pending.inventoryBlocks === false ||
+		hasMeaningfulProtectedValue(pending.rejectionReason) ||
+		hasMeaningfulProtectedValue(pending.rejectedAt) ||
+		hasMeaningfulProtectedValue(pending.cancelledAt) ||
+		hasMeaningfulProtectedValue(pending.noShowAt) ||
+		hasMeaningfulProtectedValue(pending.lastUpdatedBy)
+	) {
+		return true;
+	}
+	return Object.entries(pending).some(
+		([key, value]) =>
+			/(reject|cancel|no.?show|checked.?in|checked.?out)/i.test(key) &&
+			hasMeaningfulProtectedValue(value)
+	);
+}
+
+function directHotelRunnerCommercialEnrichmentProtectedState(existing = {}) {
+	const pricing = existing.adminPricing || {};
+	const summary = existing.ota_financial_summary || {};
+	const visibility = existing.adminPricingVisibility || {};
+	const verifiedExistingEvidence = verifiedHotelRunnerEmailCommercialEvidence(
+		existing,
+		{
+			provider: existing?.supplierData?.otaProvider,
+			grossTotalSar: existing.total_amount,
+			currency: existing.currency,
+		}
+	);
+	const rootCandidates = [
+		Number(existing.sub_total),
+		Number(pricing.rootTotal),
+		Number(summary.hotelVisibleAmount),
+	].filter(Number.isFinite);
+	const rootPricingDrift =
+		rootCandidates.length < 2 ||
+		rootCandidates.some(
+			(value) => Math.abs(value - rootCandidates[0]) > 0.02
+		);
+	const unverifiedCommercialFields = Boolean(
+		!verifiedExistingEvidence &&
+			(pricing.commercialVerified === true ||
+				summary.commercialVerified === true ||
+				hasMeaningfulProtectedValue(pricing.netAfterExpensesTotal) ||
+				hasMeaningfulProtectedValue(pricing.otaExpenseTotal) ||
+				hasMeaningfulProtectedValue(summary.netAfterExpenses) ||
+				hasMeaningfulProtectedValue(summary.netAfterOtaExpenses) ||
+				hasMeaningfulProtectedValue(summary.otaExpenseTotal))
+	);
+	if (
+		directHotelRunnerCommercialOperationalStateProtected(existing) ||
+		(Array.isArray(existing.roomId) &&
+			existing.roomId.some((roomId) => normalizeId(roomId))) ||
+		(Array.isArray(existing.bedNumber) &&
+			existing.bedNumber.some(hasMeaningfulProtectedValue)) ||
+		hasCaptureOrSettlementActivity(existing) ||
+		Math.abs(Number(existing.paid_amount || 0)) > 0.0001 ||
+		directHotelRunnerTopLevelPaymentStateProtected(existing) ||
+		paidAmountBreakdownHasProtectedState(existing) ||
+		financialCycleHasProtectedState(existing) ||
+		adminPricingVisibilityHasProtectedState(existing) ||
+		otaReviewHasProtectedState(existing) ||
+		roomArraysHaveProtectedState(existing) ||
+		supplierDataHasProtectedState(existing) ||
+		rootPricingDrift ||
+		unverifiedCommercialFields ||
+		Math.abs(Number(existing.commission || 0)) > 0.0001 ||
+		(Array.isArray(existing.adminChangeLog) && existing.adminChangeLog.length) ||
+		hasMeaningfulProtectedValue(existing.createdByUserId) ||
+		hasMeaningfulProtectedValue(existing.orderTakeId) ||
+		hasMeaningfulProtectedValue(existing.financeRejectionComment) ||
+		hasMeaningfulProtectedValue(existing.totalReviewStatus) ||
+		hasMeaningfulProtectedValue(visibility.appliedBy) ||
+		Object.keys(pricing).some((key) => /override|manual/i.test(key))
+	) {
+		return true;
+	}
+	return false;
+}
+
+function directHotelRunnerEmailCommercialGuard({
+	normalized = {},
+	existing = {},
+	hotelDetails = null,
+	matchedReservationBy = [],
+	evidence = null,
+} = {}) {
+	const reject = (reason) => ({ ok: false, reason });
+	if (
+		!hasDirectHotelRunnerProjection(existing) ||
+		!isOtaInboundEmail(normalized) ||
+		normalized.sourceSenderTrusted !== true ||
+		normalized.sourceSenderAuthenticated !== true ||
+		normalized.requiresManualReview === true ||
+		normalizeComparable(normalized.intent || "") !== "new reservation" ||
+		normalizeComparable(normalized.eventType || "") !== "new"
+	) {
+		return reject("source_authority");
+	}
+	if (!evidence) return reject("commercial_evidence");
+	if (
+		!directHotelRunnerEmailIdentityMatches(
+			normalized,
+			existing,
+			matchedReservationBy
+		)
+	) {
+		return reject("identity");
+	}
+	if (!exactSourceBackedStayMatchesExisting(normalized, existing)) {
+		return reject("stay");
+	}
+	const incomingRoomCount = Number(normalized.roomCount || 0);
+	if (
+		!hasSourceField(normalized, "roomCount") ||
+		!Number.isInteger(incomingRoomCount) ||
+		incomingRoomCount <= 0 ||
+		incomingRoomCount !== Number(existing.total_rooms || 0)
+	) {
+		return reject("room_count");
+	}
+	if (!directHotelRunnerEmailRoomMatches(normalized, existing, hotelDetails)) {
+		return reject("room_identity");
+	}
+	if (!directHotelRunnerEmailHotelMatches(normalized, existing, hotelDetails)) {
+		return reject("hotel");
+	}
+	const hotelRunnerGross = directHotelRunnerAuthoritativeGrossTotal(existing);
+	if (
+		!hotelRunnerGross ||
+		Math.abs(hotelRunnerGross - Number(evidence.grossTotalSar || 0)) > 0.02
+	) {
+		return reject("gross_total");
+	}
+	if (directHotelRunnerCommercialEnrichmentProtectedState(existing)) {
+		return reject("protected_state");
+	}
+	return { ok: true, evidence, hotelRunnerGross };
+}
+
+function hasDirectCommercialEvidenceAttempt(normalized = {}) {
+	return Boolean(
+		hasSourceField(normalized, "amount") &&
+		Number(normalized.totalAmountSar || normalized.amount || 0) > 0 &&
+		hasExplicitOtaPayoutSar(normalized)
+	);
+}
+
+function directHotelRunnerCommercialEnrichmentSet(normalized = {}, evidence = {}) {
+	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	return {
+		"adminPricing.netAfterExpensesTotal": evidence.payoutTotalSar,
+		"adminPricing.otaExpenseTotal": evidence.otaExpenseTotalSar,
+		"adminPricing.defaultDeductionApplied": false,
+		"adminPricing.payoutFallbackReason": "",
+		"adminPricing.commercialVerified": true,
+		"ota_financial_summary.show": true,
+		"ota_financial_summary.netAfterExpenses": evidence.payoutTotalSar,
+		"ota_financial_summary.netAfterOtaExpenses": evidence.payoutTotalSar,
+		"ota_financial_summary.otaExpenseTotal": evidence.otaExpenseTotalSar,
+		"ota_financial_summary.commercialVerified": true,
+		"ota_financial_summary.paymentSummary": paymentSummary,
+		"ota_financial_summary.payoutFallbackReason": "",
+		"supplierData.otaPaymentSummary": paymentSummary,
+		"supplierData.otaTotalPayoutSar": evidence.payoutTotalSar,
+		"supplierData.otaExpenseTotalSar": evidence.otaExpenseTotalSar,
+		"supplierData.otaPayoutFallbackReason": "",
+		"supplierData.hotelRunnerEmailCommercialEvidence": evidence,
+	};
+}
+
+function applyHotelRunnerEmailCommercialEvidenceToDocument(
+	document = {},
+	normalized = {},
+	evidence = {}
+) {
+	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	document.adminPricing = {
+		...(document.adminPricing || {}),
+		netAfterExpensesTotal: evidence.payoutTotalSar,
+		otaExpenseTotal: evidence.otaExpenseTotalSar,
+		defaultDeductionApplied: false,
+		payoutFallbackReason: "",
+		commercialVerified: true,
+	};
+	document.ota_financial_summary = {
+		...(document.ota_financial_summary || {}),
+		show: true,
+		netAfterExpenses: evidence.payoutTotalSar,
+		netAfterOtaExpenses: evidence.payoutTotalSar,
+		otaExpenseTotal: evidence.otaExpenseTotalSar,
+		commercialVerified: true,
+		paymentSummary,
+		payoutFallbackReason: "",
+	};
+	document.supplierData = {
+		...(document.supplierData || {}),
+		otaPaymentSummary: paymentSummary,
+		otaTotalPayoutSar: evidence.payoutTotalSar,
+		otaExpenseTotalSar: evidence.otaExpenseTotalSar,
+		otaPayoutFallbackReason: "",
+		hotelRunnerEmailCommercialEvidence: evidence,
+	};
+}
+
+function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
+	return {
+		...buildReservationSnapshotFilter(existing, { includeHotel: true }),
+		belongsTo: existing.belongsTo,
+		state: existing.state,
+		reservation_status: existing.reservation_status,
+		total_rooms: existing.total_rooms,
+		total_amount: existing.total_amount,
+		currency: existing.currency,
+		"adminPricing.mode": existing.adminPricing?.mode,
+		"adminPricing.source": existing.adminPricing?.source,
+		"adminPricing.clientTotal": existing.adminPricing?.clientTotal,
+		"ota_financial_summary.source": existing.ota_financial_summary?.source,
+		"ota_financial_summary.clientTotal":
+			existing.ota_financial_summary?.clientTotal,
+		"supplierData.hotelRunner.transport":
+			existing.supplierData?.hotelRunner?.transport,
+		"supplierData.hotelRunner.reservationId":
+			existing.supplierData?.hotelRunner?.reservationId,
+		"supplierData.otaAutomationPipeline":
+			existing.supplierData?.otaAutomationPipeline,
+		"supplierData.otaSourceAuthority":
+			existing.supplierData?.otaSourceAuthority,
+	};
+}
+
+async function loadReservationForCommercialEvidence(reservationId) {
+	let query = Reservations.findById(reservationId);
+	if (query && typeof query.lean === "function") query = query.lean();
+	if (query && typeof query.exec === "function") return query.exec();
+	return query;
+}
+
+async function reconcileDirectHotelRunnerOwnedEmail({
+	normalized = {},
+	existing = {},
+	hotelDetails = null,
+	matchedReservationBy = [],
+	warnings = [],
+	errors = [],
+} = {}) {
+	if (!hasDirectHotelRunnerProjection(existing) || !isOtaInboundEmail(normalized)) {
+		return null;
+	}
+	const isNewReservation =
+		normalizeComparable(normalized.intent || "") === "new reservation" &&
+		normalizeComparable(normalized.eventType || "") === "new";
+	if (!isNewReservation) {
+		return {
+			status: "ignored",
+			actionTaken: "skipped",
+			skipReason: "lower_authority_ota_event_after_hotelrunner_api",
+			automationComment:
+				"The OTA email was retained for audit but cannot mutate a reservation already owned by the direct HotelRunner API.",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized);
+	if (!evidence) {
+		const incompleteEvidence = hasDirectCommercialEvidenceAttempt(normalized);
+		return {
+			status: incompleteEvidence ? "needs_review" : "duplicate_reservation",
+			actionTaken: "skipped",
+			skipReason: incompleteEvidence
+				? "hotelrunner_email_commercial_evidence_incomplete"
+				: "hotelrunner_direct_reservation_already_exists",
+			automationComment: incompleteEvidence
+				? "The OTA email contained partial payout evidence but did not satisfy every verified-commercial gate; no reservation fields were changed."
+				: "The OTA email matched a direct HotelRunner reservation and was retained for audit; no reservation fields were changed.",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	const alreadyApplied = verifiedHotelRunnerEmailCommercialEvidence(existing, {
+		provider: evidence.provider,
+		grossTotalSar: evidence.grossTotalSar,
+		currency: evidence.currency,
+	});
+	if (alreadyApplied?.evidenceHash === evidence.evidenceHash) {
+		return {
+			status: "duplicate_reservation",
+			actionTaken: "skipped",
+			skipReason: "hotelrunner_email_commercial_evidence_already_applied",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	const guard = directHotelRunnerEmailCommercialGuard({
+		normalized,
+		existing,
+		hotelDetails,
+		matchedReservationBy,
+		evidence,
+	});
+	if (!guard.ok) {
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "hotelrunner_email_commercial_enrichment_guard_failed",
+			automationComment:
+				"Verified OTA commercial evidence did not satisfy every direct-HotelRunner ownership invariant; no reservation fields were changed.",
+			warnings,
+			errors: [...errors, `Commercial enrichment gate failed: ${guard.reason}.`],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence);
+	const updateResult = await Reservations.updateOne(
+		{
+			...directHotelRunnerCommercialSnapshotFilter(existing),
+			"supplierData.hotelRunnerEmailCommercialEvidence.evidenceHash": {
+				$ne: evidence.evidenceHash,
+			},
+		},
+		addReservationVersionBump({
+			$set: set,
+			$push: {
+				reservationAuditLog: buildAuditEntry(
+					normalized,
+					"hotelrunner-commercial-enriched-from-verified-email",
+					warnings
+				),
+			},
+		})
+	);
+	const matchedCount = Number(updateResult?.matchedCount ?? updateResult?.n ?? 0);
+	if (!matchedCount) {
+		const latest = await loadReservationForCommercialEvidence(existing._id);
+		const latestEvidence = verifiedHotelRunnerEmailCommercialEvidence(latest, {
+			provider: evidence.provider,
+			grossTotalSar: evidence.grossTotalSar,
+			currency: evidence.currency,
+		});
+		if (latestEvidence?.evidenceHash === evidence.evidenceHash) {
+			return {
+				status: "duplicate_reservation",
+				actionTaken: "skipped",
+				skipReason: "hotelrunner_email_commercial_evidence_already_applied",
+				warnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
+		return {
+			status: "needs_review",
+			actionTaken: "skipped",
+			skipReason: "hotelrunner_email_commercial_enrichment_concurrent_change",
+			automationComment:
+				"The reservation changed while verified OTA commercial evidence was being applied; no retrying overwrite was attempted.",
+			warnings,
+			errors: [...errors, "Concurrent reservation change blocked commercial enrichment."],
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+	return {
+		status: "updated",
+		actionTaken: "commercial_enrichment",
+		warnings,
+		errors,
+		reservationId: existing._id,
+		hotelId: existing.hotelId,
+		pmsConfirmationNumber: existing.confirmation_number,
+		matchedReservationBy,
+		updatedFields: Object.keys(set),
+	};
 }
 
 function hasVerifiedSourceBackedDirectHotelId(normalized = {}, hotelDetails = {}) {
@@ -9399,7 +10196,11 @@ function buildExistingReservationUpdateSet({
 	warnings = [],
 } = {}) {
 	const set = {};
-	if (lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(normalized, existing)) {
+	if (
+		(isOtaInboundEmail(normalized) &&
+			hasDirectHotelRunnerProjection(existing)) ||
+		lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(normalized, existing)
+	) {
 		return set;
 	}
 	const confirmationNumber = normalizeConfirmation(
@@ -11868,19 +12669,6 @@ async function createUnmappedOtaReviewReservation({
 	allowCreate = false,
 	resolvedHotel = null,
 } = {}) {
-	const boundaryHotelId = resolvedHotel?._id || normalized.hotelId || "";
-	if (isHotelRunnerManagedHotelId(boundaryHotelId)) {
-		logReconcile("ignored.hotelrunner_managed_hotel", {
-			confirmationNumber,
-			hotelId: normalizeId(boundaryHotelId),
-			stage: "unmapped_review_create",
-		});
-		return hotelRunnerManagedEmailSkipResult({
-			hotelId: boundaryHotelId,
-			warnings,
-			errors,
-		});
-	}
 	const crossTransportIdentityKey = buildOtaCrossTransportIdentityKey(
 		normalized,
 		confirmationNumber
@@ -11963,6 +12751,14 @@ async function createUnmappedOtaReviewReservation({
 	);
 	if (crossTransportIdentityKey) {
 		document.otaCrossTransportIdentityKey = crossTransportIdentityKey;
+	}
+	const commercialEvidence = buildHotelRunnerEmailCommercialEvidence(normalized);
+	if (commercialEvidence) {
+		applyHotelRunnerEmailCommercialEvidenceToDocument(
+			document,
+			normalized,
+			commercialEvidence
+		);
 	}
 	document.reservationAuditLog = [
 		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
@@ -12353,21 +13149,6 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				crossTransportIdentityKey
 		  )
 		: [];
-	if (existing && isHotelRunnerManagedHotelId(existing.hotelId)) {
-		logReconcile("ignored.hotelrunner_managed_hotel", {
-			confirmationNumber,
-			hotelId: normalizeId(existing.hotelId),
-			reservationId: String(existing._id || ""),
-			stage: "existing_reservation",
-		});
-		return hotelRunnerManagedEmailSkipResult({
-			hotelId: existing.hotelId,
-			reservation: existing,
-			warnings,
-			errors,
-			matchedReservationBy,
-		});
-	}
 	const authoritativeInboundEmailCancellation = !!(
 		existing &&
 		isAuthoritativeInboundEmailCancellation(normalized, statusToApply)
@@ -12657,6 +13438,30 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 				pmsConfirmationNumber: existing.confirmation_number,
 				matchedReservationBy,
 			};
+		}
+	}
+	if (
+		existing &&
+		hasDirectHotelRunnerProjection(existing) &&
+		isOtaInboundEmail(normalized)
+	) {
+		const directOwnedResult = await reconcileDirectHotelRunnerOwnedEmail({
+			normalized,
+			existing,
+			hotelDetails: independentlyResolvedIncomingHotel,
+			matchedReservationBy,
+			warnings,
+			errors,
+		});
+		if (directOwnedResult) {
+			logReconcile("hotelrunner_owned_email.boundary", {
+				confirmationNumber,
+				reservationId: String(existing._id || ""),
+				status: directOwnedResult.status,
+				skipReason: directOwnedResult.skipReason || "",
+				actionTaken: directOwnedResult.actionTaken || "",
+			});
+			return directOwnedResult;
 		}
 	}
 
@@ -13108,21 +13913,6 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 			warnings,
 			errors,
 			allowCreate: true,
-		});
-	}
-	if (isHotelRunnerManagedHotelId(hotelDetails._id)) {
-		logReconcile("ignored.hotelrunner_managed_hotel", {
-			confirmationNumber,
-			hotelId: normalizeId(hotelDetails._id),
-			reservationId: existing?._id ? String(existing._id) : "",
-			stage: "resolved_hotel",
-		});
-		return hotelRunnerManagedEmailSkipResult({
-			hotelId: hotelDetails._id,
-			reservation: existing,
-			warnings,
-			errors,
-			matchedReservationBy,
 		});
 	}
 	if (existing && normalized.authoritativeExistingRefresh === true) {
@@ -13626,6 +14416,14 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 	);
 	if (crossTransportIdentityKey) {
 		document.otaCrossTransportIdentityKey = crossTransportIdentityKey;
+	}
+	const commercialEvidence = buildHotelRunnerEmailCommercialEvidence(normalized);
+	if (commercialEvidence) {
+		applyHotelRunnerEmailCommercialEvidenceToDocument(
+			document,
+			normalized,
+			commercialEvidence
+		);
 	}
 	applyVccSafeFieldsToDocument(document, normalized);
 	document.confirmation_number = await generateUniquePmsConfirmationNumber();
@@ -14160,6 +14958,10 @@ module.exports = {
 	roomCapacityFromLabels,
 	findConfidentFuzzyHotelMatch,
 	isAuthoritativeSourceUpgrade,
+	buildHotelRunnerEmailCommercialEvidence,
+	hotelRunnerEmailCommercialEvidenceHash,
+	verifiedHotelRunnerEmailCommercialEvidence,
+	directHotelRunnerEmailCommercialGuard,
 	lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi,
 	canUseDirectAfterRelaySourceSkew,
 	directAfterRelayInventoryConflict,

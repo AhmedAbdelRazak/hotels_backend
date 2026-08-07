@@ -9,6 +9,7 @@ const {
 	normalizedFromStoredEvent,
 } = require("./hotelrunnerWorker");
 const { normalizeHotelRunnerReservation } = require("./hotelrunnerPayload");
+const { persistHotelRunnerDelivery } = require("./hotelrunnerEventService");
 
 test("cancellation stay-presence evidence survives the durable event round trip", () => {
 	const normalized = normalizeHotelRunnerReservation({
@@ -69,6 +70,539 @@ test("worker claims oldest source events first so lifecycle updates follow creat
 	assert.deepEqual(captured.options.sort, { sourceUpdatedAt: 1, createdAt: 1 });
 	assert.equal(captured.filter.hotelId, "64b000000000000000000001");
 	assert.deepEqual(captured.filter.status.$in, ["pending", "retry", "processing"]);
+});
+
+test("projection claims exclude every event archived before the activation cutoff", async () => {
+	let captured = null;
+	const EventModel = {
+		findOneAndUpdate(filter, update, options) {
+			captured = { filter, update, options };
+			return {
+				select() {
+					return this;
+				},
+				exec: async () => null,
+			};
+		},
+	};
+	const cutoff = new Date("2026-08-06T20:00:00.000Z");
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionNotBefore: cutoff,
+			pullEnabled: false,
+		},
+		dependencies: {
+			EventModel,
+			SyncStateModel: {},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	await worker.claimEvent();
+	assert.equal(captured.filter.receivedAt.$gte, cutoff);
+	assert.equal(captured.filter.sourceUpdatedAt.$gte, cutoff);
+	assert.equal(captured.filter.source, "push");
+});
+
+test("an idle worker probes without churning the projection lease", async () => {
+	let projectionStateWrites = 0;
+	let projectionLeaseClaims = 0;
+	const EventModel = {
+		exists(filter) {
+			assert.equal(filter.hotelId, "64b000000000000000000001");
+			return { exec: async () => null };
+		},
+	};
+	const SyncStateModel = {
+		updateOne() {
+			projectionStateWrites += 1;
+			return { exec: async () => ({ matchedCount: 1 }) };
+		},
+		findOneAndUpdate() {
+			projectionLeaseClaims += 1;
+			return { exec: async () => ({ _id: "unexpected-lease" }) };
+		},
+	};
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		dependencies: {
+			EventModel,
+			SyncStateModel,
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	assert.equal(await worker.runOnce(), false);
+	assert.equal(projectionStateWrites, 0);
+	assert.equal(projectionLeaseClaims, 0);
+});
+
+test("a database property lease serializes projection across duplicate workers", async () => {
+	const state = { hotelId: "64b000000000000000000001" };
+	const query = (value) => ({ exec: async () => value });
+	const SyncStateModel = {
+		updateOne(filter, update) {
+			if (
+				!filter.projectionLeaseOwner ||
+				filter.projectionLeaseOwner === state.projectionLeaseOwner
+			) {
+				Object.assign(state, update.$set || {});
+				for (const key of Object.keys(update.$unset || {})) delete state[key];
+			}
+			return query({ matchedCount: 1 });
+		},
+		findOneAndUpdate(filter, update) {
+			const now = update.$set.projectionLeaseAcquiredAt;
+			const ownerMatches = state.projectionLeaseOwner === filter.$or[3].projectionLeaseOwner;
+			const expired =
+				!state.projectionLeaseUntil ||
+				new Date(state.projectionLeaseUntil).getTime() <= now.getTime();
+			if (!expired && !ownerMatches) return query(null);
+			Object.assign(state, update.$set);
+			return query({ ...state });
+		},
+	};
+	const dependencies = {
+		EventModel: {},
+		SyncStateModel,
+		createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+	};
+	const config = {
+		configured: true,
+		hotelId: state.hotelId,
+		projectionEnabled: true,
+		pullEnabled: false,
+	};
+	const first = createHotelRunnerWorker({
+		config,
+		instanceId: "projection-worker-a",
+		dependencies,
+	});
+	const second = createHotelRunnerWorker({
+		config,
+		instanceId: "projection-worker-b",
+		dependencies,
+	});
+	const now = new Date("2026-08-06T20:00:00.000Z");
+
+	assert.ok(await first.claimProjectionLease(now));
+	assert.equal(await second.claimProjectionLease(now), null);
+	await first.releaseProjectionLease(new Date(now.getTime() + 1));
+	assert.ok(await second.claimProjectionLease(new Date(now.getTime() + 2)));
+});
+
+test("projection lease renewal fails closed after ownership is lost", async () => {
+	let ownsLease = true;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		instanceId: "projection-heartbeat-worker",
+		dependencies: {
+			EventModel: {},
+			SyncStateModel: {
+				updateOne(filter, update) {
+					assert.equal(
+						filter.projectionLeaseOwner,
+						"projection-heartbeat-worker"
+					);
+					assert.ok(update.$set.projectionLeaseUntil instanceof Date);
+					return {
+						exec: async () => ({ matchedCount: ownsLease ? 1 : 0 }),
+					};
+				},
+			},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	assert.equal(await worker.renewProjectionLease(), true);
+	ownsLease = false;
+	await assert.rejects(
+		worker.renewProjectionLease(),
+		(error) => error?.code === "HOTELRUNNER_PROJECTION_LEASE_LOST"
+	);
+});
+
+test("event projection assertion is an owned-processing CAS and fails closed", async () => {
+	let capturedFilter = null;
+	let capturedUpdate = null;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		instanceId: "event-cas-worker",
+		dependencies: {
+			EventModel: {
+				updateOne(filter, update) {
+					capturedFilter = filter;
+					capturedUpdate = update;
+					return { exec: async () => ({ matchedCount: 0 }) };
+				},
+			},
+			SyncStateModel: {},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	await assert.rejects(
+		worker.assertEventProjectable({
+			_id: "event-cas-lost",
+			hotelId: "64b000000000000000000001",
+			payloadHash: "original-payload-hash",
+		}),
+		(error) => error?.code === "HOTELRUNNER_EVENT_LEASE_LOST"
+	);
+	assert.deepEqual(capturedFilter, {
+		_id: "event-cas-lost",
+		hotelId: "64b000000000000000000001",
+		status: "processing",
+		leaseOwner: "event-cas-worker",
+		payloadHash: "original-payload-hash",
+		integrityReason: { $in: ["", null] },
+	});
+	assert.ok(capturedUpdate.$set.leaseUntil instanceof Date);
+});
+
+test("finish and retry surface event lease loss and never count a false completion", async () => {
+	let metricWrites = 0;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		instanceId: "lost-event-lease-worker",
+		dependencies: {
+			EventModel: {
+				updateOne: () => ({ exec: async () => ({ matchedCount: 0 }) }),
+			},
+			SyncStateModel: {
+				updateOne: () => {
+					metricWrites += 1;
+					return { exec: async () => ({ matchedCount: 1 }) };
+				},
+			},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+	const event = {
+		_id: "lost-event-lease",
+		hotelId: "64b000000000000000000001",
+		payloadHash: "owned-payload-hash",
+		attempts: 1,
+	};
+
+	await assert.rejects(
+		worker.finishEvent(event, { status: "created" }),
+		(error) => error?.code === "HOTELRUNNER_EVENT_LEASE_LOST"
+	);
+	assert.equal(metricWrites, 0);
+	await assert.rejects(
+		worker.retryEvent(event, new Error("synthetic projection error")),
+		(error) => error?.code === "HOTELRUNNER_EVENT_LEASE_LOST"
+	);
+	assert.equal(metricWrites, 0);
+});
+
+test("a callback conflict in the pre-project window preserves the active first payload", async () => {
+	const hotelId = "64b000000000000000000001";
+	const instanceId = "pre-project-first-payload-worker";
+	const config = {
+		configured: true,
+		hotelId,
+		hrIdFingerprint: "pre-project-property-fingerprint",
+		callbackMaxReservations: 100,
+		projectionEnabled: true,
+		pullEnabled: false,
+	};
+	const originalPayload = {
+		message_uid: "pre-project-conflict-uid",
+		reservation_id: "pre-project-reservation",
+		hr_number: "R-PRE-PROJECT",
+		provider_number: "BOOKING-PRE-PROJECT",
+		channel: "bookingcom",
+		state: "confirmed",
+		guest: "First Payload Guest",
+		checkin_date: "2026-08-10",
+		checkout_date: "2026-08-11",
+		updated_at: "2026-08-06T12:00:00.000Z",
+		total_guests: 1,
+		total_rooms: 1,
+		total: "100",
+		currency: "SAR",
+		rooms: [
+			{
+				id: "pre-project-room",
+				state: "confirmed",
+				inv_code: "INV-PRE-PROJECT",
+				checkin_date: "2026-08-10",
+				checkout_date: "2026-08-11",
+				nights: 1,
+				total_guest: 1,
+				total_adult: 1,
+				price: "100",
+				total: "100",
+				daily_prices: [{ date: "2026-08-10", price: "100" }],
+			},
+		],
+	};
+	let event = null;
+	let eventSequence = 0;
+	const query = (resolve) => ({
+		select() {
+			return this;
+		},
+		exec: async () => (typeof resolve === "function" ? resolve() : resolve),
+	});
+	const matchesOwnedEvent = (filter) =>
+		event &&
+		String(filter._id) === String(event._id) &&
+		String(filter.hotelId) === String(event.hotelId) &&
+		filter.status === event.status &&
+		filter.leaseOwner === event.leaseOwner &&
+		filter.payloadHash === event.payloadHash &&
+		filter.integrityReason.$in.includes(event.integrityReason ?? null) &&
+		(!filter.integrityConflict ||
+			(filter.integrityConflict.$ne === true
+				? event.integrityConflict !== true
+				: event.integrityConflict === filter.integrityConflict));
+	const EventModel = {
+		exists: () => query(() => (event?.status === "pending" ? { _id: event._id } : null)),
+		findOneAndUpdate(filter, update) {
+			return query(() => {
+				if (Array.isArray(update)) {
+					if (!event || event.payloadHash !== filter.payloadHash) return null;
+					const conflict =
+						update[0].$set.integrityConflicts.$slice[0].$concatArrays[1][0].$literal;
+					const activeProcessing =
+						event.status === "processing" &&
+						Boolean(String(event.leaseOwner || "").trim()) &&
+						event.leaseUntil instanceof Date &&
+						event.leaseUntil.getTime() > conflict.receivedAt.getTime();
+					const alreadyProcessed = [
+						"completed",
+						"ignored",
+						"attention",
+					].includes(event.status);
+					event.integrityConflict = true;
+					event.integrityConflictCount =
+						Number(event.integrityConflictCount || 0) + 1;
+					event.integrityConflicts = [
+						...(event.integrityConflicts || []),
+						conflict,
+					].slice(-5);
+					if (alreadyProcessed) {
+						event.status = "attention";
+					} else if (!activeProcessing) {
+						event.status = "quarantined";
+						event.integrityReason = "message_uid_payload_conflict";
+						event.processedAt = conflict.receivedAt;
+					}
+					if (!activeProcessing) {
+						event.leaseOwner = "";
+						event.leaseAcquiredAt = null;
+						event.leaseUntil = null;
+					}
+					return event;
+				}
+				if (filter.eventKey) {
+					if (!event) {
+						event = {
+							_id: `pre-project-event-${++eventSequence}`,
+							deliveryCount: 0,
+							...(update.$setOnInsert || {}),
+							toObject() {
+								return { ...this };
+							},
+						};
+					}
+					Object.assign(event, update.$set || {});
+					event.deliveryCount += Number(update.$inc?.deliveryCount || 0);
+					return event;
+				}
+				if (filter.status?.$in && event?.status === "pending") {
+					Object.assign(event, update.$set || {});
+					event.attempts = Number(event.attempts || 0) + 1;
+					return event;
+				}
+				return null;
+			});
+		},
+		updateOne(filter, update) {
+			return query(() => {
+				if (!matchesOwnedEvent(filter)) return { matchedCount: 0 };
+				Object.assign(event, update.$set || {});
+				for (const key of Object.keys(update.$unset || {})) delete event[key];
+				return { matchedCount: 1 };
+			});
+		},
+	};
+	await persistHotelRunnerDelivery(
+		{
+			config,
+			hotel: { _id: hotelId },
+			rawReservation: originalPayload,
+			receivedAt: new Date("2026-08-06T12:00:01.000Z"),
+		},
+		{ EventModel }
+	);
+	let callbackConflict = null;
+	let projected = 0;
+	const SyncStateModel = {
+		updateOne: () => query({ matchedCount: 1 }),
+		findOneAndUpdate: () => query({ _id: "pre-project-sync-state" }),
+	};
+	const worker = createHotelRunnerWorker({
+		config,
+		instanceId,
+		dependencies: {
+			EventModel,
+			SyncStateModel,
+			HotelModel: {
+				findOne: () => ({
+					select() {
+						return this;
+					},
+					lean() {
+						return this;
+					},
+					exec: async () => {
+						assert.equal(event.status, "processing");
+						callbackConflict = await persistHotelRunnerDelivery(
+							{
+								config,
+								hotel: { _id: hotelId },
+								rawReservation: {
+									...originalPayload,
+									note: "different callback payload while processing",
+								},
+								receivedAt: new Date("2026-08-06T12:00:02.000Z"),
+							},
+							{ EventModel }
+						);
+						assert.equal(event.leaseOwner, instanceId);
+						return { _id: hotelId, belongsTo: "64b000000000000000000002" };
+					},
+				}),
+			},
+			projectReservation: async ({ normalized }) => {
+				projected += 1;
+				assert.equal(normalized.guestName, "First Payload Guest");
+				return {
+					status: "created",
+					mirrorId: "hotelrunner-mirror",
+					reservationMongoId: "local-reservation",
+				};
+			},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	assert.equal(await worker.runOnce(), true);
+	assert.equal(projected, 1);
+	assert.equal(callbackConflict.firstPayloadWins, true);
+	assert.equal(callbackConflict.activeProcessing, true);
+	assert.equal(event.status, "attention");
+	assert.equal(event.integrityConflict, true);
+	assert.equal(event.integrityConflictCount, 1);
+	assert.equal(event.integrityConflicts.length, 1);
+	assert.equal(event.mirrorId, "hotelrunner-mirror");
+	assert.equal(event.reservationMongoId, "local-reservation");
+	assert.equal(event.result.status, "created");
+	assert.equal(event.result.integrityConflict, true);
+});
+
+test("an applied overbooking create or modification remains durably visible as attention", async () => {
+	let eventUpdate = null;
+	const query = (value) => ({ exec: async () => value });
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			pullEnabled: false,
+		},
+		instanceId: "inventory-attention-worker",
+		dependencies: {
+			EventModel: {
+				updateOne(filter, update) {
+					eventUpdate = { filter, update };
+					return query({ matchedCount: 1 });
+				},
+			},
+			SyncStateModel: {
+				updateOne: () => query({ matchedCount: 1 }),
+			},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	await worker.finishEvent(
+		{
+			_id: "event-with-inventory-warning",
+			hotelId: "64b000000000000000000001",
+		},
+		{
+			status: "updated",
+			inventoryIssueCount: 1,
+			inventorySummary: [{ roomType: "Double", shortage: 1 }],
+		}
+	);
+	assert.equal(eventUpdate.update.$set.status, "attention");
+	assert.equal(eventUpdate.update.$set.result.inventoryIssueCount, 1);
+	assert.deepEqual(eventUpdate.update.$set.result.inventorySummary, [
+		{ roomType: "Double", shortage: 1 },
+	]);
+
+	await worker.finishEvent(
+		{
+			_id: "created-event-with-inventory-warning",
+			hotelId: "64b000000000000000000001",
+		},
+		{
+			status: "created",
+			inventoryIssueCount: 1,
+			inventorySummary: [{ roomType: "Triple", shortage: 1 }],
+		}
+	);
+	assert.equal(eventUpdate.update.$set.status, "attention");
+
+	await worker.finishEvent(
+		{
+			_id: "event-with-stale-commercial-evidence",
+			hotelId: "64b000000000000000000001",
+		},
+		{
+			status: "updated",
+			commercialProtected: true,
+			commercialEvidenceStale: true,
+			attentionCode: "hotelrunner_commercial_evidence_stale",
+		}
+	);
+	assert.equal(eventUpdate.update.$set.status, "attention");
+	assert.equal(
+		eventUpdate.update.$set.result.attentionCode,
+		"hotelrunner_commercial_evidence_stale"
+	);
+	assert.equal(eventUpdate.update.$set.result.commercialEvidenceStale, true);
+	assert.equal(
+		eventUpdate.update.$set.errorCode,
+		"hotelrunner_commercial_evidence_stale"
+	);
 });
 
 test("every ordinary and recovery claim is scoped to the configured property", async () => {
@@ -133,6 +667,71 @@ test("projection gate leaves the durable queue untouched during bootstrap", asyn
 	assert.equal(await worker.runCycle(30_000), false);
 	assert.equal(eventQueries, 0);
 	assert.equal(pullCalls, 1, "bootstrap must still discover rooms and archive pulls");
+});
+
+test("invalid worker configuration fails before any queue or lease access", async () => {
+	let databaseCalls = 0;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: false,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		dependencies: {
+			EventModel: {
+				exists() {
+					databaseCalls += 1;
+					return { exec: async () => ({ _id: "must-not-read" }) };
+				},
+			},
+			SyncStateModel: {
+				updateOne() {
+					databaseCalls += 1;
+					return { exec: async () => ({ matchedCount: 1 }) };
+				},
+			},
+			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
+		},
+	});
+
+	await assert.rejects(
+		worker.runOnce(),
+		(error) => error?.code === "HOTELRUNNER_CONFIG_INVALID"
+	);
+	assert.equal(databaseCalls, 0);
+});
+
+test("scheduled room-list refresh is independent from reservation-history pull", async () => {
+	let roomListChecks = 0;
+	let pullChecks = 0;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: false,
+			pullEnabled: false,
+			roomListSyncEnabled: true,
+		},
+		dependencies: {
+			EventModel: {},
+			SyncStateModel: {},
+			createPullSync: () => ({
+				runRoomListOnly: async () => {
+					roomListChecks += 1;
+					return { status: "not_due", apiCalls: 0 };
+				},
+				runIfDue: async () => {
+					pullChecks += 1;
+					return { status: "disabled" };
+				},
+			}),
+		},
+	});
+
+	assert.equal(await worker.runCycle(30_000), false);
+	assert.equal(roomListChecks, 1);
+	assert.equal(pullChecks, 1);
 });
 
 test("a shared-identity quarantine is terminal and does not burn retry attempts", async () => {
@@ -208,7 +807,10 @@ test("a shared-identity quarantine is terminal and does not burn retry attempts"
 		instanceId: event.leaseOwner,
 		dependencies: {
 			EventModel,
-			SyncStateModel: { updateOne: () => query({ matchedCount: 1 }) },
+			SyncStateModel: {
+				updateOne: () => query({ matchedCount: 1 }),
+				findOneAndUpdate: () => query({ _id: "sync-state-1" }),
+			},
 			HotelModel: {
 				findOne: () => ({
 					select() {

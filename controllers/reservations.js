@@ -83,9 +83,32 @@ const {
 	buildSafeLegacyLocalReservationPayload,
 } = require("../services/hotelrunnerLegacyLocalReservation");
 const {
+	buildHotelRunnerReservationExpression,
+	buildHotelRunnerSafeCommissionExpression,
+	buildHotelRunnerSafeNetExpression,
+	buildHotelRunnerUnverifiedExpenseCountExpression,
+	buildHotelRunnerUnverifiedNetCountExpression,
+	isHotelRunnerReservation,
+} = require("../services/hotelrunnerReportPricing");
+const {
+	resolveHotelRunnerPlatformCommission,
+} = require("../services/hotelrunnerPlatformFinance");
+const {
+	buildTrustedDirectHotelRunnerCommissionAssignment,
+	normalizeExplicitHotelRunnerCommission,
+} = require("../services/hotelrunnerCommissionAssignment");
+const {
+	hasDirectHotelRunnerProjection,
+} = require("../services/hotelrunnerOtaEmailBoundary");
+const {
+	addReservationVersionBump,
+	buildReservationSnapshotFilter,
+} = require("../services/otaReviewConcurrency");
+const {
 	canPlatformStaffOverrideReservationInventory,
 } = require("../services/reservationInventoryOverridePolicy");
 const {
+	assignedHotelIds: assignedHotelIdsForReservationUpdate,
 	canEditHotelReservation,
 	sanitizeHotelReservationUpdate,
 } = require("../services/hotelReservationUpdatePolicy");
@@ -146,6 +169,84 @@ const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
 	"i"
 );
+
+const legacyFinancialReportCommissionExpression = () => ({
+	$cond: [
+		{ $eq: ["$payment", "expedia collect"] },
+		0,
+		{
+			$cond: [
+				{
+					$in: ["$booking_source", ["jannat", "affiliate", "janat"]],
+				},
+				{ $multiply: ["$total_amount", 0.1] },
+				{ $subtract: ["$total_amount", "$sub_total"] },
+			],
+		},
+	],
+});
+
+const collectedReservationFinanceAggregationPipeline = (dynamicFilter) => [
+	{ $match: dynamicFilter },
+	{
+		$group: {
+			_id: null,
+			total_reservation: { $sum: 1 },
+			total_amount: { $sum: "$total_amount" },
+			actual_amount: {
+				$sum: buildHotelRunnerSafeNetExpression("$sub_total"),
+			},
+			actualAmountUnavailableCount: {
+				$sum: buildHotelRunnerUnverifiedNetCountExpression(),
+			},
+			legacyCommissionGross: {
+				$sum: {
+					$cond: [
+						buildHotelRunnerReservationExpression(),
+						0,
+						"$total_amount",
+					],
+				},
+			},
+			legacyCommissionBase: {
+				$sum: {
+					$cond: [
+						buildHotelRunnerReservationExpression(),
+						0,
+						"$sub_total",
+					],
+				},
+			},
+			hotelRunnerVerifiedOtaExpense: {
+				$sum: buildHotelRunnerSafeCommissionExpression(0),
+			},
+			commissionUnavailableCount: {
+				$sum: buildHotelRunnerUnverifiedExpenseCountExpression(),
+			},
+		},
+	},
+	{
+		$project: {
+			_id: 0,
+			total_reservation: 1,
+			total_amount: 1,
+			actual_amount: 1,
+			actualAmountUnavailableCount: 1,
+			commission: {
+				$add: [
+					{
+						$subtract: [
+							"$legacyCommissionGross",
+							"$legacyCommissionBase",
+						],
+					},
+					"$hotelRunnerVerifiedOtaExpense",
+				],
+			},
+			commissionUnavailableCount: 1,
+		},
+	},
+];
 
 const getShortCache = (cache, key) => {
 	const entry = cache.get(key);
@@ -412,20 +513,50 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 	const storedCommissionStatus = String(reservation?.commissionStatus || "")
 		.trim()
 		.toLowerCase();
-	const commissionWasReviewed =
-		!commissionAssignmentReset &&
-		(updates.commission !== undefined ||
-			updates.financial_cycle?.commissionAssigned === true ||
-			reservation?.commissionData?.assigned === true ||
-			existingCycle.commissionAssigned === true ||
-			ASSIGNED_COMMISSION_STATUSES.has(storedCommissionStatus) ||
-			storedReservationCommission > 0 ||
-			storedCycleCommission > 0);
+	const directHotelRunnerReservation = isHotelRunnerReservation({
+		...reservation,
+		adminPricing: updates.adminPricing || reservation?.adminPricing,
+		supplierData: updates.supplierData || reservation?.supplierData,
+	});
+	const hotelRunnerFinanceCandidate = directHotelRunnerReservation
+		? {
+				...reservation,
+				...updates,
+				adminPricing: updates.adminPricing || reservation?.adminPricing,
+				supplierData: updates.supplierData || reservation?.supplierData,
+				financial_cycle: {
+					...existingCycle,
+					...(updates.financial_cycle || {}),
+				},
+				commissionData: {
+					...(reservation?.commissionData || {}),
+					...(updates.commissionData || {}),
+				},
+		  }
+		: null;
+	const hotelRunnerPlatformFinance = directHotelRunnerReservation
+		? resolveHotelRunnerPlatformCommission(hotelRunnerFinanceCandidate)
+		: null;
+	const commissionWasReviewed = !commissionAssignmentReset &&
+		(directHotelRunnerReservation
+			? updates.commission !== undefined ||
+			  hotelRunnerPlatformFinance?.available === true
+			: updates.commission !== undefined ||
+			  updates.financial_cycle?.commissionAssigned === true ||
+			  reservation?.commissionData?.assigned === true ||
+			  existingCycle.commissionAssigned === true ||
+			  ASSIGNED_COMMISSION_STATUSES.has(storedCommissionStatus) ||
+			  storedReservationCommission > 0 ||
+			  storedCycleCommission > 0);
 	const commissionAmount = n2(
 		commissionAssignmentReset
 			? 0
 			: updates.commission !== undefined
 			? updates.commission
+			: directHotelRunnerReservation
+			? hotelRunnerPlatformFinance?.available === true
+				? hotelRunnerPlatformFinance.amount
+				: 0
 			: storedReservationCommission > 0
 			? storedReservationCommission
 			: storedCycleCommission > 0
@@ -475,10 +606,14 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		collectionModel === "source_commission_only"
 			? commissionAmount
 			: 0;
-	const commissionSideClosed =
-		(!!commissionPaid &&
-			(!commissionRequiresAgentApproval || commissionAgentApproved)) ||
-		(commissionWasReviewed && commissionAmount <= 0);
+	const commissionSideClosed = directHotelRunnerReservation
+		? commissionWasReviewed &&
+		  ((!!commissionPaid &&
+				(!commissionRequiresAgentApproval || commissionAgentApproved)) ||
+			commissionAmount <= 0)
+		: (!!commissionPaid &&
+				(!commissionRequiresAgentApproval || commissionAgentApproved)) ||
+		  (commissionWasReviewed && commissionAmount <= 0);
 
 	const isClosed =
 		collectionModel === "pms_collected"
@@ -539,6 +674,109 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 	};
 };
 
+const resolveCommissionPaidReview = (reservation = {}, body = {}) => {
+	const hasCommissionInput = Object.prototype.hasOwnProperty.call(
+		body || {},
+		"commission"
+	);
+	if (!isHotelRunnerReservation(reservation)) {
+		return {
+			allowed: true,
+			isHotelRunner: false,
+			hasCommissionInput,
+			amount: null,
+		};
+	}
+
+	let financeCandidate =
+		typeof reservation.toObject === "function"
+			? reservation.toObject()
+			: { ...reservation };
+	let reviewedCommissionAmount = null;
+	if (hasCommissionInput) {
+		const rawCommission = body.commission;
+		const suppliedCommission = Number(rawCommission);
+		const scaledCommission = suppliedCommission * 100;
+		if (
+			rawCommission === null ||
+			typeof rawCommission === "boolean" ||
+			(typeof rawCommission === "string" && !rawCommission.trim()) ||
+			!Number.isFinite(suppliedCommission) ||
+			suppliedCommission < 0 ||
+			!Number.isSafeInteger(Math.round(scaledCommission)) ||
+			Math.abs(scaledCommission - Math.round(scaledCommission)) > 1e-7
+		) {
+			return {
+				allowed: false,
+				isHotelRunner: true,
+				hasCommissionInput,
+				amount: null,
+				statusCode: 400,
+				error: "Commission must be an explicit non-negative amount.",
+			};
+		}
+		reviewedCommissionAmount = n2(suppliedCommission);
+		financeCandidate = {
+			...financeCandidate,
+			commission: reviewedCommissionAmount,
+			commissionData: {
+				...(financeCandidate.commissionData || {}),
+				assigned: true,
+				amount: reviewedCommissionAmount,
+				commissionAmount: reviewedCommissionAmount,
+				commissionValue: reviewedCommissionAmount,
+				proposedByAgent: false,
+			},
+			financial_cycle: {
+				...(financeCandidate.financial_cycle || {}),
+				commissionAssigned: true,
+				commissionAmount: reviewedCommissionAmount,
+				commissionValue: reviewedCommissionAmount,
+			},
+		};
+	}
+
+	const platformFinance =
+		resolveHotelRunnerPlatformCommission(financeCandidate);
+	if (!platformFinance.available) {
+		return {
+			allowed: false,
+			isHotelRunner: true,
+			hasCommissionInput,
+			amount: null,
+			statusCode: 409,
+			error:
+				"HotelRunner platform commission must be explicitly reviewed before it can be marked paid.",
+			code: "hotelrunner_platform_finance_review_required",
+			reason: platformFinance.reason,
+		};
+	}
+
+	return {
+		allowed: true,
+		isHotelRunner: true,
+		hasCommissionInput,
+		amount: platformFinance.amount,
+	};
+};
+
+const resolveHotelRunnerCommissionPaidTransition = (
+	reservation = {},
+	updates = {}
+) => {
+	const requestsCommissionPaid =
+		updates.commissionPaid === true ||
+		String(updates.commissionStatus || "").trim().toLowerCase() ===
+			"commission paid";
+	if (!requestsCommissionPaid || !isHotelRunnerReservation(reservation)) {
+		return { allowed: true, requested: requestsCommissionPaid };
+	}
+	return {
+		...resolveCommissionPaidReview(reservation, updates),
+		requested: true,
+	};
+};
+
 const TRACKED_RESERVATION_FIELDS = [
 	"reservation_status",
 	"roomId",
@@ -593,15 +831,28 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"adminLastUpdatedBy",
 	"adminChangeLog",
 	"reservationAuditLog",
+	"availabilitySnapshot",
 	"adminPricing",
 	"adminPricingVisibility",
+	"ota_financial_summary",
+	"otaFinancialSummary",
+	"hotelRunnerPricing",
+	"hotelrunnerPricing",
 	"adminAllReservationsStatusUpdate",
 	"adminAllReservationsSuperAdminForceStatus",
+	"otaIdentityKey",
+	"otaCrossTransportIdentityKey",
+	"otaPlatformReview",
 ];
 
 const stripServerManagedReservationUpdateFields = (payload = {}) => {
-	SERVER_MANAGED_RESERVATION_UPDATE_FIELDS.forEach((field) => {
-		if (Object.prototype.hasOwnProperty.call(payload, field)) {
+	Object.keys(payload || {}).forEach((field) => {
+		if (
+			SERVER_MANAGED_RESERVATION_UPDATE_FIELDS.some(
+				(managedField) =>
+					field === managedField || field.startsWith(`${managedField}.`)
+			)
+		) {
 			delete payload[field];
 		}
 	});
@@ -610,8 +861,17 @@ const stripServerManagedReservationUpdateFields = (payload = {}) => {
 
 const safeSupplierDataKey = (key = "") => /^[A-Za-z0-9_]+$/.test(key);
 
+const serverManagedSupplierDataKey = (key = "") =>
+	/^(?:hotelrunner|ota)/i.test(String(key || "").trim());
+
 const normalizeSupplierDataUpdateFields = (payload = {}) => {
 	const normalized = { ...payload };
+	Object.keys(normalized).forEach((key) => {
+		const match = String(key).match(/^supplierData\.([^.]+)/i);
+		if (match && serverManagedSupplierDataKey(match[1])) {
+			delete normalized[key];
+		}
+	});
 	const setSupplierField = (field, value) => {
 		if (field === "supplierName" || field === "suppliedBookingNo") {
 			const text = String(value || "").trim();
@@ -676,7 +936,7 @@ const normalizeSupplierDataUpdateFields = (payload = {}) => {
 		) {
 			return;
 		}
-		if (safeSupplierDataKey(key)) {
+		if (safeSupplierDataKey(key) && !serverManagedSupplierDataKey(key)) {
 			setSupplierField(key, value);
 		}
 	});
@@ -2474,7 +2734,10 @@ const protectAiReservationGuestCountUpdate = (
 
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	exports.__test = {
+		buildFinancialCycleSnapshot,
 		protectAiReservationGuestCountUpdate,
+		resolveCommissionPaidReview,
+		resolveHotelRunnerCommissionPaidTransition,
 	};
 }
 
@@ -2675,6 +2938,423 @@ const protectCustomerDetailsBookingSourceUpdate = (
 	return next;
 };
 
+const directHotelRunnerIdentityText = (value) =>
+	String(value ?? "")
+		.trim()
+		.toLowerCase();
+
+/**
+ * The generic PMS editor must never become a second writer for HotelRunner's
+ * transport/source identity.  The authenticated background projection is the
+ * only code path allowed to change these values.  Full-form editors commonly
+ * echo unchanged identity fields, so exact no-op values are removed while a
+ * real change fails closed.
+ */
+const protectDirectHotelRunnerIdentityUpdate = (
+	update = {},
+	existingReservation = {}
+) => {
+	if (!hasDirectHotelRunnerProjection(existingReservation)) {
+		return { allowed: true };
+	}
+
+	const existing = reservationSourcePlainObject(existingReservation);
+	const existingHotelRunner = reservationSourcePlainObject(
+		existing.supplierData?.hotelRunner
+	);
+	let rejectedField = "";
+	const compareAndRemove = (container, field, existingValue, path = field) => {
+		if (
+			!container ||
+			typeof container !== "object" ||
+			!Object.prototype.hasOwnProperty.call(container, field)
+		) {
+			return;
+		}
+		if (
+			directHotelRunnerIdentityText(container[field]) !==
+			directHotelRunnerIdentityText(existingValue)
+		) {
+			rejectedField = rejectedField || path;
+		}
+		delete container[field];
+	};
+
+	[
+		["reservation_id", existing.reservation_id],
+		["reservationId", existing.reservation_id],
+		["hr_number", existing.hr_number],
+		["hrNumber", existing.hr_number],
+		["confirmation_number", existing.confirmation_number],
+		["confirmationNumber", existing.confirmation_number],
+		["confirmation_number2", existing.customer_details?.confirmation_number2],
+		["confirmationNumber2", existing.customer_details?.confirmation_number2],
+		["pms_number", existing.pms_number],
+		["booking_source", existing.booking_source],
+		["bookingSource", existing.booking_source],
+		["transport", existingHotelRunner.transport],
+	].forEach(([field, existingValue]) =>
+		compareAndRemove(update, field, existingValue, field)
+	);
+
+	const existingCustomer = reservationSourcePlainObject(
+		existing.customer_details
+	);
+	for (const alias of ["customer_details", "customerDetails"]) {
+		const customer = update[alias];
+		if (customer && typeof customer === "object" && !Array.isArray(customer)) {
+			[
+				["reservation_id", existingCustomer.reservation_id || existing.reservation_id],
+				["reservationId", existingCustomer.reservationId || existing.reservation_id],
+				["confirmation_number", existingCustomer.confirmation_number || existing.confirmation_number],
+				["confirmationNumber", existingCustomer.confirmationNumber || existing.confirmation_number],
+				["confirmation_number2", existingCustomer.confirmation_number2],
+				["confirmationNumber2", existingCustomer.confirmationNumber2 || existingCustomer.confirmation_number2],
+				["hr_number", existingCustomer.hr_number || existing.hr_number],
+				["hrNumber", existingCustomer.hrNumber || existing.hr_number],
+				["booking_source", existingCustomer.booking_source],
+				["bookingSource", existingCustomer.booking_source],
+				["transport", existingCustomer.transport || existingHotelRunner.transport],
+			].forEach(([field, existingValue]) =>
+				compareAndRemove(
+					customer,
+					field,
+					existingValue,
+					`${alias}.${field}`
+				)
+			);
+		}
+	}
+
+	[
+		["customer_details.reservation_id", existingCustomer.reservation_id || existing.reservation_id],
+		["customerDetails.reservation_id", existingCustomer.reservation_id || existing.reservation_id],
+		["customer_details.reservationId", existingCustomer.reservationId || existing.reservation_id],
+		["customerDetails.reservationId", existingCustomer.reservationId || existing.reservation_id],
+		["customer_details.confirmation_number", existingCustomer.confirmation_number || existing.confirmation_number],
+		["customerDetails.confirmation_number", existingCustomer.confirmation_number || existing.confirmation_number],
+		["customer_details.confirmationNumber", existingCustomer.confirmationNumber || existing.confirmation_number],
+		["customerDetails.confirmationNumber", existingCustomer.confirmationNumber || existing.confirmation_number],
+		["customer_details.confirmation_number2", existingCustomer.confirmation_number2],
+		["customerDetails.confirmation_number2", existingCustomer.confirmation_number2],
+		["customer_details.confirmationNumber2", existingCustomer.confirmationNumber2 || existingCustomer.confirmation_number2],
+		["customerDetails.confirmationNumber2", existingCustomer.confirmationNumber2 || existingCustomer.confirmation_number2],
+		["customer_details.hr_number", existingCustomer.hr_number || existing.hr_number],
+		["customerDetails.hr_number", existingCustomer.hr_number || existing.hr_number],
+		["customer_details.hrNumber", existingCustomer.hrNumber || existing.hr_number],
+		["customerDetails.hrNumber", existingCustomer.hrNumber || existing.hr_number],
+		["customer_details.booking_source", existingCustomer.booking_source],
+		["customer_details.bookingSource", existingCustomer.booking_source],
+		["customerDetails.booking_source", existingCustomer.booking_source],
+		["customerDetails.bookingSource", existingCustomer.booking_source],
+		["customer_details.transport", existingCustomer.transport || existingHotelRunner.transport],
+		["customerDetails.transport", existingCustomer.transport || existingHotelRunner.transport],
+	].forEach(([field, existingValue]) =>
+		compareAndRemove(update, field, existingValue, field)
+	);
+
+	const existingCycle = reservationSourcePlainObject(existing.financial_cycle);
+	if (
+		update.financial_cycle &&
+		typeof update.financial_cycle === "object" &&
+		!Array.isArray(update.financial_cycle)
+	) {
+		compareAndRemove(
+			update.financial_cycle,
+			"sourceName",
+			existingCycle.sourceName || existing.booking_source,
+			"financial_cycle.sourceName"
+		);
+		compareAndRemove(
+			update.financial_cycle,
+			"bookingSource",
+			existingCycle.bookingSource || existing.booking_source,
+			"financial_cycle.bookingSource"
+		);
+	}
+
+	if (rejectedField) {
+		return {
+			allowed: false,
+			status: 409,
+			field: rejectedField,
+			code: "hotelrunner_source_identity_requires_projection",
+			error:
+				"HotelRunner-owned source identity can only be changed by the HotelRunner projection.",
+		};
+	}
+
+	return { allowed: true };
+};
+
+const DIRECT_HOTELRUNNER_SOURCE_FIELDS = Object.freeze([
+	"hotelId",
+	"belongsTo",
+	"booked_at",
+	"checkin_date",
+	"checkout_date",
+	"days_of_residence",
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"total_rooms",
+	"total_amount",
+	"sub_total",
+	"extras_total",
+	"adjustments_total",
+	"tax_total",
+	"item_total",
+	"currency",
+]);
+
+const directHotelRunnerSourceValue = (field, value) => {
+	if (["hotelId", "belongsTo"].includes(field)) return normalizeId(value);
+	if (["checkin_date", "checkout_date"].includes(field)) {
+		return dateOnlyKey(value);
+	}
+	if (field === "booked_at") {
+		const date = new Date(value);
+		return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+	}
+	if (
+		[
+			"days_of_residence",
+			"total_rooms",
+			"total_amount",
+			"sub_total",
+			"extras_total",
+			"adjustments_total",
+			"tax_total",
+			"item_total",
+		].includes(field)
+	) {
+		const number = Number(value);
+		return Number.isFinite(number) ? number : null;
+	}
+	if (field === "currency") return String(value || "").trim().toUpperCase();
+	return JSON.stringify(simplifyAuditValue(value));
+};
+
+const protectDirectHotelRunnerSourceUpdate = (
+	update = {},
+	existingReservation = {}
+) => {
+	if (!hasDirectHotelRunnerProjection(existingReservation)) {
+		return { allowed: true };
+	}
+	const existing = reservationSourcePlainObject(existingReservation);
+	for (const field of DIRECT_HOTELRUNNER_SOURCE_FIELDS) {
+		if (!Object.prototype.hasOwnProperty.call(update, field)) continue;
+		const unchanged =
+			directHotelRunnerSourceValue(field, update[field]) ===
+			directHotelRunnerSourceValue(field, existing[field]);
+		delete update[field];
+		if (!unchanged) {
+			return {
+				allowed: false,
+				status: 409,
+				field,
+				code: "hotelrunner_source_field_requires_projection",
+				error:
+					"HotelRunner-owned reservation fields can only be changed by the HotelRunner projection.",
+			};
+		}
+	}
+	return { allowed: true };
+};
+
+const HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS = Object.freeze([
+	"commissionType",
+	"commissionAmount",
+	"commissionValue",
+	"commissionAssigned",
+	"commissionAssignedAt",
+	"commissionAssignedBy",
+	"proposedByAgent",
+]);
+
+const PENDING_CONFIRMATION_FINANCE_FIELDS = Object.freeze([
+	"commission",
+	"commissionPaid",
+	"commissionStatus",
+	"financeSettlementModel",
+	"settlementModel",
+	"agentSettlementModel",
+	"sourceSettlementModel",
+	"collectionModel",
+]);
+
+const payloadHasHotelRunnerCommissionEvidence = (payload = {}) => {
+	if (Object.prototype.hasOwnProperty.call(payload, "commission")) return true;
+	if (
+		Object.keys(payload || {}).some(
+			(field) =>
+				field === "commissionData" ||
+				field.startsWith("commissionData.") ||
+				HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS.includes(field) ||
+				HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS.some(
+					(evidenceField) => field === `financial_cycle.${evidenceField}`
+				) ||
+				field === "adminPricing.commissionAmount"
+		)
+	) {
+		return true;
+	}
+	const financialCycle = payload.financial_cycle;
+	if (
+		financialCycle &&
+		typeof financialCycle === "object" &&
+		!Array.isArray(financialCycle) &&
+		HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS.some((field) =>
+			Object.prototype.hasOwnProperty.call(financialCycle, field)
+		)
+	) {
+		return true;
+	}
+	const adminPricing = payload.adminPricing;
+	return Boolean(
+		adminPricing &&
+			typeof adminPricing === "object" &&
+			!Array.isArray(adminPricing) &&
+			Object.prototype.hasOwnProperty.call(adminPricing, "commissionAmount")
+	);
+};
+
+const protectDirectHotelRunnerCommissionEvidenceActor = ({
+	reservation = {},
+	actor = {},
+	payload = {},
+} = {}) => {
+	if (
+		!hasDirectHotelRunnerProjection(reservation) ||
+		!payloadHasHotelRunnerCommissionEvidence(payload)
+	) {
+		return { allowed: true };
+	}
+	if (isConfiguredSuperAdminReservationActor(actor)) {
+		return { allowed: true, protectedFinanceRequested: true };
+	}
+	return {
+		allowed: false,
+		status: 403,
+		code: "hotelrunner_platform_commission_superadmin_only",
+		error:
+			"Only the configured super administrator can assign or change HotelRunner platform commission evidence.",
+	};
+};
+
+const protectDirectHotelRunnerPendingFinanceActor = ({
+	reservation = {},
+	actor = {},
+	payload = {},
+	action = "",
+} = {}) => {
+	if (!hasDirectHotelRunnerProjection(reservation)) return { allowed: true };
+	const financeRequested =
+		String(action || "").trim().toLowerCase() === "finance" ||
+		PENDING_CONFIRMATION_FINANCE_FIELDS.some((field) =>
+			Object.prototype.hasOwnProperty.call(payload || {}, field)
+		) ||
+		payloadHasHotelRunnerCommissionEvidence(payload);
+	if (!financeRequested) return { allowed: true };
+	if (isConfiguredSuperAdminReservationActor(actor)) {
+		return { allowed: true, protectedFinanceRequested: true };
+	}
+	return {
+		allowed: false,
+		status: 403,
+		code: "hotelrunner_finance_superadmin_only",
+		error:
+			"Only the configured super administrator can perform finance actions for a direct HotelRunner reservation.",
+	};
+};
+
+const protectDirectHotelRunnerCommercialUpdate = (
+	update = {},
+	existingReservation = {},
+	actor = {}
+) => {
+	if (!hasDirectHotelRunnerProjection(existingReservation)) {
+		return { allowed: true };
+	}
+
+	if (
+		Object.prototype.hasOwnProperty.call(update, "commission") &&
+		!isConfiguredSuperAdmin(actor)
+	) {
+		return {
+			allowed: false,
+			status: 403,
+			field: "commission",
+			code: "hotelrunner_platform_commission_superadmin_only",
+			error:
+				"Only the configured super administrator can explicitly review a HotelRunner platform commission through this route.",
+		};
+	}
+	if (Object.prototype.hasOwnProperty.call(update, "commission")) {
+		const normalizedCommission = normalizeExplicitHotelRunnerCommission(
+			update.commission
+		);
+		if (normalizedCommission === null) {
+			return {
+				allowed: false,
+				status: 400,
+				field: "commission",
+				code: "hotelrunner_platform_commission_invalid",
+				error:
+					"HotelRunner platform commission must be an explicit non-negative amount with no more than two decimal places.",
+			};
+		}
+		update.commission = normalizedCommission;
+	}
+
+	Object.keys(update || {}).forEach((field) => {
+		if (field === "commissionData" || field.startsWith("commissionData.")) {
+			delete update[field];
+		}
+	});
+
+	if (
+		update.financial_cycle &&
+		typeof update.financial_cycle === "object" &&
+		!Array.isArray(update.financial_cycle)
+	) {
+		HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS.forEach((field) => {
+			delete update.financial_cycle[field];
+		});
+	}
+	HOTELRUNNER_COMMISSION_EVIDENCE_FIELDS.forEach((field) => {
+		delete update[field];
+		delete update[`financial_cycle.${field}`];
+	});
+
+	return { allowed: true };
+};
+
+const buildGenericReservationUpdateFilter = (reservation = {}) => {
+	const filter = buildReservationSnapshotFilter(reservation, {
+		includeHotel: true,
+	});
+	if (reservation.belongsTo !== undefined && reservation.belongsTo !== null) {
+		filter.belongsTo = reservation.belongsTo;
+	}
+	if (hasDirectHotelRunnerProjection(reservation)) {
+		filter.booking_source = reservation.booking_source || "";
+		filter["supplierData.hotelRunner.transport"] =
+			reservation.supplierData.hotelRunner.transport;
+		filter["supplierData.hotelRunner.reservationId"] =
+			reservation.supplierData.hotelRunner.reservationId;
+		filter["supplierData.otaAutomationPipeline"] =
+			reservation.supplierData.otaAutomationPipeline;
+		filter["supplierData.otaSourceAuthority"] =
+			reservation.supplierData.otaSourceAuthority;
+		if (reservation.supplierData.otaLastSourceReceivedAt) {
+			filter["supplierData.otaLastSourceReceivedAt"] =
+				reservation.supplierData.otaLastSourceReceivedAt;
+		}
+	}
+	return filter;
+};
+
 const isSuperAdminReservationActor = (actor = {}) =>
 	isConfiguredSuperAdmin(actor) ||
 	reservationActorRoles(actor).includes(1000) ||
@@ -2812,11 +3492,22 @@ const isRestrictedOrderTakerReservationActor = (actor = {}) =>
 
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	Object.assign(exports.__test || (exports.__test = {}), {
+		canUpdateReservationHotelScope,
 		isOrderTakingAccount,
 		isPlatformAdminReservationActor,
 		isRestrictedOrderTakerReservationActor,
 		isSuperAdminReservationActor,
+		buildTrustedDirectHotelRunnerCommissionAssignment,
+		buildGenericReservationUpdateFilter,
+		normalizeSupplierDataUpdateFields,
+		payloadHasHotelRunnerCommissionEvidence,
 		protectAdminManagedPricingUpdate,
+		protectDirectHotelRunnerCommercialUpdate,
+		protectDirectHotelRunnerCommissionEvidenceActor,
+		protectDirectHotelRunnerIdentityUpdate,
+		protectDirectHotelRunnerPendingFinanceActor,
+		protectDirectHotelRunnerSourceUpdate,
+		stripServerManagedReservationUpdateFields,
 	});
 }
 
@@ -4314,6 +5005,34 @@ const resolveReservationVisibilityActor = async (req, fallbackId = "") => {
 	return withHotelManagementSourceViewContext(actor, req);
 };
 
+function canUpdateReservationHotelScope(actor = {}, hotel = {}) {
+	if (!actor || actor.activeUser === false || !hotel) return false;
+	if (isConfiguredSuperAdmin(actor)) return true;
+	const actorId = normalizeId(actor._id || actor);
+	const hotelId = normalizeId(hotel._id || hotel);
+	const ownerId = normalizeId(hotel.belongsTo);
+	if (!actorId || !hotelId || !ownerId) return false;
+	if (actorId === ownerId) return true;
+	return assignedHotelIdsForReservationUpdate(actor).includes(hotelId);
+}
+
+const requireAuthorizedReservationReportActor = async (req, res, hotelId) => {
+	const actor = await resolveReservationVisibilityActor(req);
+	if (!actor) {
+		res.status(401).json({ error: "Authentication required." });
+		return null;
+	}
+	if (actor.activeUser === false) {
+		res.status(403).json({ error: "This account is inactive." });
+		return null;
+	}
+	if (!(await canViewReservationHotel(actor, hotelId))) {
+		res.status(403).json({ error: "You do not have access to this hotel." });
+		return null;
+	}
+	return actor;
+};
+
 const applyOwnReservationFilter = (dynamicFilter, parsedFilters = {}, actor = null) => {
 	const actorId = String(
 		isOrderTakingAccount(actor)
@@ -5232,7 +5951,12 @@ exports.totalCheckoutRecords = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			accountId,
+		);
+		if (!actor) return;
 
 		let dynamicFilter = {
 			hotelId: ObjectId(accountId),
@@ -5272,24 +5996,12 @@ exports.totalCheckoutRecords = async (req, res) => {
 					_id: null,
 					total_amount: { $sum: "$total_amount" },
 					commission: {
-						$sum: {
-							$cond: [
-								{ $eq: ["$payment", "expedia collect"] },
-								0,
-								{
-									$cond: [
-										{
-											$in: [
-												"$booking_source",
-												["jannat", "affiliate", "janat"],
-											],
-										},
-										{ $multiply: ["$total_amount", 0.1] },
-										{ $subtract: ["$total_amount", "$sub_total"] },
-									],
-								},
-							],
-						},
+						$sum: buildHotelRunnerSafeCommissionExpression(
+							legacyFinancialReportCommissionExpression()
+						),
+					},
+					commissionUnavailableCount: {
+						$sum: buildHotelRunnerUnverifiedExpenseCountExpression(),
 					},
 				},
 			},
@@ -5299,6 +6011,10 @@ exports.totalCheckoutRecords = async (req, res) => {
 			total: total,
 			total_amount: aggregation.length > 0 ? aggregation[0].total_amount : 0,
 			commission: aggregation.length > 0 ? aggregation[0].commission : 0,
+			commissionUnavailableCount:
+				aggregation.length > 0
+					? aggregation[0].commissionUnavailableCount || 0
+					: 0,
 		};
 
 		res.json(result);
@@ -5327,7 +6043,12 @@ exports.checkedoutReport = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			accountId,
+		);
+		if (!actor) return;
 
 		let dynamicFilter = {
 			hotelId: ObjectId(accountId),
@@ -5407,7 +6128,12 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			accountId,
+		);
+		if (!actor) return;
 
 		let dateField =
 			dateBy === "checkin"
@@ -5464,24 +6190,12 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 					_id: null,
 					total_amount: { $sum: "$total_amount" },
 					commission: {
-						$sum: {
-							$cond: [
-								{ $eq: ["$payment", "expedia collect"] },
-								0,
-								{
-									$cond: [
-										{
-											$in: [
-												"$booking_source",
-												["janat", "affiliate", "jannat"],
-											],
-										},
-										{ $multiply: ["$total_amount", 0.1] },
-										{ $subtract: ["$total_amount", "$sub_total"] },
-									],
-								},
-							],
-						},
+						$sum: buildHotelRunnerSafeCommissionExpression(
+							legacyFinancialReportCommissionExpression()
+						),
+					},
+					commissionUnavailableCount: {
+						$sum: buildHotelRunnerUnverifiedExpenseCountExpression(),
 					},
 				},
 			},
@@ -5491,6 +6205,10 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 			total: total,
 			total_amount: aggregation.length > 0 ? aggregation[0].total_amount : 0,
 			commission: aggregation.length > 0 ? aggregation[0].commission : 0,
+			commissionUnavailableCount:
+				aggregation.length > 0
+					? aggregation[0].commissionUnavailableCount || 0
+					: 0,
 		};
 
 		res.json(result);
@@ -5532,7 +6250,12 @@ exports.generalReservationsReport = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			accountId,
+		);
+		if (!actor) return;
 
 		let dateField =
 			dateBy === "checkin"
@@ -7092,10 +7815,10 @@ exports.updateReservation = async (req, res) => {
 				.map((id) => String(id));
 		};
 
-		console.log(
-			`[UPDATE RESERVATION] Received update for ID: ${reservationId}`
-		);
-		console.log("Update Data:", updateData);
+		console.log("[UPDATE RESERVATION] request received", {
+			reservationId: String(reservationId || "").slice(0, 64),
+			actorId: String(authenticatedActorId || "").slice(0, 64),
+		});
 
 		// 1️⃣ Validate reservationId
 		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
@@ -7135,6 +7858,66 @@ exports.updateReservation = async (req, res) => {
 		if (!existingReservation) {
 			return res.status(404).json({ error: "Reservation not found" });
 		}
+		const auditActor = await resolveReservationAuditActor(
+			requestingUserId,
+			updateData,
+			{ previewAuth: effectivePreviewAuth }
+		);
+		const requestingActor =
+			requestingUserId && mongoose.Types.ObjectId.isValid(requestingUserId)
+				? await User.findById(requestingUserId)
+						.select(
+							"_id activeUser role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId"
+						)
+						.lean()
+						.exec()
+				: null;
+		const authorizationActor =
+			normalizeId(requestingActor?._id) === authenticatedActorId
+				? requestingActor
+				: authenticatedActorId && mongoose.Types.ObjectId.isValid(authenticatedActorId)
+				  ? await User.findById(authenticatedActorId)
+							.select(
+								"_id activeUser role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId"
+							)
+							.lean()
+							.exec()
+				  : null;
+		const scopedHotelId = normalizeId(existingReservation.hotelId);
+		const scopedHotel = mongoose.Types.ObjectId.isValid(scopedHotelId)
+			? await HotelDetails.findById(scopedHotelId)
+					.select("_id belongsTo")
+					.lean()
+					.exec()
+			: null;
+		if (!authorizationActor) {
+			return res.status(401).json({ error: "Authentication required" });
+		}
+		if (!canUpdateReservationHotelScope(authorizationActor, scopedHotel)) {
+			return res.status(403).json({
+				error: "You are not authorized to edit reservations for this hotel.",
+				code: "reservation_update_hotel_scope_forbidden",
+			});
+		}
+		const hotelRunnerIdentityProtection =
+			protectDirectHotelRunnerIdentityUpdate(
+				normalizedUpdateData,
+				existingReservation
+			);
+		if (!hotelRunnerIdentityProtection.allowed) {
+			return res
+				.status(hotelRunnerIdentityProtection.status || 409)
+				.json(hotelRunnerIdentityProtection);
+		}
+		const hotelRunnerSourceProtection = protectDirectHotelRunnerSourceUpdate(
+			normalizedUpdateData,
+			existingReservation
+		);
+		if (!hotelRunnerSourceProtection.allowed) {
+			return res
+				.status(hotelRunnerSourceProtection.status || 409)
+				.json(hotelRunnerSourceProtection);
+		}
 		const dateUpdateProtection = protectReservationDateUpdate({
 			updates: normalizedUpdateData,
 			reservation: existingReservation,
@@ -7145,20 +7928,6 @@ exports.updateReservation = async (req, res) => {
 				.status(dateUpdateProtection.status || 409)
 				.json(dateUpdateProtection);
 		}
-		const auditActor = await resolveReservationAuditActor(
-			requestingUserId,
-			updateData,
-			{ previewAuth: effectivePreviewAuth }
-		);
-		const requestingActor =
-			requestingUserId && mongoose.Types.ObjectId.isValid(requestingUserId)
-				? await User.findById(requestingUserId)
-						.select(
-							"_id role roleDescription roles roleDescriptions accessTo"
-						)
-						.lean()
-						.exec()
-				: null;
 		const superAdminUpdateActor = isSuperAdminReservationActor(
 			requestingActor || {}
 		);
@@ -7173,6 +7942,17 @@ exports.updateReservation = async (req, res) => {
 		);
 		if (!sourceUpdatePermission.allowed) {
 			return res.status(403).json(sourceUpdatePermission);
+		}
+		const hotelRunnerCommercialProtection =
+			protectDirectHotelRunnerCommercialUpdate(
+				normalizedUpdateData,
+				existingReservation,
+				requestingActor || {}
+			);
+		if (!hotelRunnerCommercialProtection.allowed) {
+			return res
+				.status(hotelRunnerCommercialProtection.status || 403)
+				.json(hotelRunnerCommercialProtection);
 		}
 		if (
 			isOtaPlatformReviewPending(existingReservation) &&
@@ -7651,6 +8431,7 @@ exports.updateReservation = async (req, res) => {
 			{
 				allowBlockedCalendar: superAdminUpdateActor,
 				hasExplicitAdminPricingIntent,
+				keepExplicitCommission: hasExplicitSuperAdminCommission,
 			}
 		);
 		if (
@@ -7796,7 +8577,19 @@ exports.updateReservation = async (req, res) => {
 				}
 			}
 		}
-		if (hasExplicitSuperAdminCommission) {
+		if (
+			hasExplicitSuperAdminCommission &&
+			hasDirectHotelRunnerProjection(existingReservation)
+		) {
+			normalizedUpdateData =
+				buildTrustedDirectHotelRunnerCommissionAssignment({
+					update: normalizedUpdateData,
+					existingReservation,
+					amount: explicitSuperAdminCommission,
+					actorId: requestingActor?._id || requestingUserId,
+				});
+			delete normalizedUpdateData.__commissionAssignmentReset;
+		} else if (hasExplicitSuperAdminCommission) {
 			const existingCommissionData =
 				existingReservation.commissionData &&
 				typeof existingReservation.commissionData.toObject === "function"
@@ -7929,6 +8722,20 @@ exports.updateReservation = async (req, res) => {
 					});
 				}
 			}
+		}
+
+		const commissionReview = resolveHotelRunnerCommissionPaidTransition(
+			existingReservation,
+			normalizedUpdateData
+		);
+		if (!commissionReview.allowed) {
+			return res.status(commissionReview.statusCode || 409).json({
+				error: commissionReview.error,
+				...(commissionReview.code ? { code: commissionReview.code } : {}),
+				...(commissionReview.reason
+					? { reason: commissionReview.reason }
+					: {}),
+			});
 		}
 
 		if (
@@ -8064,14 +8871,20 @@ exports.updateReservation = async (req, res) => {
 			};
 		}
 
-		const updatedReservation = await Reservations.findByIdAndUpdate(
-			reservationId,
-			updateOperation,
+		const reservationUpdateFilter =
+			buildGenericReservationUpdateFilter(existingReservation);
+		const updatedReservation = await Reservations.findOneAndUpdate(
+			reservationUpdateFilter,
+			addReservationVersionBump(updateOperation),
 			{ new: true }
 		);
 
 		if (!updatedReservation) {
-			return res.status(404).json({ error: "Failed to update reservation." });
+			return res.status(409).json({
+				error:
+					"Reservation changed while this edit was being prepared. Reload and try again.",
+				code: "reservation_update_concurrent_change",
+			});
 		}
 		const populatedUpdatedReservation =
 			(await Reservations.findById(updatedReservation._id)
@@ -9793,7 +10606,12 @@ exports.pendingPaymentReservations = async (req, res) => {
 			financeStatus: { $in: ["not moved", "not paid", "", undefined] },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			hotelId,
+		);
+		if (!actor) return;
 		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
@@ -9847,7 +10665,12 @@ exports.commissionPaidReservations = async (req, res) => {
 			financeStatus: { $in: ["paid"] },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			hotelId,
+		);
+		if (!actor) return;
 		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
@@ -10780,17 +11603,22 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}
 
 		const action = String(body.action || "").toLowerCase();
-		const financeFieldsProvided = [
-			"commission",
-			"commissionPaid",
-			"commissionStatus",
-			"financeSettlementModel",
-			"settlementModel",
-			"agentSettlementModel",
-			"sourceSettlementModel",
-			"collectionModel",
-		].some((field) => Object.prototype.hasOwnProperty.call(body, field));
+		const financeFieldsProvided = PENDING_CONFIRMATION_FINANCE_FIELDS.some(
+			(field) => Object.prototype.hasOwnProperty.call(body, field)
+		);
 		const isFinanceAction = action === "finance" || (!action && financeFieldsProvided);
+		const hotelRunnerFinanceProtection =
+			protectDirectHotelRunnerPendingFinanceActor({
+				reservation,
+				actor,
+				payload: body,
+				action,
+			});
+		if (!hotelRunnerFinanceProtection.allowed) {
+			return res
+				.status(hotelRunnerFinanceProtection.status || 403)
+				.json(hotelRunnerFinanceProtection);
+		}
 		const financialCycleLocked =
 			String(reservation?.financial_cycle?.status || "").toLowerCase() ===
 				"closed" ||
@@ -10887,26 +11715,56 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}
 
 		if (body.commission !== undefined) {
-			updatePayload.commission = n2(body.commission);
-			const existingCommissionData =
-				reservation.commissionData &&
-				typeof reservation.commissionData.toObject === "function"
-					? reservation.commissionData.toObject()
-					: reservation.commissionData || {};
-			updatePayload.commissionData = {
-				...existingCommissionData,
-				// A 0 SAR commission is valid when finance reviewed it and decided
-				// no commission is due for this source/reservation.
-				assigned: true,
-				amount: updatePayload.commission,
-				status:
-					body.commissionStatus ||
-					existingCommissionData.status ||
-					reservation.commissionStatus ||
-					"commission due",
-				assignedAt: now,
-				assignedBy: auditActor,
-			};
+			if (hasDirectHotelRunnerProjection(reservation)) {
+				const commissionUpdate = { commission: body.commission };
+				if (Object.prototype.hasOwnProperty.call(body, "commissionStatus")) {
+					commissionUpdate.commissionStatus = String(
+						body.commissionStatus || ""
+					).trim();
+				}
+				const commissionProtection =
+					protectDirectHotelRunnerCommercialUpdate(
+						commissionUpdate,
+						reservation,
+						actor
+					);
+				if (!commissionProtection.allowed) {
+					return res
+						.status(commissionProtection.status || 400)
+						.json(commissionProtection);
+				}
+				Object.assign(
+					updatePayload,
+					buildTrustedDirectHotelRunnerCommissionAssignment({
+						update: { ...updatePayload, ...commissionUpdate },
+						existingReservation: reservation,
+						amount: commissionUpdate.commission,
+						actorId: actor._id,
+						assignedAt: now,
+					})
+				);
+			} else {
+				updatePayload.commission = n2(body.commission);
+				const existingCommissionData =
+					reservation.commissionData &&
+					typeof reservation.commissionData.toObject === "function"
+						? reservation.commissionData.toObject()
+						: reservation.commissionData || {};
+				updatePayload.commissionData = {
+					...existingCommissionData,
+					// A 0 SAR commission is valid when finance reviewed it and decided
+					// no commission is due for this source/reservation.
+					assigned: true,
+					amount: updatePayload.commission,
+					status:
+						body.commissionStatus ||
+						existingCommissionData.status ||
+						reservation.commissionStatus ||
+						"commission due",
+					assignedAt: now,
+					assignedBy: auditActor,
+				};
+			}
 		}
 		if (body.commissionPaid !== undefined) {
 			updatePayload.commissionPaid = !!body.commissionPaid;
@@ -10914,7 +11772,13 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 				updatePayload.commissionPaidAt = now;
 			}
 		}
-		if (body.commissionStatus !== undefined) {
+		if (
+			body.commissionStatus !== undefined &&
+			!(
+				hasDirectHotelRunnerProjection(reservation) &&
+				body.commission !== undefined
+			)
+		) {
 			updatePayload.commissionStatus = String(body.commissionStatus || "").trim();
 		} else if (body.commissionPaid !== undefined) {
 			updatePayload.commissionStatus = updatePayload.commissionPaid
@@ -10930,6 +11794,19 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			if (!reservation.commissionPaid) {
 				updatePayload.commissionPaidAt = now;
 			}
+		}
+		const commissionReview = resolveHotelRunnerCommissionPaidTransition(
+			reservation,
+			updatePayload
+		);
+		if (!commissionReview.allowed) {
+			return res.status(commissionReview.statusCode || 409).json({
+				error: commissionReview.error,
+				...(commissionReview.code ? { code: commissionReview.code } : {}),
+				...(commissionReview.reason
+					? { reason: commissionReview.reason }
+					: {}),
+			});
 		}
 		if (
 			Object.prototype.hasOwnProperty.call(updatePayload, "commissionPaid") ||
@@ -11330,14 +12207,21 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			};
 		}
 
-		const updatedReservation = await Reservations.findByIdAndUpdate(
-			reservationId,
-			updateOperation,
+		const updatedReservation = await Reservations.findOneAndUpdate(
+			buildGenericReservationUpdateFilter(reservation),
+			addReservationVersionBump(updateOperation),
 			{ new: true }
 		)
 			.populate("roomId", "room_number room_type displayName")
 			.lean()
 			.exec();
+		if (!updatedReservation) {
+			return res.status(409).json({
+				error:
+					"Reservation changed while this pending-confirmation update was being prepared. Reload and try again.",
+				code: "reservation_update_concurrent_change",
+			});
+		}
 
 		await trackReservationStatusChange({
 			req,
@@ -11419,6 +12303,30 @@ exports.markReservationCommissionPaid = async (req, res) => {
 				error: "Only finance, hotel managers, or admins can mark commission paid.",
 			});
 		}
+		const hotelRunnerEvidenceProtection =
+			protectDirectHotelRunnerCommissionEvidenceActor({
+				reservation,
+				actor,
+				payload: body,
+			});
+		if (!hotelRunnerEvidenceProtection.allowed) {
+			return res
+				.status(hotelRunnerEvidenceProtection.status || 403)
+				.json(hotelRunnerEvidenceProtection);
+		}
+
+		const commissionReview = resolveCommissionPaidReview(reservation, body);
+		if (!commissionReview.allowed) {
+			return res.status(commissionReview.statusCode || 409).json({
+				error: commissionReview.error,
+				...(commissionReview.code ? { code: commissionReview.code } : {}),
+				...(commissionReview.reason
+					? { reason: commissionReview.reason }
+					: {}),
+			});
+		}
+		const { hasCommissionInput } = commissionReview;
+		const reviewedCommissionAmount = commissionReview.amount;
 
 		const now = new Date();
 		const auditActor = await resolveReservationAuditActor(actorId, body, {
@@ -11430,21 +12338,38 @@ exports.markReservationCommissionPaid = async (req, res) => {
 			commissionPaidAt: reservation.commissionPaidAt || now,
 		};
 
-		if (body.commission !== undefined) {
-			updatePayload.commission = n2(body.commission);
-			const existingCommissionData =
-				reservation.commissionData &&
-				typeof reservation.commissionData.toObject === "function"
-					? reservation.commissionData.toObject()
-					: reservation.commissionData || {};
-			updatePayload.commissionData = {
-				...existingCommissionData,
-				assigned: true,
-				amount: updatePayload.commission,
-				status: "commission paid",
-				assignedAt: existingCommissionData.assignedAt || now,
-				assignedBy: existingCommissionData.assignedBy || auditActor,
-			};
+		if (hasCommissionInput) {
+			const nextCommission =
+				reviewedCommissionAmount === null
+					? n2(body.commission)
+					: reviewedCommissionAmount;
+			if (hasDirectHotelRunnerProjection(reservation)) {
+				Object.assign(
+					updatePayload,
+					buildTrustedDirectHotelRunnerCommissionAssignment({
+						update: { ...updatePayload, commission: nextCommission },
+						existingReservation: reservation,
+						amount: nextCommission,
+						actorId: actor._id,
+						assignedAt: now,
+					})
+				);
+			} else {
+				updatePayload.commission = nextCommission;
+				const existingCommissionData =
+					reservation.commissionData &&
+					typeof reservation.commissionData.toObject === "function"
+						? reservation.commissionData.toObject()
+						: reservation.commissionData || {};
+				updatePayload.commissionData = {
+					...existingCommissionData,
+					assigned: true,
+					amount: updatePayload.commission,
+					status: "commission paid",
+					assignedAt: existingCommissionData.assignedAt || now,
+					assignedBy: existingCommissionData.assignedBy || auditActor,
+				};
+			}
 		}
 
 		const commissionAgentApproval =
@@ -11481,14 +12406,21 @@ exports.markReservationCommissionPaid = async (req, res) => {
 			};
 		}
 
-		const updatedReservation = await Reservations.findByIdAndUpdate(
-			reservationId,
-			updateOperation,
+		const updatedReservation = await Reservations.findOneAndUpdate(
+			buildGenericReservationUpdateFilter(reservation),
+			addReservationVersionBump(updateOperation),
 			{ new: true }
 		)
 			.populate("roomId", "room_number room_type displayName")
 			.lean()
 			.exec();
+		if (!updatedReservation) {
+			return res.status(409).json({
+				error:
+					"Reservation changed while commission payment was being prepared. Reload and try again.",
+				code: "reservation_update_concurrent_change",
+			});
+		}
 
 		await trackReservationStatusChange({
 			req,
@@ -11943,7 +12875,12 @@ exports.CollectedReservations = async (req, res) => {
 			payment: "collected", // Filter for payment field to be "collected"
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			hotelId,
+		);
+		if (!actor) return;
 		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Add reservation_status to the filter if the status is not "all"
@@ -11993,7 +12930,12 @@ exports.aggregateCollectedReservations = async (req, res) => {
 			payment: "collected", // Filter for payment field to be "collected"
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
-		const actor = await resolveReservationVisibilityActor(req);
+		const actor = await requireAuthorizedReservationReportActor(
+			req,
+			res,
+			hotelId,
+		);
+		if (!actor) return;
 		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Add reservation_status to the filter if the status is not "all"
@@ -12001,26 +12943,8 @@ exports.aggregateCollectedReservations = async (req, res) => {
 			dynamicFilter.reservation_status = status;
 		}
 
-		const pipeline = [
-			{ $match: dynamicFilter },
-			{
-				$group: {
-					_id: null,
-					total_reservation: { $sum: 1 },
-					total_amount: { $sum: "$total_amount" },
-					actual_amount: { $sum: "$sub_total" },
-				},
-			},
-			{
-				$project: {
-					_id: 0,
-					total_reservation: 1,
-					total_amount: 1,
-					actual_amount: 1,
-					commission: { $subtract: ["$total_amount", "$actual_amount"] },
-				},
-			},
-		];
+		const pipeline =
+			collectedReservationFinanceAggregationPipeline(dynamicFilter);
 
 		const result = await Reservations.aggregate(pipeline);
 		res.json(result[0]);
@@ -12028,4 +12952,8 @@ exports.aggregateCollectedReservations = async (req, res) => {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
 	}
+};
+
+exports.__hotelRunnerCollectedFinanceTest = {
+	collectedReservationFinanceAggregationPipeline,
 };

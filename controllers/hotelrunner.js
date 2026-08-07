@@ -22,7 +22,51 @@ const {
 } = require("../services/adminReservationCycleScope");
 
 const MAX_PARSER_BYTES = 2 * 1024 * 1024;
+const MIN_ROOM_LIST_VERIFICATION_AGE_HOURS = 48;
+const ROOM_LIST_VERIFICATION_INTERVAL_MULTIPLIER = 3;
+const ROOM_LIST_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const ObjectId = mongoose.Types.ObjectId;
+
+const roomListVerificationWindow = (config = {}, now = new Date()) => {
+	const reference = new Date(now);
+	const referenceMs = Number.isFinite(reference.getTime())
+		? reference.getTime()
+		: Date.now();
+	const maxAgeMs =
+		Math.max(
+			MIN_ROOM_LIST_VERIFICATION_AGE_HOURS,
+			Number(config.roomListIntervalHours || 24) *
+				ROOM_LIST_VERIFICATION_INTERVAL_MULTIPLIER
+		) *
+		60 *
+		60 *
+		1000;
+	return {
+		referenceMs,
+		earliest: new Date(referenceMs - maxAgeMs),
+		latest: new Date(referenceMs + ROOM_LIST_FUTURE_SKEW_MS),
+	};
+};
+
+const hasCurrentRoomListProof = (
+	mapping,
+	window,
+	activeRoomListSyncGeneration = ""
+) => {
+	const verifiedAtMs = mapping?.roomListVerifiedAt
+		? new Date(mapping.roomListVerifiedAt).getTime()
+		: Number.NaN;
+	return Boolean(
+		activeRoomListSyncGeneration &&
+		mapping?.roomListSyncGeneration &&
+		mapping.roomListSyncGeneration === activeRoomListSyncGeneration &&
+		mapping?.roomListVerificationState === "verified" &&
+		mapping?.variantConflict !== true &&
+		Number.isFinite(verifiedAtMs) &&
+		verifiedAtMs >= window.earliest.getTime() &&
+		verifiedAtMs <= window.latest.getTime()
+	);
+};
 
 const urlencodedParser = express.urlencoded({
 	extended: false,
@@ -54,7 +98,7 @@ function oneQueryValue(value) {
 }
 
 function callbackCredentialsMatch(query = {}, config = {}) {
-	if (!config.configured) return false;
+	if (!config.callbackConfigured) return false;
 	const token = oneQueryValue(query.token);
 	const hrId = oneQueryValue(query.hr_id);
 	return Boolean(
@@ -74,7 +118,7 @@ exports.requireHotelRunnerCallbackAuth = (req, res, next) => {
 		return next();
 	}
 	const config = getHotelRunnerConfig();
-	if (!config.configured) {
+	if (!config.callbackConfigured) {
 		res.set("Retry-After", "300");
 		return res.status(503).json({ error: "Integration is temporarily unavailable." });
 	}
@@ -190,7 +234,7 @@ function createHandleHotelRunnerCallback({
 				req.body.data,
 				config.callbackMaxReservations
 			);
-			const hotel = await loadHotel(config);
+			const hotel = await loadHotel(config, { readiness: "callback" });
 			await persistBatch({
 				config,
 				hotel,
@@ -241,10 +285,39 @@ async function configuredAdminContext(req) {
 exports.hotelRunnerAdminStatus = async (req, res) => {
 	try {
 		const { config, hotel } = await configuredAdminContext(req);
-		const [eventCounts, projectionCounts, latestEvent, latestProcessed, syncState] =
+		const projectionCutoff =
+			config.projectionNotBefore instanceof Date &&
+			Number.isFinite(config.projectionNotBefore.getTime())
+				? config.projectionNotBefore
+				: null;
+		const eligibleProjectionFacts = {
+			source: "push",
+			...(projectionCutoff
+				? {
+					receivedAt: { $gte: projectionCutoff },
+					sourceUpdatedAt: { $gte: projectionCutoff },
+				  }
+				: {}),
+		};
+		const eligibleEventMatch = {
+			hotelId: hotel._id,
+			...eligibleProjectionFacts,
+		};
+		const noneligibleEventMatch = {
+			hotelId: hotel._id,
+			$nor: [eligibleProjectionFacts],
+		};
+		const [
+			eventCounts,
+			projectionCounts,
+			latestEvent,
+			latestProcessed,
+			syncState,
+			preActivationEventCount,
+		] =
 			await Promise.all([
 				HotelRunnerEvent.aggregate([
-					{ $match: { hotelId: hotel._id } },
+					{ $match: eligibleEventMatch },
 					{ $group: { _id: "$status", count: { $sum: 1 } } },
 				]),
 				HotelRunnerReservation.aggregate([
@@ -253,16 +326,21 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 				]),
 				HotelRunnerEvent.findOne({ hotelId: hotel._id })
 					.sort({ receivedAt: -1 })
-					.select("receivedAt status source")
+					.select(
+						"receivedAt status source integrityConflict integrityConflictCount"
+					)
 					.lean(),
 				HotelRunnerEvent.findOne({
 					hotelId: hotel._id,
 					processedAt: { $ne: null },
 				})
 					.sort({ processedAt: -1 })
-					.select("processedAt status source")
+					.select(
+						"processedAt status source integrityConflict integrityConflictCount"
+					)
 					.lean(),
 				HotelRunnerSyncState.findOne({ hotelId: hotel._id }).lean(),
+				HotelRunnerEvent.countDocuments(noneligibleEventMatch),
 			]);
 		return res.json({
 			configuration: {
@@ -270,11 +348,16 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 				hrIdConfigured: Boolean(config.hrId),
 				supportedPropertyCount: 1,
 				pullEnabled: config.pullEnabled,
+				roomListSyncEnabled: config.roomListSyncEnabled,
 				projectionEnabled: config.projectionEnabled,
+				projectionNotBefore: config.projectionNotBeforeIso || null,
 				confirmPulledDeliveryEnabled: config.confirmPulledDeliveryEnabled,
 			},
 			hotel: { _id: hotel._id, hotelName: hotel.hotelName || "" },
 			queue: Object.fromEntries(eventCounts.map((row) => [row._id, row.count])),
+			archive: {
+				preActivationEventCount: Number(preActivationEventCount || 0),
+			},
 			projections: Object.fromEntries(
 				projectionCounts.map((row) => [row._id, row.count])
 			),
@@ -302,10 +385,19 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 
 exports.listHotelRunnerRoomMappings = async (req, res) => {
 	try {
-		const { hotel } = await configuredAdminContext(req);
-		const mappings = await HotelRunnerRoomMapping.find({ hotelId: hotel._id })
-			.sort({ invCode: 1 })
-			.lean();
+		const { config, hotel } = await configuredAdminContext(req);
+		const verificationWindow = roomListVerificationWindow(config);
+		const [mappings, syncState] = await Promise.all([
+			HotelRunnerRoomMapping.find({ hotelId: hotel._id })
+				.sort({ invCode: 1 })
+				.lean(),
+			HotelRunnerSyncState.findOne({ hotelId: hotel._id })
+				.select("activeRoomListSyncGeneration")
+				.lean(),
+		]);
+		const activeRoomListSyncGeneration = String(
+			syncState?.activeRoomListSyncGeneration || ""
+		).trim();
 		const roomOptions = (hotel.roomCountDetails || [])
 			.filter((room) => room?.activeRoom !== false && room?._id)
 			.map((room) => ({
@@ -324,8 +416,15 @@ exports.listHotelRunnerRoomMappings = async (req, res) => {
 				externalName: mapping.externalName || "",
 				externalNamePresentation: mapping.externalNamePresentation || "",
 				isMaster: mapping.isMaster === true,
-				roomListVerified: Boolean(mapping.roomListVerifiedAt),
+				roomListVerified: hasCurrentRoomListProof(
+					mapping,
+					verificationWindow,
+					activeRoomListSyncGeneration
+				),
 				roomListVerifiedAt: mapping.roomListVerifiedAt || null,
+				roomListVerificationState:
+					mapping.roomListVerificationState || "unverified",
+				variantConflict: mapping.variantConflict === true,
 				localRoomTypeId: mapping.localRoomConfigId || null,
 				status: mapping.status,
 				version: Number(mapping.__v || 0),
@@ -343,7 +442,20 @@ exports.listHotelRunnerRoomMappings = async (req, res) => {
 
 exports.updateHotelRunnerRoomMapping = async (req, res) => {
 	try {
-		const { hotel } = await configuredAdminContext(req);
+		const { config, hotel } = await configuredAdminContext(req);
+		if (!isConfiguredSuperAdmin(req?.profile || {})) {
+			return res.status(403).json({
+				error: "HotelRunner room mapping changes require the configured super administrator.",
+			});
+		}
+		if (config.projectionEnabled === true) {
+			return res.status(409).json({
+				error:
+					"Pause HotelRunner projection before changing room mappings.",
+				code: "hotelrunner_mapping_projection_active",
+			});
+		}
+		const verificationWindow = roomListVerificationWindow(config);
 		const mappingId = String(req.params.mappingId || "").trim();
 		const localRoomTypeId = String(req.body?.localRoomTypeId || "").trim();
 		const enabled = req.body?.enabled === true;
@@ -368,24 +480,43 @@ exports.updateHotelRunnerRoomMapping = async (req, res) => {
 				error: "The selected PMS room category is not active for this hotel.",
 			});
 		}
+		let verifiedMapping = null;
+		let activeRoomListSyncGeneration = "";
 		if (enabled) {
-			const mapping = await HotelRunnerRoomMapping.findOne({
-				_id: mappingId,
-				hotelId: hotel._id,
-			})
-				.select("isMaster roomListVerifiedAt")
-				.lean();
-			if (!mapping) {
+			const [mappingProof, syncState] = await Promise.all([
+				HotelRunnerRoomMapping.findOne({
+					_id: mappingId,
+					hotelId: hotel._id,
+				})
+					.select(
+						"isMaster variantConflict roomListVerifiedAt roomListSyncGeneration roomListVerificationState"
+					)
+					.lean(),
+				HotelRunnerSyncState.findOne({ hotelId: hotel._id })
+					.select("activeRoomListSyncGeneration")
+					.lean(),
+			]);
+			verifiedMapping = mappingProof;
+			activeRoomListSyncGeneration = String(
+				syncState?.activeRoomListSyncGeneration || ""
+			).trim();
+			if (!verifiedMapping) {
 				return res.status(404).json({ error: "HotelRunner room mapping was not found." });
 			}
-			if (mapping.isMaster === true) {
+			if (verifiedMapping.isMaster === true) {
 				return res.status(422).json({
 					error: "HotelRunner master fallback inventory cannot be mapped to a PMS room category.",
 				});
 			}
-			if (!mapping.roomListVerifiedAt) {
+			if (
+				!hasCurrentRoomListProof(
+					verifiedMapping,
+					verificationWindow,
+					activeRoomListSyncGeneration
+				)
+			) {
 				return res.status(422).json({
-					error: "This inventory code must be verified by a HotelRunner room-list sync before it can be mapped.",
+					error: "This inventory code needs a fresh, conflict-free HotelRunner room-list sync verification before it can be mapped.",
 				});
 			}
 		}
@@ -397,7 +528,14 @@ exports.updateHotelRunnerRoomMapping = async (req, res) => {
 				...(enabled
 					? {
 							isMaster: { $ne: true },
-							roomListVerifiedAt: { $type: "date" },
+							variantConflict: { $ne: true },
+							roomListVerificationState: "verified",
+							roomListSyncGeneration:
+								activeRoomListSyncGeneration,
+							roomListVerifiedAt: {
+								$gte: verificationWindow.earliest,
+								$lte: verificationWindow.latest,
+							},
 					  }
 					: {}),
 			},

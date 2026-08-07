@@ -6,6 +6,23 @@ const MAX_TEXT = 4_000;
 const MAX_IDENTIFIER = 256;
 const MAX_ROOMS = 100;
 const MAX_NIGHTS_PER_ROOM = 366;
+// HotelRunner and the PMS may differ slightly, but a remote clock must not be
+// allowed to advance durable ordering watermarks arbitrarily far ahead.
+const MAX_SOURCE_UPDATED_AT_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const MAX_FINANCIAL_DETAIL_ROWS = 100;
+const MAX_FINANCIAL_DETAIL_KEYS = 50;
+const MAX_FINANCIAL_DETAIL_DEPTH = 4;
+const SENSITIVE_DETAIL_KEY =
+	/(?:auth|bearer|card(?:holder|number)?|credential|cvv|cvc|password|secret|token|expir(?:y|ation)|security[_\s-]?code|account[_\s-]?number|track[_\s-]?data|cryptogram)/i;
+
+const isSensitiveFinancialDetailKey = (key = "") => {
+	const text = String(key || "");
+	const compact = text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+	return Boolean(
+		SENSITIVE_DETAIL_KEY.test(text) ||
+		compact.endsWith("pan")
+	);
+};
 
 const cleanText = (value, max = MAX_TEXT) =>
 	String(value == null ? "" : value)
@@ -58,6 +75,40 @@ function parseTimestamp(value) {
 	return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function parseTimezoneQualifiedTimestamp(value) {
+	const text = cleanIdentifier(value);
+	const match = text.match(
+		/^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]{1,9})?(Z|[+-]([0-9]{2}):([0-9]{2}))$/i
+	);
+	if (!match) return null;
+	const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
+		match;
+	const year = Number(yearText);
+	const month = Number(monthText);
+	const day = Number(dayText);
+	const hour = Number(hourText);
+	const minute = Number(minuteText);
+	const second = Number(secondText);
+	const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+	const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+	const daysInMonth =
+		month >= 1 && month <= 12
+			? new Date(Date.UTC(year, month, 0)).getUTCDate()
+			: 0;
+	if (
+		day < 1 ||
+		day > daysInMonth ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 ||
+		offsetHour > 23 ||
+		offsetMinute > 59
+	) {
+		return null;
+	}
+	return parseTimestamp(text);
+}
+
 function decimalToCents(value) {
 	if (value === null || value === undefined || value === "") return null;
 	const text = String(value).trim().replace(/,/g, "");
@@ -71,6 +122,14 @@ function decimalToCents(value) {
 	if (Number(fraction[2] || 0) >= 5) cents += 1;
 	if (!Number.isSafeInteger(cents)) return null;
 	return negative ? -cents : cents;
+}
+
+function decimalToFiniteNumber(value) {
+	if (value === null || value === undefined || value === "") return null;
+	const text = String(value).trim().replace(/,/g, "");
+	if (!/^-?\d+(?:\.\d+)?$/.test(text)) return null;
+	const parsed = Number(text);
+	return Number.isFinite(parsed) ? parsed : null;
 }
 
 const centsToAmount = (cents) =>
@@ -113,6 +172,7 @@ function normalizeDailyPrices(rows = []) {
 		originalPriceCents: decimalToCents(row?.original_price),
 		discountCents: decimalToCents(row?.discount),
 		rateCode: cleanIdentifier(row?.rate_code),
+		version: cleanIdentifier(row?.version),
 		})),
 		overflow: rows.length > MAX_NIGHTS_PER_ROOM,
 	};
@@ -123,6 +183,70 @@ const boundedWholeNumber = (value, max = 10_000) => {
 	const parsed = Number(value);
 	return Number.isInteger(parsed) && parsed >= 0 && parsed <= max ? parsed : null;
 };
+
+function sanitizeFinancialDetail(value, depth = 0) {
+	if (value === null || value === undefined) return null;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value === "string") return cleanText(value);
+	if (value instanceof Date) {
+		return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+	}
+	if (depth >= MAX_FINANCIAL_DETAIL_DEPTH) return null;
+	if (Array.isArray(value)) {
+		return value
+			.slice(0, MAX_FINANCIAL_DETAIL_ROWS)
+			.map((item) => sanitizeFinancialDetail(item, depth + 1));
+	}
+	if (typeof value !== "object") return null;
+	return Object.entries(value)
+		.filter(
+			([key]) =>
+				!["__proto__", "prototype", "constructor"].includes(key) &&
+				!isSensitiveFinancialDetailKey(key)
+		)
+		.slice(0, MAX_FINANCIAL_DETAIL_KEYS)
+		.reduce((result, [key, item]) => {
+			const safeKey = cleanIdentifier(key);
+			if (safeKey) result[safeKey] = sanitizeFinancialDetail(item, depth + 1);
+			return result;
+		}, {});
+}
+
+function normalizeFinancialDetails(rows) {
+	return {
+		rows: Array.isArray(rows)
+			? rows
+					.slice(0, MAX_FINANCIAL_DETAIL_ROWS)
+					.map((row) => sanitizeFinancialDetail(row))
+			: [],
+		overflow: Array.isArray(rows) && rows.length > MAX_FINANCIAL_DETAIL_ROWS,
+	};
+}
+
+function normalizeRoomExtras(rows) {
+	return {
+		rows: Array.isArray(rows)
+			? rows.slice(0, MAX_FINANCIAL_DETAIL_ROWS).map((row) => ({
+					name: cleanText(row?.name),
+					priceCents: decimalToCents(row?.price),
+					basePriceCents: decimalToCents(row?.base_price),
+					code: cleanIdentifier(row?.code),
+					promotionsTotalCents: decimalToCents(row?.promotions_total),
+					isExtra: typeof row?.is_extra === "boolean" ? row.is_extra : null,
+					totalCents: decimalToCents(row?.total),
+					quantity: decimalToFiniteNumber(row?.quantity),
+					dates: sanitizeFinancialDetail(row?.dates),
+					repeatType: cleanIdentifier(row?.repeat_type),
+					includedInPrice:
+						typeof row?.included_in_price === "boolean"
+							? row.included_in_price
+							: null,
+			  }))
+			: [],
+		overflow: Array.isArray(rows) && rows.length > MAX_FINANCIAL_DETAIL_ROWS,
+	};
+}
 
 const normalizeComments = (comments) =>
 	Array.isArray(comments)
@@ -146,6 +270,7 @@ function normalizeRoom(room = {}, index = 0) {
 	const checkinDate = parseDateOnly(room?.checkin_date);
 	const checkoutDate = parseDateOnly(room?.checkout_date);
 	const dailyPrices = normalizeDailyPrices(room?.daily_prices);
+	const extras = normalizeRoomExtras(room?.extras);
 	const totalGuests = boundedWholeNumber(room?.total_guest, 1_000);
 	const adults = boundedWholeNumber(room?.total_adult, 1_000);
 	const reportedChildCount = Array.isArray(room?.child_ages)
@@ -180,7 +305,30 @@ function normalizeRoom(room = {}, index = 0) {
 		roomSubTotalCents: decimalToCents(room?.room_sub_total),
 		nonRefundable: room?.non_refundable === true,
 		mealPlan: cleanText(room?.meal_plan),
+		mealPlanPresentation: cleanText(room?.meal_plan_presentation),
 		extraInfo: cleanText(room?.extra_info),
+		extras: extras.rows,
+		extrasOverflow: extras.overflow,
+		extrasTotalCents: decimalToCents(room?.extras_total),
+		fixedAdjustmentsTotalCents: decimalToCents(room?.fixed_adjustments_total),
+		includedTaxesTotalCents: decimalToCents(room?.included_taxes_total),
+		excludedFeesAndTaxesTotalCents: decimalToCents(
+			room?.excluded_fees_and_taxes_total
+		),
+		cancelationRefundTotalCents: decimalToCents(
+			room?.cancelation_refund_total
+		),
+		cancelationRefundTaxType: cleanIdentifier(
+			room?.cancelation_refund_tax_type
+		),
+		cancelationPenaltyTotalCents: decimalToCents(
+			room?.cancelation_penalty_total
+		),
+		cancelationPenaltyTaxType: cleanIdentifier(
+			room?.cancelation_penalty_tax_type
+		),
+		promotionsTotalCents: decimalToCents(room?.promotions_total),
+		meta: sanitizeFinancialDetail(room?.meta),
 		comments: normalizeComments(room?.comments),
 		dailyPrices: dailyPrices.rows,
 		dailyPricesOverflow: dailyPrices.overflow,
@@ -202,7 +350,11 @@ function validationIssues(normalized) {
 	};
 	if (!normalized.messageUidValid) add("invalid_message_uid");
 	if (!normalized.hotelRunnerReservationId) add("invalid_reservation_id");
-	if (!normalized.sourceUpdatedAt) add("invalid_source_updated_at");
+	if (normalized.sourceUpdatedAtTooFarInFuture) {
+		add("source_updated_at_too_far_in_future");
+	} else if (!normalized.sourceUpdatedAt) {
+		add("invalid_source_updated_at");
+	}
 	if (normalized.state === "unknown") add("unknown_state");
 	if (normalized.roomsOverflow) add("room_resource_limit");
 	if (normalized.paymentsOverflow) add("payment_resource_limit");
@@ -238,6 +390,7 @@ function validationIssues(normalized) {
 		if (!normalized.rooms.length) add("missing_rooms");
 		for (const room of normalized.rooms) {
 			if (room.identifierOverflow) add("identifier_resource_limit");
+			if (room.extrasOverflow) add("room_extra_resource_limit");
 			if (!room.invCode) add("missing_room_inv_code");
 			if (
 				!["reserved", "confirmed"].includes(room.state) ||
@@ -283,6 +436,7 @@ function validationIssues(normalized) {
 			}
 		}
 	}
+	if (normalized.financialDetailsOverflow) add("pricing_detail_resource_limit");
 	if (
 		normalized.state !== "canceled" &&
 		normalized.totalGuests !== null &&
@@ -313,9 +467,11 @@ function normalizeSafePayments(rows) {
 				currency: cleanIdentifier(row?.currency).toUpperCase(),
 				exchangedAmountCents: decimalToCents(row?.exchanged_amount),
 				exchangeCurrency: cleanIdentifier(row?.exchange_currency).toUpperCase(),
+				exchangeRate: decimalToFiniteNumber(row?.exchange_rate),
 				paidAt: parseTimestamp(row?.paid_at),
 				methodName: cleanText(row?.payment_method_name),
 				method: cleanIdentifier(row?.payment_method).toLowerCase(),
+				installment: boundedWholeNumber(row?.installment, 1_000),
 				responseCode: cleanIdentifier(row?.response_code),
 			}))
 		: [];
@@ -361,6 +517,11 @@ function sanitizedStoredPayload(normalized = {}) {
 		paymentMethod: normalized.paymentMethod,
 		paidAmountCents: normalized.paidAmountCents,
 		payments: normalized.payments,
+		depositTaxInclusive: normalized.depositTaxInclusive,
+		extraAdjustmentsDetails: normalized.extraAdjustmentsDetails,
+		adjustmentDetails: normalized.adjustmentDetails,
+		priceAdjustmentsDetails: normalized.priceAdjustmentsDetails,
+		cancelationPolicy: normalized.cancelationPolicy,
 		rooms: normalized.rooms,
 		issues: normalized.issues,
 	});
@@ -408,7 +569,7 @@ function canonicalPayload(normalized = {}) {
 	return stableClone(sanitized);
 }
 
-function normalizeHotelRunnerReservation(raw = {}) {
+function normalizeHotelRunnerReservation(raw = {}, { receivedAt = null } = {}) {
 	const payload = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
 	const payloadHash = hashObject(payload);
 	const rawMessageUid = String(payload.message_uid == null ? "" : payload.message_uid).trim();
@@ -428,7 +589,28 @@ function normalizeHotelRunnerReservation(raw = {}) {
 	const rooms = Array.isArray(payload.rooms)
 		? payload.rooms.slice(0, MAX_ROOMS).map(normalizeRoom)
 		: [];
-	const sourceUpdatedAt = parseTimestamp(payload.updated_at);
+	const extraAdjustments = normalizeFinancialDetails(
+		payload.extra_adjustments_details
+	);
+	const adjustments = normalizeFinancialDetails(payload.adjustment_details);
+	const priceAdjustments = normalizeFinancialDetails(
+		payload.price_adjustments_details
+	);
+	const cancelationPolicy = normalizeFinancialDetails(payload.cancelation_policy);
+	const parsedSourceUpdatedAt = parseTimezoneQualifiedTimestamp(payload.updated_at);
+	const receiptTimestamp =
+		receivedAt instanceof Date && Number.isFinite(receivedAt.getTime())
+			? receivedAt
+			: parseTimestamp(receivedAt);
+	const sourceUpdatedAtTooFarInFuture = Boolean(
+		parsedSourceUpdatedAt &&
+			receiptTimestamp &&
+			parsedSourceUpdatedAt.getTime() >
+				receiptTimestamp.getTime() + MAX_SOURCE_UPDATED_AT_FUTURE_SKEW_MS
+	);
+	const sourceUpdatedAt = sourceUpdatedAtTooFarInFuture
+		? null
+		: parsedSourceUpdatedAt;
 	const rawReservationId = String(
 		payload.reservation_id == null ? "" : payload.reservation_id
 	).trim();
@@ -484,6 +666,7 @@ function normalizeHotelRunnerReservation(raw = {}) {
 			(payload.checkout_date !== null && payload.checkout_date !== undefined),
 		bookedAt: parseTimestamp(payload.completed_at),
 		sourceUpdatedAt,
+		sourceUpdatedAtTooFarInFuture,
 		totalGuests: boundedWholeNumber(payload.total_guests, 10_000),
 		totalRooms:
 			payload.total_rooms === null || payload.total_rooms === undefined
@@ -502,6 +685,20 @@ function normalizeHotelRunnerReservation(raw = {}) {
 		paidAmountCents: decimalToCents(payload.paid_amount),
 		payments: normalizeSafePayments(payload.payments),
 		paymentsOverflow: Array.isArray(payload.payments) && payload.payments.length > 100,
+		depositTaxInclusive:
+			typeof payload.deposit_tax_inclusive === "boolean"
+				? payload.deposit_tax_inclusive
+				: null,
+		extraAdjustmentsDetails: extraAdjustments.rows,
+		adjustmentDetails: adjustments.rows,
+		priceAdjustmentsDetails: priceAdjustments.rows,
+		cancelationPolicy: cancelationPolicy.rows,
+		financialDetailsOverflow: [
+			extraAdjustments,
+			adjustments,
+			priceAdjustments,
+			cancelationPolicy,
+		].some((detail) => detail.overflow),
 		rooms,
 		roomsOverflow,
 		identifierOverflow: [payload.hr_number, payload.provider_number, payload.pms_number]
@@ -526,6 +723,7 @@ module.exports = {
 	MAX_IDENTIFIER,
 	MAX_NIGHTS_PER_ROOM,
 	MAX_ROOMS,
+	MAX_SOURCE_UPDATED_AT_FUTURE_SKEW_MS,
 	canonicalPayload,
 	centsToAmount,
 	cleanIdentifier,

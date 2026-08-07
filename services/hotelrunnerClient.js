@@ -83,8 +83,10 @@ function createHotelRunnerClient({ config, hotelId, fetchImpl = fetch, quotaDepe
 		});
 	}
 	const baseUrl = validateBaseUrl(config.apiBaseUrl);
+	const deliveryConfirmationEnabled =
+		config.confirmDeliveryEnabled === true && config.projectionEnabled === true;
 
-	async function request(path, { method = "GET", query = {} } = {}) {
+	async function performRequest(path, { method = "GET", query = {} } = {}) {
 		await reserveHotelRunnerApiCall(
 			{
 				hotelId,
@@ -153,6 +155,21 @@ function createHotelRunnerClient({ config, hotelId, fetchImpl = fetch, quotaDepe
 		}
 	}
 
+	async function request(path, options = {}) {
+		const method = String(options.method || "GET").trim().toUpperCase();
+		const normalizedPath = String(path || "")
+			.trim()
+			.replace(/^\/+|\/+$/g, "")
+			.toLowerCase();
+		if (method !== "GET" || normalizedPath === "reservations/~") {
+			throw new HotelRunnerApiError(
+				"HotelRunner raw requests are read-only; use the gated delivery confirmation method for mutations.",
+				{ code: "HOTELRUNNER_RAW_MUTATION_FORBIDDEN", retryable: false }
+			);
+		}
+		return performRequest(path, { ...options, method: "GET" });
+	}
+
 	return {
 		async retrieveReservations(options = {}) {
 			const undelivered = options.undelivered !== false;
@@ -168,7 +185,7 @@ function createHotelRunnerClient({ config, hotelId, fetchImpl = fetch, quotaDepe
 					{ code: "HOTELRUNNER_PULL_OPTIONS_INVALID", retryable: false }
 				);
 			}
-			return request("reservations", {
+			return performRequest("reservations", {
 				query: {
 					undelivered,
 					per_page: options.perPage || 50,
@@ -182,18 +199,42 @@ function createHotelRunnerClient({ config, hotelId, fetchImpl = fetch, quotaDepe
 			});
 		},
 		async getRooms() {
-			return request("rooms");
+			return performRequest("rooms");
 		},
 		async confirmDelivery({ messageUid, pmsNumber } = {}) {
-			if (!String(messageUid || "").trim()) {
-				throw new HotelRunnerApiError("HotelRunner message UID is required.", {
-					code: "HOTELRUNNER_CONFIRM_OPTIONS_INVALID",
-					retryable: false,
-				});
+			if (!deliveryConfirmationEnabled) {
+				throw new HotelRunnerApiError(
+					"HotelRunner delivery confirmation is disabled by configuration.",
+					{
+						code: "HOTELRUNNER_CONFIRM_DELIVERY_DISABLED",
+						retryable: false,
+					}
+				);
 			}
-			const body = await request("reservations/~", {
+			const normalizedMessageUid = String(messageUid || "").trim();
+			const normalizedPmsNumber = String(pmsNumber || "").trim();
+			if (
+				!normalizedMessageUid ||
+				!normalizedPmsNumber ||
+				normalizedMessageUid.length > 256 ||
+				normalizedPmsNumber.length > 256 ||
+				/[\u0000-\u001f\u007f]/.test(normalizedMessageUid) ||
+				/[\u0000-\u001f\u007f]/.test(normalizedPmsNumber)
+			) {
+				throw new HotelRunnerApiError(
+					"HotelRunner message UID and PMS reservation number are required.",
+					{
+						code: "HOTELRUNNER_CONFIRM_OPTIONS_INVALID",
+						retryable: false,
+					}
+				);
+			}
+			const body = await performRequest("reservations/~", {
 				method: "PUT",
-				query: { message_uid: messageUid, pms_number: pmsNumber },
+				query: {
+					message_uid: normalizedMessageUid,
+					pms_number: normalizedPmsNumber,
+				},
 			});
 			if (body?.status !== "ok") {
 				throw new HotelRunnerApiError(

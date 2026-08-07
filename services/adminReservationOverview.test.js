@@ -68,6 +68,7 @@ const legacyGroup = (reservations, keyFor) => {
         reservationsCount: 0,
         total_amount: 0,
         commission: 0,
+        commissionUnavailableCount: 0,
         paymentStatusCounts: {
           captured: 0,
           notCaptured: 0,
@@ -98,6 +99,7 @@ const legacyOverview = (reservations, requestedLimit) => {
     reservationsCount: group.reservationsCount,
     total_amount: group.total_amount,
     commission: group.commission,
+    commissionUnavailableCount: group.commissionUnavailableCount,
     paymentStatusCounts: group.paymentStatusCounts,
   });
   return {
@@ -120,6 +122,7 @@ const legacyOverview = (reservations, requestedLimit) => {
       reservationsCount: group.reservationsCount,
       total_amount: group.total_amount,
       commission: group.commission,
+      commissionUnavailableCount: group.commissionUnavailableCount,
       paymentStatusCounts: group.paymentStatusCounts,
     })),
     reservationsByHotelNames: byHotel.map(hotelShape),
@@ -207,6 +210,14 @@ test("overview projection includes every calculation input and excludes bulky lo
     "total_amount",
     "hotelId",
     "pickedRoomsType",
+    "adminPricing.mode",
+    "adminPricing.commercialVerified",
+    "adminPricing.otaExpenseTotal",
+    "ota_financial_summary.commercialVerified",
+    "ota_financial_summary.otaExpenseTotal",
+    "otaFinancialSummary.commercialVerified",
+    "otaFinancialSummary.otaExpenseTotal",
+    "supplierData.hotelRunner.transport",
     "paid_amount_breakdown",
     "customer_details.cardNumber",
     "payment_details.captured",
@@ -222,4 +233,52 @@ test("overview projection includes every calculation input and excludes bulky lo
   ]) {
     assert.equal(selectedFields.has(excluded), false, excluded);
   }
+});
+
+test("overview excludes unverified HotelRunner OTA expense and reports it unavailable", () => {
+  const hotelRunnerReservations = [
+    {
+      createdAt: new Date("2026-08-06T12:00:00.000Z"),
+      checkin_date: new Date("2026-08-10T12:00:00.000Z"),
+      checkout_date: new Date("2026-08-11T12:00:00.000Z"),
+      reservation_status: "confirmed",
+      total_amount: 1000,
+      hotelId: {
+        _id: "675c41a3fd79ed7586b970ee",
+        hotelName: "Synthetic Hotel",
+      },
+      pickedRoomsType: [],
+      adminPricing: {
+        mode: "hotelrunner_api",
+        commercialVerified: false,
+        otaExpenseTotal: null,
+      },
+      supplierData: {
+        hotelRunner: { transport: "hotelrunner_api" },
+      },
+    },
+    {
+      createdAt: new Date("2026-08-06T13:00:00.000Z"),
+      checkin_date: new Date("2026-08-10T12:00:00.000Z"),
+      checkout_date: new Date("2026-08-11T12:00:00.000Z"),
+      reservation_status: "confirmed",
+      total_amount: 900,
+      hotelId: { _id: "hotel-b", hotelName: "Synthetic Hotel" },
+      pickedRoomsType: [],
+      adminPricing: {
+        mode: "hotelrunner_api",
+        commercialVerified: true,
+        otaExpenseTotal: 125,
+      },
+    },
+  ];
+
+  const overview = buildReservationOverview(hotelRunnerReservations, 5);
+  assert.equal(overview.reservationsByDay[0].commission, 125);
+  assert.equal(
+    overview.reservationsByDay[0].commissionUnavailableCount,
+    1
+  );
+  assert.equal(overview.topHotels[0].commission, 125);
+  assert.equal(overview.topHotels[0].commissionUnavailableCount, 1);
 });
