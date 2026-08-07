@@ -403,6 +403,7 @@ All values belong in the backend `.env` only. The repository ignores `.env`, `.e
 | `HOTELRUNNER_PULL_ENABLED` | `false` | Explicitly enables reservation reconciliation GETs; malformed/blank explicit booleans invalidate configuration |
 | `HOTELRUNNER_ROOM_LIST_SYNC_ENABLED` | `false` | Independently enables due room-list refreshes; malformed/blank explicit booleans invalidate configuration |
 | `HOTELRUNNER_CONFIRM_DELIVERY_ENABLED` | `false` | Separate outbound PUT gate; also requires projection plus bounded PMS/message identifiers |
+| `HOTELRUNNER_REQUIRE_OTA_REVIEW` | `false` | When true, a new confirmed HotelRunner reservation enters the existing canonical `OTA Platform Review` workflow; malformed values stop worker projection while callback archival remains available |
 | `HOTELRUNNER_PULL_INTERVAL_MINUTES` | 30; bounded 15-360 | Due interval with +/-10% jitter and at least five minutes |
 | `HOTELRUNNER_ROOM_LIST_INTERVAL_HOURS` | 24; bounded 6-168 | Room-list refresh interval |
 | `HOTELRUNNER_REQUEST_TIMEOUT_MS` | 12000; bounded 3000-30000 | Vendor request timeout |
@@ -441,6 +442,14 @@ unset hotelrunner_replacement_token
 ```
 
 `rotate-token` is allowed only while all four gates are explicitly false and the activation cutoff is blank. It also requires the existing HR ID and exactly one valid local hotel binding. `activate` atomically sets push projection and bounded recurring room-list verification true, keeps history pull and delivery confirmation false, and requires a reviewed timezone-qualified cutoff. `deactivate` closes all four gates and clears the cutoff.
+
+Review mode is changed independently so activation/deactivation and token rotation do not silently alter the business workflow:
+
+```sh
+npm run hotelrunner:env-gate -- set-review-mode --enabled true --env-file /home/ahmedadmin/Hotels/hotels_backend/.env --backup-dir /home/ahmedadmin/secure_env_backups/hotels_backend
+```
+
+`set-review-mode` accepts an explicit boolean, changes only `HOTELRUNNER_REQUIRE_OTA_REVIEW`, creates the same protected atomic backup, and never prints any environment value. Restart the backend and the single systemd HotelRunner worker after changing it because both load configuration at process start.
 
 The gate compares the explicit file with variables inherited by its own shell process. PM2 state is separate: before every restart, verify the target xHotelPro processes contain no inherited `HOTELRUNNER_*` overrides, then restart only those named processes with the protected `.env` behavior. Never dump PM2 environments to shared logs because other applications may contain secrets.
 
@@ -546,6 +555,27 @@ Provider fields that contradict the incoming aliases reject the candidate. Multi
 Canonical provider fields and recognized legacy provider labels must also reach one consistent provider result. Contradictory values across `supplierData`, reservation booking source, and customer booking source fail closed before lookup or mutation; a convenient display label cannot override canonical transport/business identity.
 
 Trip.com has an explicit cross-transport identity bridge so its existing email-created record can be linked to the direct HotelRunner event. This bridge still requires exact validated provider identity and rejects contradictory providers.
+
+### Existing OTA platform-review workflow
+
+`HOTELRUNNER_REQUIRE_OTA_REVIEW=true` reuses the PMS workflow; it does not introduce a second lifecycle status:
+
+```text
+HotelRunner Confirmed push
+  -> state = "OTA Platform Review"
+  -> reservation_status = "OTA Platform Review"
+  -> otaPlatformReview.status = "pending"
+  -> HotelRunner source/link metadata
+  -> /admin/ota-reservations
+  -> existing pricing review and release action
+  -> Pending Confirmation
+```
+
+The operator-facing list derives the label **OTA Platform Review HotelRunner** from the canonical status plus trusted HotelRunner metadata. The longer label is never persisted in `state` or `reservation_status`, so existing review filters, hotel-facing exclusions, permissions, reporting, pricing validation, and release concurrency continue to use the established canonical values.
+
+While pending review, a HotelRunner modification updates source-owned guest, stay, room, and gross-pricing fields on the same reservation and does not release it. Local room, housing, finance, settlement, or reviewed-pricing ownership continues to protect or quarantine conflicting changes. A later flag rollback cannot silently release an already-created HotelRunner review; staff must use the dedicated release workflow. A cancellation updates that same reservation to `cancelled` and marks its pending review metadata cancelled.
+
+An exact HotelRunner match to an email-created OTA review links the durable HotelRunner mirror to that existing reservation. Original email provenance is retained, HotelRunner management metadata is added, and no second reservation is created. Email ingestion remains active for reservations HotelRunner does not own. With `HOTELRUNNER_REQUIRE_OTA_REVIEW=false`, new confirmed HotelRunner reservations keep the previously tested direct `confirmed` behavior; deduplication, modifications, and cancellations are unchanged.
 
 ### Ordering and watermarks
 
@@ -890,7 +920,7 @@ After the owner approves every room mapping:
 1. keep HotelRunner push temporarily disabled and stop any worker;
 2. record a reviewed current timezone-qualified activation timestamp (including `Z` or an explicit offset);
 3. run the versioned env-gate `activate --not-before <reviewed timestamp>` command. It sets `HOTELRUNNER_PROJECTION_ENABLED=true` and `HOTELRUNNER_ROOM_LIST_SYNC_ENABLED=true`, keeps `HOTELRUNNER_PULL_ENABLED=false` and `HOTELRUNNER_CONFIRM_DELIVERY_ENABLED=false`, and creates the protected rollback;
-4. run env-gate `status` and independently confirm the target PM2 processes have no inherited HotelRunner override;
+4. if staff review is required, run `set-review-mode --enabled true`; then run env-gate `status` and independently confirm the target PM2 processes have no inherited HotelRunner override;
 5. restart the main backend and verify the status API reports projection true, the exact cutoff, pull false, and the pre-activation archive count;
 6. verify/install the versioned `ops/systemd/xhotelpro-hotelrunner-sync.service`, then enable/start that one dedicated unit and verify its database projection lease. Confirm no `hotelrunner-sync` PM2 app exists;
 7. prove the worker does not claim any pre-cutoff event and the normal PMS remains healthy;
@@ -1072,6 +1102,8 @@ Suggested alert conditions for the future monitoring page:
 ## Frontend and backend roadmap
 
 All future HotelRunner screens stay under `/admin/hotelrunner/*`, use the same isolated frontend module, call only authenticated local backend APIs, and are property-scoped server-side. Credentials never become browser-readable.
+
+Inbound reservations that require staff review intentionally use the existing `/admin/ota-reservations` component and release API. It displays **OTA Platform Review HotelRunner** only as a presentation label while the stored lifecycle remains `OTA Platform Review`. The HotelRunner operational console remains separate, and its top-navbar shortcut is intentionally absent; any future admin navigation must be explicitly approved and must not expose credentials or make vendor calls during ordinary page navigation.
 
 ### Phase 1A - deployed at Gate 3 mapping review; projection not active
 

@@ -19,6 +19,7 @@ const GATE_KEYS = Object.freeze([
 	"HOTELRUNNER_CONFIRM_DELIVERY_ENABLED",
 ]);
 const CUTOFF_KEY = "HOTELRUNNER_PROJECTION_NOT_BEFORE";
+const REVIEW_MODE_KEY = "HOTELRUNNER_REQUIRE_OTA_REVIEW";
 const CREDENTIAL_KEYS = Object.freeze([
 	"HOTELRUNNER_API_TOKEN",
 	"HOTELRUNNER_API_HR_ID",
@@ -27,15 +28,18 @@ const SUPPORTED_HOTELS_KEY = "HOTELRUNNER_SUPPORTED_HOTELIDS";
 const ASSERTION_KEYS = Object.freeze([
 	...GATE_KEYS,
 	CUTOFF_KEY,
+	REVIEW_MODE_KEY,
 	...CREDENTIAL_KEYS,
 	SUPPORTED_HOTELS_KEY,
 ]);
 const TOKEN_ROTATION_COMMAND = "rotate-token";
+const REVIEW_MODE_COMMAND = "set-review-mode";
 const MUTATING_COMMANDS = new Set([
 	"bootstrap",
 	"deactivate",
 	"activate",
 	TOKEN_ROTATION_COMMAND,
+	REVIEW_MODE_COMMAND,
 ]);
 const COMMANDS = new Set([
 	...MUTATING_COMMANDS,
@@ -292,7 +296,15 @@ const normalizeTokenInput = (value) => {
 	return token;
 };
 
-const mutationChanges = (command, notBefore, secretInput) => {
+const mutationChanges = (command, notBefore, secretInput, enabled) => {
+	if (command === REVIEW_MODE_COMMAND) {
+		const reviewMode = parseExplicitBoolean(
+			{ [REVIEW_MODE_KEY]: enabled },
+			REVIEW_MODE_KEY,
+			{ required: true }
+		);
+		return { [REVIEW_MODE_KEY]: reviewMode.enabled ? "true" : "false" };
+	}
 	const changes = Object.fromEntries(GATE_KEYS.map((key) => [key, "false"]));
 	changes[CUTOFF_KEY] = "";
 	if (command === TOKEN_ROTATION_COMMAND) {
@@ -329,7 +341,7 @@ const assertRenderedChangesRoundTrip = (renderedText, changes) => {
 };
 
 const normalizeComparableValue = (key, value, { configured = true } = {}) => {
-	if (GATE_KEYS.includes(key)) {
+	if (GATE_KEYS.includes(key) || key === REVIEW_MODE_KEY) {
 		if (!configured) return false;
 		return parseExplicitBoolean({ [key]: value }, key, { required: true }).enabled;
 	}
@@ -381,6 +393,11 @@ const buildStatus = (fileEnv) => {
 			enabled: parsed.enabled,
 		};
 	}
+	const reviewMode = parseExplicitBoolean(fileEnv, REVIEW_MODE_KEY);
+	settings[REVIEW_MODE_KEY] = {
+		configured: reviewMode.configured,
+		enabled: reviewMode.enabled,
+	};
 	const cutoffText = clean(fileEnv[CUTOFF_KEY]);
 	settings[CUTOFF_KEY] = {
 		configured: Boolean(cutoffText),
@@ -434,6 +451,7 @@ const runEnvGateCommand = async ({
 	envFile,
 	backupDir = "",
 	notBefore = "",
+	enabled = "",
 	secretInput,
 	inheritedEnv = process.env,
 } = {}) => {
@@ -445,6 +463,12 @@ const runEnvGateCommand = async ({
 	}
 	if (command !== "activate" && clean(notBefore)) {
 		fail("--not-before is only valid with activate.", "INVALID_ARGUMENT");
+	}
+	if (command !== REVIEW_MODE_COMMAND && clean(enabled)) {
+		fail("--enabled is only valid with set-review-mode.", "INVALID_ARGUMENT");
+	}
+	if (command === REVIEW_MODE_COMMAND && !clean(enabled)) {
+		fail("set-review-mode requires --enabled.", "REVIEW_MODE_VALUE_REQUIRED");
 	}
 	if (!MUTATING_COMMANDS.has(command) && clean(backupDir)) {
 		fail("--backup-dir is only valid for mutations.", "INVALID_ARGUMENT");
@@ -496,7 +520,7 @@ const runEnvGateCommand = async ({
 			);
 		}
 	}
-	const changes = mutationChanges(command, notBefore, secretInput);
+	const changes = mutationChanges(command, notBefore, secretInput, enabled);
 	if (
 		command === TOKEN_ROTATION_COMMAND &&
 		clean(fileEnv.HOTELRUNNER_API_TOKEN) === changes.HOTELRUNNER_API_TOKEN
@@ -529,11 +553,21 @@ const runEnvGateCommand = async ({
 const parseCliArguments = (argv) => {
 	const args = [...argv];
 	const command = args.shift() || "";
-	const options = { command, envFile: "", backupDir: "", notBefore: "" };
+	const options = {
+		command,
+		envFile: "",
+		backupDir: "",
+		notBefore: "",
+		enabled: "",
+	};
 	const seen = new Set();
 	while (args.length) {
 		const flag = args.shift();
-		if (!["--env-file", "--backup-dir", "--not-before"].includes(flag)) {
+		if (
+			!["--env-file", "--backup-dir", "--not-before", "--enabled"].includes(
+				flag
+			)
+		) {
 			fail("An unsupported command-line option was provided.", "INVALID_ARGUMENT");
 		}
 		if (seen.has(flag)) {
@@ -547,6 +581,7 @@ const parseCliArguments = (argv) => {
 		if (flag === "--env-file") options.envFile = value;
 		if (flag === "--backup-dir") options.backupDir = value;
 		if (flag === "--not-before") options.notBefore = value;
+		if (flag === "--enabled") options.enabled = value;
 	}
 	if (!COMMANDS.has(command)) {
 		fail("A supported command is required.", "INVALID_COMMAND");
@@ -559,6 +594,12 @@ const parseCliArguments = (argv) => {
 	}
 	if (command !== "activate" && options.notBefore) {
 		fail("--not-before is only valid with activate.", "INVALID_ARGUMENT");
+	}
+	if (command === REVIEW_MODE_COMMAND && !options.enabled) {
+		fail("set-review-mode requires --enabled.", "REVIEW_MODE_VALUE_REQUIRED");
+	}
+	if (command !== REVIEW_MODE_COMMAND && options.enabled) {
+		fail("--enabled is only valid with set-review-mode.", "INVALID_ARGUMENT");
 	}
 	if (!MUTATING_COMMANDS.has(command) && options.backupDir) {
 		fail("--backup-dir is only valid for mutations.", "INVALID_ARGUMENT");
@@ -601,6 +642,8 @@ module.exports = {
 	CUTOFF_KEY,
 	GATE_KEYS,
 	HotelRunnerEnvGateError,
+	REVIEW_MODE_COMMAND,
+	REVIEW_MODE_KEY,
 	SUPPORTED_HOTELS_KEY,
 	TOKEN_ROTATION_COMMAND,
 	TOOL_VERSION,

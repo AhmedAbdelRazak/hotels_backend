@@ -24,6 +24,24 @@ test("local projection is fail-closed until explicitly activated", () => {
 	);
 });
 
+test("HotelRunner OTA review mode is opt-in and uses an explicit boolean", () => {
+	assert.equal(getHotelRunnerConfig(baseEnvironment).requireOtaReview, false);
+	assert.equal(
+		getHotelRunnerConfig({
+			...baseEnvironment,
+			HOTELRUNNER_REQUIRE_OTA_REVIEW: "true",
+		}).requireOtaReview,
+		true
+	);
+	assert.equal(
+		getHotelRunnerConfig({
+			...baseEnvironment,
+			HOTELRUNNER_REQUIRE_OTA_REVIEW: "false",
+		}).requireOtaReview,
+		false
+	);
+});
+
 test("projection requires a valid timezone-qualified activation cutoff", () => {
 	const missing = getHotelRunnerConfig({
 		...baseEnvironment,
@@ -89,6 +107,7 @@ test("malformed explicit safety booleans fail closed and invalidate configuratio
 		"HOTELRUNNER_ROOM_LIST_SYNC_ENABLED",
 		"HOTELRUNNER_PROJECTION_ENABLED",
 		"HOTELRUNNER_CONFIRM_DELIVERY_ENABLED",
+		"HOTELRUNNER_REQUIRE_OTA_REVIEW",
 	]) {
 		const config = getHotelRunnerConfig({
 			...baseEnvironment,
@@ -96,17 +115,14 @@ test("malformed explicit safety booleans fail closed and invalidate configuratio
 		});
 		assert.equal(config.configured, false, key);
 		assert.equal(config.callbackConfigured, true, key);
-		assert.equal(
-			key === "HOTELRUNNER_PULL_ENABLED"
-				? config.pullEnabled
-				: key === "HOTELRUNNER_ROOM_LIST_SYNC_ENABLED"
-					? config.roomListSyncEnabled
-				: key === "HOTELRUNNER_PROJECTION_ENABLED"
-					? config.projectionEnabled
-					: config.confirmDeliveryEnabled,
-			false,
-			key
-		);
+		const configProperty = {
+			HOTELRUNNER_PULL_ENABLED: "pullEnabled",
+			HOTELRUNNER_ROOM_LIST_SYNC_ENABLED: "roomListSyncEnabled",
+			HOTELRUNNER_PROJECTION_ENABLED: "projectionEnabled",
+			HOTELRUNNER_CONFIRM_DELIVERY_ENABLED: "confirmDeliveryEnabled",
+			HOTELRUNNER_REQUIRE_OTA_REVIEW: "requireOtaReview",
+		}[key];
+		assert.equal(config[configProperty], false, key);
 		assert.equal(config.errors.some((error) => error.startsWith(key)), true, key);
 	}
 	const explicitlyBlankPull = getHotelRunnerConfig({

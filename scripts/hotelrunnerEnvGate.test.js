@@ -11,6 +11,8 @@ const test = require("node:test");
 const {
 	CUTOFF_KEY,
 	GATE_KEYS,
+	REVIEW_MODE_COMMAND,
+	REVIEW_MODE_KEY,
 	runEnvGateCommand,
 } = require("./hotelrunnerEnvGate");
 
@@ -36,7 +38,7 @@ const safeInheritedEnv = (overrides = {}) => ({
 	...overrides,
 });
 
-const baseEnvText = ({ gates = "false", cutoff = "" } = {}) =>
+const baseEnvText = ({ gates = "false", cutoff = "", reviewMode = "false" } = {}) =>
 	[
 		"# unrelated configuration must remain byte-for-byte stable",
 		"UNRELATED_SETTING=keep-me",
@@ -44,6 +46,7 @@ const baseEnvText = ({ gates = "false", cutoff = "" } = {}) =>
 		`HOTELRUNNER_API_HR_ID=${SYNTHETIC_HR_ID}`,
 		`HOTELRUNNER_SUPPORTED_HOTELIDS=${LOCAL_HOTEL_ID}`,
 		...GATE_KEYS.map((key) => `${key}=${gates}`),
+		`${REVIEW_MODE_KEY}=${reviewMode}`,
 		`${CUTOFF_KEY}=${cutoff}`,
 		"TRAILING_SETTING=also-keep-me",
 		"",
@@ -131,7 +134,10 @@ test("bootstrap creates an exact atomic backup and only rewrites managed gates",
 
 test("activate sets push projection, bounded room verification, and a timezone-qualified cutoff", async () => {
 	const directory = await makeTemporaryDirectory();
-	const envFile = await writeEnvFixture(directory);
+	const envFile = await writeEnvFixture(
+		directory,
+		baseEnvText({ reviewMode: "true" })
+	);
 	const cutoff = "2026-08-06T16:45:12-07:00";
 
 	await runEnvGateCommand({
@@ -145,6 +151,7 @@ test("activate sets push projection, bounded room verification, and a timezone-q
 	assert.match(updated, /^HOTELRUNNER_ROOM_LIST_SYNC_ENABLED=true$/m);
 	assert.match(updated, /^HOTELRUNNER_PULL_ENABLED=false$/m);
 	assert.match(updated, /^HOTELRUNNER_CONFIRM_DELIVERY_ENABLED=false$/m);
+	assert.match(updated, new RegExp(`^${REVIEW_MODE_KEY}=true$`, "m"));
 	assert.match(updated, new RegExp(`^${CUTOFF_KEY}=${cutoff}$`, "m"));
 
 	const beforeInvalidActivation = await fs.promises.readFile(envFile, "utf8");
@@ -179,6 +186,63 @@ test("deactivate restores every gate and clears the cutoff", async () => {
 	const updated = await fs.promises.readFile(envFile, "utf8");
 	for (const key of GATE_KEYS) assert.match(updated, new RegExp(`^${key}=false$`, "m"));
 	assert.match(updated, new RegExp(`^${CUTOFF_KEY}=$`, "m"));
+});
+
+test("review mode can be changed atomically without changing activation gates", async () => {
+	const directory = await makeTemporaryDirectory();
+	const envFile = await writeEnvFixture(
+		directory,
+		baseEnvText({ gates: "true", cutoff: "2026-08-06T12:00:00Z" })
+	);
+
+	const enabled = await runEnvGateCommand({
+		command: REVIEW_MODE_COMMAND,
+		envFile,
+		enabled: "true",
+		inheritedEnv: {},
+	});
+	assert.deepEqual(enabled.changedKeys, [REVIEW_MODE_KEY]);
+	let updated = await fs.promises.readFile(envFile, "utf8");
+	assert.match(updated, new RegExp(`^${REVIEW_MODE_KEY}=true$`, "m"));
+	for (const key of GATE_KEYS) {
+		assert.match(updated, new RegExp(`^${key}=true$`, "m"));
+	}
+	assert.match(
+		updated,
+		new RegExp(`^${CUTOFF_KEY}=2026-08-06T12:00:00Z$`, "m")
+	);
+
+	const status = await runEnvGateCommand({
+		command: "status",
+		envFile,
+		inheritedEnv: {},
+	});
+	assert.deepEqual(status.settings[REVIEW_MODE_KEY], {
+		configured: true,
+		enabled: true,
+	});
+
+	await runEnvGateCommand({
+		command: REVIEW_MODE_COMMAND,
+		envFile,
+		enabled: "false",
+		inheritedEnv: {},
+	});
+	updated = await fs.promises.readFile(envFile, "utf8");
+	assert.match(updated, new RegExp(`^${REVIEW_MODE_KEY}=false$`, "m"));
+
+	const beforeInvalid = updated;
+	await assert.rejects(
+		() =>
+			runEnvGateCommand({
+				command: REVIEW_MODE_COMMAND,
+				envFile,
+				enabled: "sometimes",
+				inheritedEnv: {},
+			}),
+		(error) => error.code === "INVALID_BOOLEAN_GATE"
+	);
+	assert.equal(await fs.promises.readFile(envFile, "utf8"), beforeInvalid);
 });
 
 test("rotate-token reads a replacement out of band, keeps gates closed, and never reports values", async () => {
@@ -385,6 +449,7 @@ test("status and every mutation reject inherited HotelRunner conflicts before wr
 		"deactivate",
 		"activate",
 		"rotate-token",
+		REVIEW_MODE_COMMAND,
 	]) {
 		const before = await fs.promises.readFile(envFile, "utf8");
 		const options = {
@@ -397,6 +462,7 @@ test("status and every mutation reject inherited HotelRunner conflicts before wr
 			...(command === "rotate-token"
 				? { secretInput: "replacement-hotelrunner-token-never-print" }
 				: {}),
+			...(command === REVIEW_MODE_COMMAND ? { enabled: "true" } : {}),
 		};
 		await assert.rejects(
 			() => runEnvGateCommand(options),
@@ -523,6 +589,7 @@ test("every command rejects duplicate HotelRunner keys without exposing values",
 		"deactivate",
 		"activate",
 		"rotate-token",
+		REVIEW_MODE_COMMAND,
 	]) {
 		await assert.rejects(
 			() =>
@@ -536,6 +603,7 @@ test("every command rejects duplicate HotelRunner keys without exposing values",
 					...(command === "rotate-token"
 						? { secretInput: "replacement-hotelrunner-token-never-print" }
 						: {}),
+					...(command === REVIEW_MODE_COMMAND ? { enabled: "true" } : {}),
 				}),
 			(error) =>
 				error.code === "DUPLICATE_HOTELRUNNER_KEY" &&
