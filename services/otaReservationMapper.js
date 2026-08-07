@@ -1609,6 +1609,15 @@ function extractExplicitFactLabelValues(text = "", labels = [], field = "") {
 			if (
 				inlineUnseparated &&
 				value &&
+				lineStartsWithExplicitFactLabel(value)
+			) {
+				// Two-column email headers such as "Check-in Checkout" contain
+				// another field label here, not an inline value for the first field.
+				break;
+			}
+			if (
+				inlineUnseparated &&
+				value &&
 				GENERIC_OTA_INLINE_SUBFIELD_PREFIXES[field]?.test(value)
 			) {
 				break;

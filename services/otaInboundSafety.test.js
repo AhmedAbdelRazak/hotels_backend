@@ -5682,26 +5682,36 @@ test("source-backed alphabetic Airbnb confirmation codes remain valid identities
 test("Airbnb two-column stay dates and guest totals remain source-backed", () => {
 	const normalized = extractNormalizedReservation({
 		from: "automated@airbnb.com",
-		receivedAt: "2026-07-25T11:26:06Z",
-		subject: "Reservation confirmed - Muhammad Alhassan arrives Jul 25",
+		receivedAt: "2026-08-07T15:53:15Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "airbnb",
+			method: "dkim",
+		},
+		subject: "Reservation confirmed - Test Guest arrives Aug 9",
 		text: [
-			"Muhammad Alhassan",
+			"Send a message to confirm check-in details",
+			"Test Guest",
 			"Identity verified",
 			"PRIVATE ROOM-3BEDS - AJYAD HOTEL-15 MINS TO HARAM",
 			"Room",
 			"Check-in Checkout",
-			"Sat, Jul 25 Mon, Jul 27",
+			"Sun, Aug 9 Fri, Aug 14",
 			"2:00 PM 10:00 AM",
 			"Guests",
 			"1 adult",
 			"Confirmation code",
-			"HM9N2QZQWJ",
+			"HMZDMHQQRE",
 			"Total (SAR) SAR 145.70",
+			"Check-in",
+			"Sun, Aug 9",
+			"Checkout",
+			"Fri, Aug 14",
 		].join("\n"),
 	});
 
-	assert.equal(normalized.checkinDate, "2026-07-25");
-	assert.equal(normalized.checkoutDate, "2026-07-27");
+	assert.equal(normalized.checkinDate, "2026-08-09");
+	assert.equal(normalized.checkoutDate, "2026-08-14");
 	assert.equal(normalized.totalGuests, 1);
 	assert.equal(normalized.sourcePresence.checkinDate, true);
 	assert.equal(normalized.sourcePresence.checkoutDate, true);
@@ -5713,6 +5723,49 @@ test("Airbnb two-column stay dates and guest totals remain source-backed", () =>
 			/source-backed check-in|source-backed check-out|guest total/i.test(item)
 		),
 		false
+	);
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(
+		normalized.manualReviewReasons.some((reason) =>
+			/conflicting repeated explicit check-in/i.test(reason)
+		),
+		false
+	);
+});
+
+test("Airbnb genuinely conflicting repeated check-in dates still require review", () => {
+	const normalized = extractNormalizedReservation({
+		from: "automated@airbnb.com",
+		receivedAt: "2026-08-07T15:53:15Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "airbnb",
+			method: "dkim",
+		},
+		subject: "Reservation confirmed - Test Guest arrives Aug 9",
+		text: [
+			"Check-in Checkout",
+			"Sun, Aug 9 Fri, Aug 14",
+			"Check-in",
+			"Sun, Aug 9",
+			"Check-in",
+			"Mon, Aug 10",
+			"Checkout",
+			"Fri, Aug 14",
+			"Guests",
+			"1 adult",
+			"Confirmation code",
+			"HMTESTCONFLICT",
+			"Total (SAR) SAR 145.70",
+		].join("\n"),
+	});
+
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(
+		normalized.manualReviewReasons.some((reason) =>
+			/conflicting repeated explicit check-in/i.test(reason)
+		),
+		true
 	);
 });
 
