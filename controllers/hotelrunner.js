@@ -587,5 +587,7 @@ exports.updateHotelRunnerRoomMapping = async (req, res) => {
 
 module.exports.callbackCredentialsMatch = callbackCredentialsMatch;
 module.exports.createHandleHotelRunnerCallback = createHandleHotelRunnerCallback;
+module.exports.hasCurrentRoomListProof = hasCurrentRoomListProof;
 module.exports.parseCallbackEnvelope = parseCallbackEnvelope;
+module.exports.roomListVerificationWindow = roomListVerificationWindow;
 module.exports.timingSafeTextEqual = timingSafeTextEqual;

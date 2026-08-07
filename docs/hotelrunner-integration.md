@@ -866,6 +866,7 @@ At this gate, exactly one approved GET is expected and PMS mutation is forbidden
 1. Open `/admin/hotelrunner` as the trusted configured super administrator.
 2. Export or capture the room mapping status without credentials or guest data.
 3. Map every verified non-master inventory code to one exact active local room category.
+   For the owner-approved 2026-08-07 Zad Ajyad release, first run `npm run hotelrunner:mappings:activate-approved-20260807` as a write-free preflight. Apply only with `npm run hotelrunner:mappings:activate-approved-20260807 -- --apply --approval=owner-2026-08-07`. This versioned tool accepts no caller-supplied mapping values, keeps every HotelRunner gate closed, checks the exact six-code discovery generation/currency/capacity/name evidence, leaves the master fallback unmapped, reuses the controller's optimistic compare-and-set, skips already-correct rows on a safe rerun, and makes no vendor request.
 4. Verify `SAR`, capacities, rate variants, and channel mappings in HotelRunner/OTA extranets.
 5. Leave every master fallback unmapped.
 6. Review all pending, needs-mapping, attention, quarantined, and failed events.
