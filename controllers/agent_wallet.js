@@ -10,6 +10,9 @@ const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
 const ActivityTracker = require("../models/activity_tracker");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
+const {
+	resolveHotelRunnerPlatformCommission,
+} = require("../services/hotelrunnerPlatformFinance");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -421,11 +424,46 @@ const decorateWalletTransactionForReport = (transaction = {}) => ({
 		String(transaction.rejectionType || "").toLowerCase() !== "final",
 });
 
-const commissionAmount = (reservation = {}) =>
-	n2(
-		moneyNumber(reservation.commission) ||
-			moneyNumber(reservation.financial_cycle?.commissionAmount)
-	);
+const reservationCommissionFinance = (reservation = {}) => {
+	const hotelRunnerFinance =
+		resolveHotelRunnerPlatformCommission(reservation);
+	if (hotelRunnerFinance.isHotelRunner) {
+		return {
+			isHotelRunner: true,
+			available: hotelRunnerFinance.available,
+			amount: hotelRunnerFinance.available
+				? n2(hotelRunnerFinance.amount)
+				: null,
+			reason: hotelRunnerFinance.reason || "",
+		};
+	}
+
+	return {
+		isHotelRunner: false,
+		available: true,
+		amount: n2(
+			moneyNumber(reservation.commission) ||
+				moneyNumber(reservation.financial_cycle?.commissionAmount)
+		),
+		reason: "",
+	};
+};
+
+const decorateReservationCommissionFinance = (reservation = {}) => {
+	const finance = reservationCommissionFinance(reservation);
+	return {
+		...reservation,
+		report_commission: finance.available ? finance.amount : null,
+		commission_finance_available: finance.available,
+		hotelrunner_finance_available: finance.isHotelRunner
+			? finance.available
+			: undefined,
+		hotelrunner_finance_unavailable_reason:
+			finance.isHotelRunner && !finance.available
+				? finance.reason
+				: undefined,
+	};
+};
 
 const actorSnapshot = (actor = {}) => ({
 	_id: normalizeId(actor._id),
@@ -713,7 +751,7 @@ const calculateAgentWalletSummary = async ({
 				...reservationDateFilter,
 			})
 			.select(
-				"_id hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
+				"_id hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid commissionStatus commissionAgentApproval commissionData financial_cycle pendingConfirmation adminPricing.mode supplierData.hotelRunner.transport supplierData.hotelRunner.reservationId supplierData.hotelRunner.hrNumber supplierData.otaAutomationPipeline"
 			)
 				.sort({ booked_at: -1, createdAt: -1 })
 				.lean()
@@ -721,7 +759,7 @@ const calculateAgentWalletSummary = async ({
 			AgentWallet.find(walletPostedMatch).lean().exec(),
 			Reservations.find(reservationBaseMatch)
 				.select(
-					"_id hotelId reservation_status state total_amount commission commissionPaid commissionAgentApproval financial_cycle pendingConfirmation"
+					"_id hotelId reservation_status state total_amount commission commissionPaid commissionAgentApproval commissionData financial_cycle pendingConfirmation adminPricing.mode supplierData.hotelRunner.transport supplierData.hotelRunner.reservationId supplierData.hotelRunner.hrNumber supplierData.otaAutomationPipeline"
 				)
 				.lean()
 				.exec(),
@@ -745,14 +783,24 @@ const calculateAgentWalletSummary = async ({
 	const reservationTotals = allReservations.reduce(
 		(acc, reservation) => {
 			const amount = n2(reservation.total_amount);
-			const commission = commissionAmount(reservation);
+			const commissionFinance = reservationCommissionFinance(reservation);
+			const commission = commissionFinance.available
+				? commissionFinance.amount
+				: 0;
 			const status = String(
 				reservation.reservation_status || reservation.state || ""
 			).toLowerCase();
 
 			acc.totalReservations += 1;
 			acc.totalReservationValue += amount;
-			acc.totalCommission += commission;
+			if (commissionFinance.available) {
+				acc.totalCommission += commission;
+			} else {
+				acc.commissionUnavailableCount += 1;
+				const reason = commissionFinance.reason || "unknown";
+				acc.commissionUnavailableReasons[reason] =
+					(acc.commissionUnavailableReasons[reason] || 0) + 1;
+			}
 			if (reservationIsDeductible(reservation)) {
 				acc.walletDeducted += amount;
 			}
@@ -766,6 +814,8 @@ const calculateAgentWalletSummary = async ({
 			walletDeducted: 0,
 			totalCommission: 0,
 			commissionPaid: 0,
+			commissionUnavailableCount: 0,
+			commissionUnavailableReasons: {},
 			pendingConfirmation: 0,
 		}
 	);
@@ -797,11 +847,11 @@ const calculateAgentWalletSummary = async ({
 	const decoratedReservations = reservations.map((reservation) => {
 		const reservationHotelId = normalizeId(reservation.hotelId);
 		const hotel = scopeHotelMap.get(reservationHotelId) || {};
-		return {
+		return decorateReservationCommissionFinance({
 			...reservation,
 			hotelId: reservationHotelId,
 			hotelName: hotel.hotelName || "",
-		};
+		});
 	});
 	const pendingWalletClaims = decoratedTransactions.filter(
 		(tx) => tx.source === "agent_claim" && tx.status === "pending"
@@ -840,6 +890,10 @@ const calculateAgentWalletSummary = async ({
 		commissionDue: n2(
 			reservationTotals.totalCommission - reservationTotals.commissionPaid
 		),
+		commissionUnavailableCount:
+			reservationTotals.commissionUnavailableCount,
+		commissionUnavailableReasons:
+			reservationTotals.commissionUnavailableReasons,
 		pendingConfirmation: reservationTotals.pendingConfirmation,
 		pendingWalletClaims: pendingWalletClaims.length,
 		pendingWalletClaimAmount: n2(
@@ -926,6 +980,15 @@ exports.agentWalletSummary = async (req, res) => {
 				acc.totalCommission += item.totalCommission;
 				acc.commissionPaid += item.commissionPaid;
 				acc.commissionDue += item.commissionDue;
+				acc.commissionUnavailableCount +=
+					item.commissionUnavailableCount || 0;
+				Object.entries(item.commissionUnavailableReasons || {}).forEach(
+					([reason, count]) => {
+						acc.commissionUnavailableReasons[reason] =
+							(acc.commissionUnavailableReasons[reason] || 0) +
+							Number(count || 0);
+					}
+				);
 				acc.pendingConfirmation += item.pendingConfirmation;
 				acc.pendingWalletClaims += item.pendingWalletClaims || 0;
 				acc.pendingWalletClaimAmount += item.pendingWalletClaimAmount || 0;
@@ -942,6 +1005,8 @@ exports.agentWalletSummary = async (req, res) => {
 				totalCommission: 0,
 				commissionPaid: 0,
 				commissionDue: 0,
+				commissionUnavailableCount: 0,
+				commissionUnavailableReasons: {},
 				pendingConfirmation: 0,
 				pendingWalletClaims: 0,
 				pendingWalletClaimAmount: 0,
@@ -1490,7 +1555,7 @@ exports.agentTodoList = async (req, res) => {
 		const [reservations, walletClaims] = await Promise.all([
 			Reservations.find(reservationQuery)
 				.select(
-					"_id confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionStatus commissionPaid commissionAgentApproval pendingConfirmation financial_cycle"
+					"_id confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionStatus commissionPaid commissionAgentApproval commissionData pendingConfirmation financial_cycle adminPricing.mode supplierData.hotelRunner.transport supplierData.hotelRunner.reservationId supplierData.hotelRunner.hrNumber supplierData.otaAutomationPipeline"
 				)
 				.sort({ updatedAt: -1, createdAt: -1 })
 				.limit(100)
@@ -1509,6 +1574,7 @@ exports.agentTodoList = async (req, res) => {
 
 		const reservationTodos = reservations.flatMap((reservation) => {
 			const todos = [];
+			const commissionFinance = reservationCommissionFinance(reservation);
 			const approvalStatus = String(
 				reservation?.commissionAgentApproval?.status || ""
 			).toLowerCase();
@@ -1519,7 +1585,12 @@ exports.agentTodoList = async (req, res) => {
 					reservationId: normalizeId(reservation._id),
 					confirmation_number: reservation.confirmation_number,
 					guestName: reservation.customer_details?.name || "",
-					amount: commissionAmount(reservation),
+					amount: commissionFinance.available
+						? commissionFinance.amount
+						: null,
+					commissionFinanceAvailable: commissionFinance.available,
+					hotelrunnerFinanceUnavailableReason:
+						commissionFinance.reason || undefined,
 					status: approvalStatus,
 					title: "Commission marked paid needs your approval",
 				});
@@ -1531,7 +1602,12 @@ exports.agentTodoList = async (req, res) => {
 					reservationId: normalizeId(reservation._id),
 					confirmation_number: reservation.confirmation_number,
 					guestName: reservation.customer_details?.name || "",
-					amount: commissionAmount(reservation),
+					amount: commissionFinance.available
+						? commissionFinance.amount
+						: null,
+					commissionFinanceAvailable: commissionFinance.available,
+					hotelrunnerFinanceUnavailableReason:
+						commissionFinance.reason || undefined,
 					status: approvalStatus,
 					rejectionReason:
 						reservation.commissionAgentApproval?.rejectionReason || "",
@@ -1606,4 +1682,11 @@ exports.agentTodoList = async (req, res) => {
 		console.error("agentTodoList error:", error);
 		return res.status(500).json({ error: error.message });
 	}
+};
+
+// Kept off all routes; regression tests use this narrow surface to prove that
+// report rows cannot turn an unreviewed HotelRunner commission into zero.
+exports.__hotelRunnerAgentFinanceTestHelpers = {
+	reservationCommissionFinance,
+	decorateReservationCommissionFinance,
 };

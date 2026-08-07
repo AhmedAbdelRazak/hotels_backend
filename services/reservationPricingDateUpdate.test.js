@@ -32,6 +32,36 @@ const adminManagedRoom = () => ({
 	],
 });
 
+const directHotelRunnerReservation = () => {
+	const room = adminManagedRoom();
+	return {
+		hotelId: "6a40b6a1a6efe70450536038",
+		belongsTo: "6a40b6a1a6efe70450536039",
+		checkin_date: "2026-07-24",
+		checkout_date: "2026-07-26",
+		days_of_residence: 2,
+		total_amount: 1000,
+		sub_total: 150,
+		commission: 0,
+		adminPricing: {
+			mode: "hotelrunner_api",
+			clientTotal: 1000,
+			rootTotal: 150,
+			commercialVerified: false,
+		},
+		pickedRoomsType: [room],
+		pickedRoomsPricing: [room],
+		supplierData: {
+			otaAutomationPipeline: "hotelrunner-background-worker",
+			otaSourceAuthority: 4,
+			hotelRunner: {
+				transport: "hotelrunner_api",
+				reservationId: "hr-reservation-1",
+			},
+		},
+	};
+};
+
 test("admin-managed checkout extension preserves client and hotel pricing separately", async () => {
 	const room = adminManagedRoom();
 	const existing = {
@@ -126,4 +156,152 @@ test("validated OTA room remapping preserves reviewed nightly prices and room co
 		updates.pickedRoomsPricing[0].pricingByDay.map((day) => day.clientPrice),
 		[67.67, 67.67],
 	);
+});
+
+test("ordinary HotelRunner date edits reject source-owned stay changes", async () => {
+	const existing = directHotelRunnerReservation();
+	const changes = [
+		{
+			payload: { checkin_date: "2026-07-23" },
+			details: { checkinChanged: true, checkoutChanged: false },
+		},
+		{
+			payload: { checkout_date: "2026-07-27" },
+			details: { checkinChanged: false, checkoutChanged: true },
+		},
+	];
+
+	for (const change of changes) {
+		await assert.rejects(
+			() =>
+				normalizeReservationStayPricing(existing, {
+					...change.payload,
+					days_of_residence: 3,
+					total_amount: 171,
+					sub_total: 225,
+					commission: 21,
+					adminPricing: { mode: "admin_three_price", clientTotal: 171 },
+					pickedRoomsType: existing.pickedRoomsType,
+					pickedRoomsPricing: existing.pickedRoomsPricing,
+				}),
+			(error) => {
+				assert.equal(error.statusCode, 409);
+				assert.equal(
+					error.code,
+					"hotelrunner_source_stay_dates_require_projection"
+				);
+				assert.deepEqual(error.details, change.details);
+				return true;
+			}
+		);
+	}
+
+	assert.equal(existing.checkout_date, "2026-07-26");
+	assert.equal(existing.days_of_residence, 2);
+	assert.deepEqual(
+		existing.pickedRoomsPricing[0].pricingByDay.map((day) => day.date),
+		["2026-07-24", "2026-07-25"]
+	);
+});
+
+test("no-op HotelRunner stay-date submissions remain allowed", async () => {
+	const existing = directHotelRunnerReservation();
+	const updates = await normalizeReservationStayPricing(existing, {
+		checkin_date: "2026-07-24T18:00:00.000Z",
+		checkout_date: "2026-07-26T09:00:00.000Z",
+		days_of_residence: 2,
+	});
+
+	assert.equal(updates.checkin_date, "2026-07-24T18:00:00.000Z");
+	assert.equal(updates.checkout_date, "2026-07-26T09:00:00.000Z");
+	assert.equal(updates.days_of_residence, 2);
+});
+
+test("ordinary HotelRunner property reassignment is rejected", async () => {
+	const existing = directHotelRunnerReservation();
+	for (const change of [
+		{
+			payload: { hotelId: "6a40b6a1a6efe70450536040" },
+			details: { hotelChanged: true, ownerChanged: false },
+		},
+		{
+			payload: { belongsTo: "6a40b6a1a6efe70450536041" },
+			details: { hotelChanged: false, ownerChanged: true },
+		},
+	]) {
+		await assert.rejects(
+			() => normalizeReservationStayPricing(existing, change.payload),
+			(error) => {
+				assert.equal(error.statusCode, 409);
+				assert.equal(
+					error.code,
+					"hotelrunner_source_property_requires_projection"
+				);
+				assert.deepEqual(error.details, change.details);
+				return true;
+			}
+		);
+	}
+});
+
+test("ordinary HotelRunner room-count changes fail closed before repricing", async () => {
+	const existing = directHotelRunnerReservation();
+	await assert.rejects(
+		() =>
+			normalizeReservationStayPricing(existing, {
+				pickedRoomsType: [
+					{ ...existing.pickedRoomsType[0], count: 2 },
+				],
+			}),
+		(error) => {
+			assert.equal(
+				error.code,
+				"hotelrunner_source_pricing_requires_pricing_payload"
+			);
+			assert.equal(error.statusCode, 409);
+			return true;
+		}
+	);
+});
+
+test("a client pricing-intent flag cannot override HotelRunner source pricing", async () => {
+	const existing = directHotelRunnerReservation();
+	const room = {
+		...existing.pickedRoomsPricing[0],
+		pricingByDay: existing.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+			...day,
+			price: 80,
+			totalPriceWithCommission: 80,
+			clientPrice: 80,
+			rootPrice: 60,
+			totalPriceWithoutCommission: 60,
+			netAfterExpenses: 70,
+		})),
+	};
+	const updates = await normalizeReservationStayPricing(
+		existing,
+		{
+			pickedRoomsType: [room],
+			pickedRoomsPricing: [room],
+		},
+		{ allowHotelRunnerSourcePricingOverride: true },
+	);
+
+	assert.equal(updates.total_amount, undefined);
+	assert.equal(updates.sub_total, undefined);
+	assert.equal(updates.pickedRoomsType, undefined);
+	assert.equal(updates.pickedRoomsPricing, undefined);
+	assert.equal(updates.adminPricing, undefined);
+});
+
+test("HotelRunner finance-only updates are not stripped by pricing protection", async () => {
+	const updates = await normalizeReservationStayPricing(
+		directHotelRunnerReservation(),
+		{
+			commission: 25,
+			commissionStatus: "commission due",
+		},
+	);
+	assert.equal(updates.commission, 25);
+	assert.equal(updates.commissionStatus, "commission due");
 });

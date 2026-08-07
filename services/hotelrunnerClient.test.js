@@ -259,3 +259,140 @@ test("an HTML server error remains retryable instead of becoming invalid JSON", 
 		return true;
 	});
 });
+
+test("delivery confirmation fails before quota or network access unless explicitly enabled", async () => {
+	const BudgetModel = quotaModel();
+	let fetchCalls = 0;
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({ confirmDeliveryEnabled: false }),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel },
+		fetchImpl: async () => {
+			fetchCalls += 1;
+			throw new Error("disabled confirmation must not reach the network");
+		},
+	});
+
+	await assert.rejects(
+		client.confirmDelivery({ messageUid: "synthetic-message", pmsNumber: "PMS-1" }),
+		(error) => {
+			assert.equal(error.code, "HOTELRUNNER_CONFIRM_DELIVERY_DISABLED");
+			assert.equal(error.retryable, false);
+			return true;
+		}
+	);
+	assert.equal(BudgetModel.calls, 0);
+	assert.equal(fetchCalls, 0);
+});
+
+test("the legacy status alias cannot enable delivery confirmation by itself", async () => {
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({
+			confirmDeliveryEnabled: false,
+			confirmPulledDeliveryEnabled: true,
+		}),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel: quotaModel() },
+	});
+	await assert.rejects(
+		client.confirmDelivery({ messageUid: "synthetic-message" }),
+		(error) => error?.code === "HOTELRUNNER_CONFIRM_DELIVERY_DISABLED"
+	);
+});
+
+test("delivery confirmation also remains off while PMS projection is disabled", async () => {
+	const BudgetModel = quotaModel();
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({
+			confirmDeliveryEnabled: true,
+			projectionEnabled: false,
+		}),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel },
+	});
+	await assert.rejects(
+		client.confirmDelivery({
+			messageUid: "synthetic-message",
+			pmsNumber: "PMS-1",
+		}),
+		(error) => error?.code === "HOTELRUNNER_CONFIRM_DELIVERY_DISABLED"
+	);
+	assert.equal(BudgetModel.calls, 0);
+});
+
+test("delivery confirmation requires the persisted PMS reservation number", async () => {
+	const BudgetModel = quotaModel();
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({
+			confirmDeliveryEnabled: true,
+			projectionEnabled: true,
+		}),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel },
+	});
+	await assert.rejects(
+		client.confirmDelivery({ messageUid: "synthetic-message" }),
+		(error) => error?.code === "HOTELRUNNER_CONFIRM_OPTIONS_INVALID"
+	);
+	assert.equal(BudgetModel.calls, 0);
+});
+
+test("enabled delivery confirmation uses the dedicated mutation path", async () => {
+	const BudgetModel = quotaModel();
+	let observed = null;
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({
+			confirmDeliveryEnabled: true,
+			projectionEnabled: true,
+			requestTimeoutMs: 500,
+		}),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel },
+		fetchImpl: async (url, options) => {
+			observed = { url: new URL(url), options };
+			return {
+				ok: true,
+				status: 200,
+				headers: headers(),
+				body: Readable.from([Buffer.from('{"status":"ok"}')]),
+			};
+		},
+	});
+
+	assert.deepEqual(
+		await client.confirmDelivery({
+			messageUid: "synthetic-message",
+			pmsNumber: "PMS-1",
+		}),
+		{ status: "ok" }
+	);
+	assert.equal(observed.options.method, "PUT");
+	assert.equal(observed.url.pathname, "/api/v2/apps/reservations/~");
+	assert.equal(observed.url.searchParams.get("message_uid"), "synthetic-message");
+	assert.equal(observed.url.searchParams.get("pms_number"), "PMS-1");
+	assert.equal(BudgetModel.calls, 3);
+});
+
+test("public raw requests cannot bypass the delivery-confirmation mutation gate", async () => {
+	const BudgetModel = quotaModel();
+	let fetchCalls = 0;
+	const client = createHotelRunnerClient({
+		config: syntheticConfig({ confirmDeliveryEnabled: true }),
+		hotelId: "64b000000000000000000001",
+		quotaDependencies: { BudgetModel },
+		fetchImpl: async () => {
+			fetchCalls += 1;
+			throw new Error("raw mutation must not reach the network");
+		},
+	});
+
+	await assert.rejects(
+		client.request("reservations/~", {
+			method: "PUT",
+			query: { message_uid: "synthetic-message" },
+		}),
+		(error) => error?.code === "HOTELRUNNER_RAW_MUTATION_FORBIDDEN"
+	);
+	assert.equal(BudgetModel.calls, 0);
+	assert.equal(fetchCalls, 0);
+});

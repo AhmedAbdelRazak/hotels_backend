@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
 	MAX_NIGHTS_PER_ROOM,
 	MAX_ROOMS,
+	MAX_SOURCE_UPDATED_AT_FUTURE_SKEW_MS,
 	canonicalPayload,
 	dateRange,
 	decimalToCents,
@@ -40,8 +41,32 @@ const makeRoom = ({
 	total: String(prices.reduce((sum, price) => sum + Number(price), 0)),
 	room_base_price: "200.00",
 	room_sub_total: "300.01",
+	extras_total: "20.00",
+	fixed_adjustments_total: "-5.00",
+	included_taxes_total: "13.93",
+	excluded_fees_and_taxes_total: "2.00",
+	cancelation_refund_total: "0.00",
+	cancelation_refund_tax_type: "exclusive",
+	cancelation_penalty_total: "25.00",
+	cancelation_penalty_tax_type: "inclusive",
+	promotions_total: "10.00",
 	non_refundable: false,
 	meal_plan: "Room Only",
+	meal_plan_presentation: "Room only",
+	extras: [
+		{
+			name: "Airport Transfer",
+			price: "20.00",
+			base_price: "25.00",
+			code: "TRANSFER",
+			promotions_total: "5.00",
+			is_extra: true,
+			total: "20.00",
+			quantity: 1,
+			dates: {},
+			repeat_type: "first_night",
+		},
+	],
 	comments: [
 		{
 			body: "Late arrival",
@@ -56,6 +81,7 @@ const makeRoom = ({
 		original_price: price,
 		discount: "0.00",
 		rate_code: "BAR",
+		version: "v2",
 	})),
 	updated_at: "2026-08-06T10:30:00.000Z",
 });
@@ -101,15 +127,24 @@ const makePayload = (overrides = {}) => ({
 	note: "Please prepare the room",
 	payment: "Pay at property",
 	paid_amount: "300.01",
+	deposit_tax_inclusive: true,
+	extra_adjustments_details: [{ name: "Manual credit", amount: -5 }],
+	adjustment_details: [{ name: "Adjustment", amount: 0 }],
+	price_adjustments_details: [{ name: "Promotion", amount: -10 }],
+	cancelation_policy: [{ from_days: 1, penalty: 25 }],
 	payments: [
 		{
 			id: "payment-1",
 			state: "paid",
 			amount: "300.01",
 			currency: "SAR",
+			exchanged_amount: "1125.04",
+			exchange_currency: "SAR",
+			exchange_rate: "3.750001",
 			paid_at: "2026-08-06T10:31:00.000Z",
 			payment_method_name: "OTA collect",
 			payment_method: "virtual_card",
+			installment: 1,
 			response_code: "APPROVED",
 		},
 	],
@@ -130,6 +165,16 @@ test("a complete HotelRunner reservation is normalized into bounded exact values
 	assert.equal(normalized.paidAmountCents, 30001);
 	assert.equal(normalized.rooms.length, 1);
 	assert.equal(normalized.rooms[0].invCode, "INV-DOUBLE");
+	assert.equal(normalized.rooms[0].includedTaxesTotalCents, 1393);
+	assert.equal(normalized.rooms[0].cancelationPenaltyTotalCents, 2500);
+	assert.equal(normalized.rooms[0].extras[0].basePriceCents, 2500);
+	assert.equal(normalized.rooms[0].dailyPrices[0].version, "v2");
+	assert.equal(normalized.payments[0].exchangeRate, 3.750001);
+	assert.equal(normalized.payments[0].installment, 1);
+	assert.equal(normalized.depositTaxInclusive, true);
+	assert.deepEqual(normalized.priceAdjustmentsDetails, [
+		{ amount: -10, name: "Promotion" },
+	]);
 	assert.deepEqual(
 		normalized.rooms[0].dailyPrices.map((row) => [row.date, row.priceCents]),
 		[
@@ -246,6 +291,26 @@ test("stored and canonical projections exclude raw card and credential-like fiel
 				expiry: "12/30",
 			},
 			auth_token: "RAW-TOKEN-DO-NOT-STORE",
+			price_adjustments_details: [
+				{
+					name: "Safe adjustment",
+					amount: -10,
+					auth_token: "RAW-TOKEN-DO-NOT-STORE",
+					card_number: "4111111111111111",
+					pan: "PAN-SECRET-DO-NOT-STORE",
+					payment_pan: "PAYMENT-PAN-DO-NOT-STORE",
+					expiry: "EXPIRY-SECRET-DO-NOT-STORE",
+					expiration_date: "EXPIRATION-SECRET-DO-NOT-STORE",
+					security_code: "SECURITY-CODE-DO-NOT-STORE",
+					account_number: "ACCOUNT-NUMBER-DO-NOT-STORE",
+					track_data: "TRACK-DATA-DO-NOT-STORE",
+					cryptogram: "CRYPTOGRAM-DO-NOT-STORE",
+					nested: {
+						maskedPan: "MASKED-PAN-DO-NOT-STORE",
+						safe_reference: "SAFE-REFERENCE-RETAINED",
+					},
+				},
+			],
 			payments: [
 				{
 					id: "payment-safe",
@@ -267,16 +332,29 @@ test("stored and canonical projections exclude raw card and credential-like fiel
 		"4111111111111111",
 		"CVV-SECRET-987",
 		"RAW-TOKEN-DO-NOT-STORE",
+		"PAN-SECRET-DO-NOT-STORE",
+		"PAYMENT-PAN-DO-NOT-STORE",
+		"EXPIRY-SECRET-DO-NOT-STORE",
+		"EXPIRATION-SECRET-DO-NOT-STORE",
+		"SECURITY-CODE-DO-NOT-STORE",
+		"ACCOUNT-NUMBER-DO-NOT-STORE",
+		"TRACK-DATA-DO-NOT-STORE",
+		"CRYPTOGRAM-DO-NOT-STORE",
+		"MASKED-PAN-DO-NOT-STORE",
 	]) {
 		assert.equal(stored.includes(secret), false, secret);
 		assert.equal(canonical.includes(secret), false, secret);
 	}
+	assert.equal(stored.includes("SAFE-REFERENCE-RETAINED"), true);
+	assert.equal(canonical.includes("SAFE-REFERENCE-RETAINED"), true);
 	assert.deepEqual(normalized.storedPayload.payments[0], {
 		amountCents: 30001,
 		currency: "SAR",
 		exchangeCurrency: "",
 		exchangedAmountCents: null,
+		exchangeRate: null,
 		id: "payment-safe",
+		installment: null,
 		method: "virtual_card",
 		methodName: "",
 		paidAt: null,
@@ -309,6 +387,67 @@ test("a cancellation-only delivery is valid without guest, price, room, or stay 
 	assert.ok(partialStay.issues.includes("invalid_stay_dates"));
 });
 
+test("reservation source updated_at requires an explicit timezone", () => {
+	for (const updatedAt of [
+		"2026-08-06",
+		"2026-08-06T12:00:00",
+		"2026-08-06 12:00:00Z",
+		"2026-02-30T12:00:00Z",
+		"2026-08-06T24:00:00Z",
+	]) {
+		const normalized = normalizeHotelRunnerReservation(
+			makePayload({ updated_at: updatedAt })
+		);
+		assert.equal(normalized.sourceUpdatedAt, null, updatedAt);
+		assert.ok(normalized.issues.includes("invalid_source_updated_at"));
+	}
+
+	const utc = normalizeHotelRunnerReservation(
+		makePayload({ updated_at: "2026-08-06T12:00:00.123Z" })
+	);
+	assert.equal(
+		utc.sourceUpdatedAt.toISOString(),
+		"2026-08-06T12:00:00.123Z"
+	);
+	assert.equal(utc.issues.includes("invalid_source_updated_at"), false);
+
+	const offset = normalizeHotelRunnerReservation(
+		makePayload({ updated_at: "2026-08-06T15:00:00+03:00" })
+	);
+	assert.equal(
+		offset.sourceUpdatedAt.toISOString(),
+		"2026-08-06T12:00:00.000Z"
+	);
+	assert.equal(offset.issues.includes("invalid_source_updated_at"), false);
+});
+
+test("reservation source updated_at allows bounded clock skew but rejects future watermarks", () => {
+	const receivedAt = new Date("2026-08-06T12:00:00.000Z");
+	const boundary = normalizeHotelRunnerReservation(
+		makePayload({ updated_at: "2026-08-06T15:05:00+03:00" }),
+		{ receivedAt }
+	);
+	assert.equal(
+		boundary.sourceUpdatedAt.toISOString(),
+		new Date(
+			receivedAt.getTime() + MAX_SOURCE_UPDATED_AT_FUTURE_SKEW_MS
+		).toISOString()
+	);
+	assert.equal(
+		boundary.issues.includes("source_updated_at_too_far_in_future"),
+		false
+	);
+
+	const future = normalizeHotelRunnerReservation(
+		makePayload({ updated_at: "2026-08-06T12:05:00.001Z" }),
+		{ receivedAt }
+	);
+	assert.equal(future.sourceUpdatedAt, null);
+	assert.equal(future.sourceUpdatedAtTooFarInFuture, true);
+	assert.deepEqual(future.issues, ["source_updated_at_too_far_in_future"]);
+	assert.equal(future.storedPayload.sourceUpdatedAt, null);
+});
+
 test("room, night, identifier, and text resource limits fail closed and truncate stored data", () => {
 	const tooManyRooms = Array.from({ length: MAX_ROOMS + 1 }, (_, index) =>
 		makeRoom({ id: `room-${index}`, invCode: `INV-${index}` })
@@ -330,6 +469,35 @@ test("room, night, identifier, and text resource limits fail closed and truncate
 	);
 	assert.equal(dailyOverflow.rooms[0].dailyPrices.length, MAX_NIGHTS_PER_ROOM);
 	assert.ok(dailyOverflow.issues.includes("daily_price_resource_limit"));
+
+	const roomExtraOverflow = normalizeHotelRunnerReservation(
+		makePayload({
+			rooms: [
+				{
+					...makeRoom(),
+					extras: Array.from({ length: 101 }, (_, index) => ({
+						name: `extra-${index}`,
+						price: "1",
+					})),
+				},
+			],
+		})
+	);
+	assert.equal(roomExtraOverflow.rooms[0].extras.length, 100);
+	assert.ok(roomExtraOverflow.issues.includes("room_extra_resource_limit"));
+
+	const pricingDetailOverflow = normalizeHotelRunnerReservation(
+		makePayload({
+			price_adjustments_details: Array.from({ length: 101 }, (_, index) => ({
+				name: `adjustment-${index}`,
+				amount: -1,
+			})),
+		})
+	);
+	assert.equal(pricingDetailOverflow.priceAdjustmentsDetails.length, 100);
+	assert.ok(
+		pricingDetailOverflow.issues.includes("pricing_detail_resource_limit")
+	);
 
 	const boundedText = normalizeHotelRunnerReservation(
 		makePayload({

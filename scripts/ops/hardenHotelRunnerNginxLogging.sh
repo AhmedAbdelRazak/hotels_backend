@@ -3,15 +3,30 @@ set -euo pipefail
 
 target_file="/etc/nginx/sites-available/xhotelpro"
 enabled_file="/etc/nginx/sites-enabled/xhotelpro"
-resolved_target="$(readlink -f -- "$target_file")"
 expected_target="/etc/nginx/sites-available/xhotelpro"
+lock_file="/run/lock/xhotelpro-hotelrunner-nginx.lock"
 
-if [[ "$resolved_target" != "$expected_target" ]]; then
-	printf '%s\n' "Refusing unexpected Nginx target: $resolved_target" >&2
+if ! command -v flock >/dev/null 2>&1; then
+	printf '%s\n' "Refusing to continue because flock is unavailable." >&2
 	exit 1
 fi
+if ! exec 9>"$lock_file"; then
+	printf '%s\n' "Unable to open Nginx deployment lock: $lock_file" >&2
+	exit 1
+fi
+if ! flock -n 9; then
+	printf '%s\n' \
+		"Another xHotelPro Nginx deployment is active; no changes were made." >&2
+	exit 1
+fi
+
 if [[ ! -f "$target_file" ]]; then
 	printf '%s\n' "Missing Nginx site file: $target_file" >&2
+	exit 1
+fi
+resolved_target="$(readlink -f -- "$target_file")"
+if [[ "$resolved_target" != "$expected_target" ]]; then
+	printf '%s\n' "Refusing unexpected Nginx target: $resolved_target" >&2
 	exit 1
 fi
 if [[ ! -L "$enabled_file" ]] ||
@@ -19,6 +34,26 @@ if [[ ! -L "$enabled_file" ]] ||
 	printf '%s\n' "Refusing inactive or unexpected Nginx site link: $enabled_file" >&2
 	exit 1
 fi
+
+original_identity="$(stat -Lc '%d:%i' -- "$target_file")"
+original_hash="$(sha256sum -- "$target_file" | awk '{print $1}')"
+
+assert_target_unchanged() {
+	local current_resolved current_enabled current_identity current_hash
+	current_resolved="$(readlink -f -- "$target_file")"
+	current_enabled="$(readlink -f -- "$enabled_file")"
+	current_identity="$(stat -Lc '%d:%i' -- "$target_file")"
+	current_hash="$(sha256sum -- "$target_file" | awk '{print $1}')"
+	if [[ "$current_resolved" != "$expected_target" ]] ||
+		[[ ! -L "$enabled_file" ]] ||
+		[[ "$current_enabled" != "$expected_target" ]] ||
+		[[ "$current_identity" != "$original_identity" ]] ||
+		[[ "$current_hash" != "$original_hash" ]]; then
+		printf '%s\n' \
+			"Nginx site changed during deployment; refusing to overwrite it." >&2
+		exit 1
+	fi
+}
 
 backup_file="${target_file}.pre-hotelrunner-log-hardening-$(date -u +%Y%m%dT%H%M%SZ)"
 if [[ -e "$backup_file" ]]; then
@@ -84,7 +119,13 @@ else:
 destination.write_text("".join(lines), encoding="utf-8")
 PY
 
+assert_target_unchanged
 cp -a -- "$target_file" "$backup_file"
+if [[ "$(sha256sum -- "$backup_file" | awk '{print $1}')" != "$original_hash" ]]; then
+	printf '%s\n' "Nginx backup does not match the reviewed source; refusing install." >&2
+	exit 1
+fi
+assert_target_unchanged
 install -o root -g root -m 0644 -- "$temporary_file" "$target_file"
 
 rollback() {

@@ -18,7 +18,9 @@ const {
 	createHotelRunnerPullSync,
 } = require("./hotelrunnerPullSync");
 
-const EVENT_LEASE_MS = 2 * 60 * 1000;
+const EVENT_LEASE_MS = 5 * 60 * 1000;
+const PROJECTION_LEASE_MS = 5 * 60 * 1000;
+const PROJECTION_LEASE_HEARTBEAT_MS = 60 * 1000;
 const EVENT_POLL_MS = 1_000;
 const MAX_EVENT_ATTEMPTS = 8;
 
@@ -34,6 +36,19 @@ const createInstanceId = () =>
 function retryDelayMs(attempts) {
 	const exponent = Math.min(8, Math.max(0, Number(attempts || 1) - 1));
 	return Math.min(30 * 60 * 1000, 5_000 * 2 ** exponent);
+}
+
+function mutationMatched(result) {
+	return Number(result?.matchedCount ?? result?.n ?? 0) === 1;
+}
+
+function eventLeaseLostError(action) {
+	const error = new Error(
+		`HotelRunner event lease was lost before ${action} could be committed.`
+	);
+	error.code = "HOTELRUNNER_EVENT_LEASE_LOST";
+	error.retryable = true;
+	return error;
 }
 
 function normalizedFromStoredEvent(event) {
@@ -69,11 +84,142 @@ function createHotelRunnerWorker({
 	let stopped = true;
 	let loopPromise = null;
 	let lastPullCheckAt = 0;
+	let projectionStateEnsured = false;
+
+	const projectionCutoffFilter = () =>
+		config.projectionNotBefore instanceof Date &&
+		Number.isFinite(config.projectionNotBefore.getTime())
+			? {
+					source: "push",
+					receivedAt: { $gte: config.projectionNotBefore },
+					sourceUpdatedAt: { $gte: config.projectionNotBefore },
+			  }
+			: {};
+
+	async function hasProjectionWork(now = new Date()) {
+		// Production Mongoose models provide exists(). Lightweight unit fakes that
+		// exercise claim/recovery behavior may intentionally omit it.
+		if (typeof EventModel.exists !== "function") return true;
+		const query = EventModel.exists({
+			hotelId: config.hotelId,
+			...projectionCutoffFilter(),
+			status: { $in: ["pending", "retry", "processing"] },
+			nextAttemptAt: { $lte: now },
+		});
+		return Boolean(
+			query && typeof query.exec === "function" ? await query.exec() : await query
+		);
+	}
+
+	async function ensureProjectionState() {
+		if (projectionStateEnsured) return;
+		await SyncStateModel.updateOne(
+			{ hotelId: config.hotelId },
+			{ $setOnInsert: { hotelId: config.hotelId } },
+			{ upsert: true }
+		).exec();
+		projectionStateEnsured = true;
+	}
+
+	async function claimProjectionLease(now = new Date()) {
+		await ensureProjectionState();
+		return SyncStateModel.findOneAndUpdate(
+			{
+				hotelId: config.hotelId,
+				$or: [
+					{ projectionLeaseUntil: { $exists: false } },
+					{ projectionLeaseUntil: null },
+					{ projectionLeaseUntil: { $lte: now } },
+					{ projectionLeaseOwner: instanceId },
+				],
+			},
+			{
+				$set: {
+					projectionLeaseOwner: instanceId,
+					projectionLeaseAcquiredAt: now,
+					projectionLeaseUntil: new Date(
+						now.getTime() + PROJECTION_LEASE_MS
+					),
+				},
+			},
+			{ new: true }
+		).exec();
+	}
+
+	async function releaseProjectionLease(now = new Date()) {
+		return SyncStateModel.updateOne(
+			{ hotelId: config.hotelId, projectionLeaseOwner: instanceId },
+			{
+				$set: { projectionLeaseUntil: now },
+				$unset: {
+					projectionLeaseOwner: 1,
+					projectionLeaseAcquiredAt: 1,
+				},
+			}
+		).exec();
+	}
+
+	async function renewProjectionLease(now = new Date()) {
+		const result = await SyncStateModel.updateOne(
+			{ hotelId: config.hotelId, projectionLeaseOwner: instanceId },
+			{
+				$set: {
+					projectionLeaseUntil: new Date(
+						now.getTime() + PROJECTION_LEASE_MS
+					),
+				},
+			}
+		).exec();
+		const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+		if (!matched) {
+			const error = new Error(
+				"HotelRunner projection lease was lost before processing completed."
+			);
+			error.code = "HOTELRUNNER_PROJECTION_LEASE_LOST";
+			error.retryable = true;
+			throw error;
+		}
+		return true;
+	}
+
+	function startProjectionLeaseHeartbeat() {
+		let stopped = false;
+		let firstError = null;
+		let pending = Promise.resolve();
+		const pulse = () => {
+			if (stopped) return pending;
+			pending = pending
+				.then(() => renewProjectionLease())
+				.catch((error) => {
+					if (!firstError) firstError = error;
+				});
+			return pending;
+		};
+		const timer = setInterval(() => {
+			void pulse();
+		}, PROJECTION_LEASE_HEARTBEAT_MS);
+		timer.unref?.();
+		return {
+			async assertOwned() {
+				await pulse();
+				if (firstError) throw firstError;
+			},
+			async stop({ throwOnError = true } = {}) {
+				if (!stopped) {
+					stopped = true;
+					clearInterval(timer);
+				}
+				await pending;
+				if (throwOnError && firstError) throw firstError;
+			},
+		};
+	}
 
 	async function claimEvent(now = new Date()) {
 		return EventModel.findOneAndUpdate(
 			{
 				hotelId: config.hotelId,
+				...projectionCutoffFilter(),
 				status: { $in: ["pending", "retry", "processing"] },
 				attempts: { $lt: MAX_EVENT_ATTEMPTS },
 				nextAttemptAt: { $lte: now },
@@ -105,6 +251,7 @@ function createHotelRunnerWorker({
 		return EventModel.findOneAndUpdate(
 			{
 				hotelId: config.hotelId,
+				...projectionCutoffFilter(),
 				status: "processing",
 				attempts: { $gte: MAX_EVENT_ATTEMPTS },
 				finalRecoveryAttempted: true,
@@ -128,6 +275,7 @@ function createHotelRunnerWorker({
 		return EventModel.findOneAndUpdate(
 			{
 				hotelId: config.hotelId,
+				...projectionCutoffFilter(),
 				status: "processing",
 				attempts: { $gte: MAX_EVENT_ATTEMPTS },
 				finalRecoveryAttempted: { $ne: true },
@@ -153,6 +301,30 @@ function createHotelRunnerWorker({
 			.exec();
 	}
 
+	const ownedProcessingFilter = (event) => ({
+		_id: event._id,
+		hotelId: config.hotelId,
+		status: "processing",
+		leaseOwner: instanceId,
+		payloadHash: event.payloadHash,
+		integrityReason: { $in: ["", null] },
+	});
+
+	async function assertEventProjectable(event, now = new Date()) {
+		const assertion = await EventModel.updateOne(
+			ownedProcessingFilter(event),
+			{
+				$set: {
+					leaseUntil: new Date(now.getTime() + EVENT_LEASE_MS),
+				},
+			}
+		).exec();
+		if (!mutationMatched(assertion)) {
+			throw eventLeaseLostError("projection");
+		}
+		return true;
+	}
+
 	async function finishEvent(event, result) {
 		const statusMap = {
 			created: "completed",
@@ -162,41 +334,76 @@ function createHotelRunnerWorker({
 			needs_mapping: "needs_mapping",
 			quarantined: "quarantined",
 		};
-		const status = statusMap[result.status] || "completed";
-		await EventModel.updateOne(
-			{ _id: event._id, leaseOwner: instanceId },
-			{
-				$set: {
-					status,
-					processedAt: new Date(),
-					mirrorId: result.mirrorId || null,
-					reservationMongoId: result.reservationMongoId || null,
-					result: {
-						status: result.status,
-						code: result.code || "",
-						changedPaths: result.changedPaths || [],
-						missingInvCodes: result.missingInvCodes || [],
-						commercialProtected: result.commercialProtected === true,
-						inventoryIssueCount: Number(result.inventoryIssueCount || 0),
-					},
-					errorCode: result.code || "",
-					errorMessage: "",
+		const requiresAttention = Boolean(
+			(["created", "updated"].includes(result.status) &&
+				Number(result.inventoryIssueCount || 0) > 0) ||
+				result.commercialEvidenceStale === true
+		);
+		const status = requiresAttention
+			? "attention"
+			: statusMap[result.status] || "completed";
+		const resultSnapshot = {
+			status: result.status,
+			code: result.code || "",
+			changedPaths: result.changedPaths || [],
+			missingInvCodes: result.missingInvCodes || [],
+			staleInvCodes: result.staleInvCodes || [],
+			commercialProtected: result.commercialProtected === true,
+			commercialEvidenceStale: result.commercialEvidenceStale === true,
+			attentionCode: String(result.attentionCode || "").slice(0, 100),
+			inventoryIssueCount: Number(result.inventoryIssueCount || 0),
+			inventorySummary: result.inventorySummary || null,
+		};
+		const completionUpdate = (completionStatus, integrityConflict) => ({
+			$set: {
+				status: completionStatus,
+				processedAt: new Date(),
+				mirrorId: result.mirrorId || null,
+				reservationMongoId: result.reservationMongoId || null,
+				result: {
+					...resultSnapshot,
+					integrityConflict,
 				},
-				$unset: { leaseOwner: 1, leaseAcquiredAt: 1, leaseUntil: 1 },
-			}
+				errorCode: String(
+					result.attentionCode || result.code || ""
+				).slice(0, 100),
+				errorMessage: "",
+			},
+			$unset: { leaseOwner: 1, leaseAcquiredAt: 1, leaseUntil: 1 },
+		});
+		let committedStatus = status;
+		let completion = await EventModel.updateOne(
+			{
+				...ownedProcessingFilter(event),
+				integrityConflict: { $ne: true },
+			},
+			completionUpdate(status, false)
 		).exec();
+		if (!mutationMatched(completion)) {
+			committedStatus = "attention";
+			completion = await EventModel.updateOne(
+				{
+					...ownedProcessingFilter(event),
+					integrityConflict: true,
+				},
+				completionUpdate(committedStatus, true)
+			).exec();
+		}
+		if (!mutationMatched(completion)) {
+			throw eventLeaseLostError("completion");
+		}
 		await SyncStateModel.updateOne(
 			{ hotelId: event.hotelId },
 			{ $inc: { "metrics.eventsProcessed": 1 } },
 			{ upsert: true }
 		).exec();
-		return status;
+		return committedStatus;
 	}
 
 	async function retryEvent(event, error) {
 		const exhausted = Number(event.attempts || 0) >= MAX_EVENT_ATTEMPTS;
-		await EventModel.updateOne(
-			{ _id: event._id, leaseOwner: instanceId },
+		const retry = await EventModel.updateOne(
+			ownedProcessingFilter(event),
 			{
 				$set: {
 					status: exhausted ? "failed" : "retry",
@@ -216,17 +423,31 @@ function createHotelRunnerWorker({
 				$unset: { leaseOwner: 1, leaseAcquiredAt: 1, leaseUntil: 1 },
 			}
 		).exec();
+		if (!mutationMatched(retry)) {
+			throw eventLeaseLostError("retry");
+		}
 	}
 
 	async function runOnce() {
+		if (!config.configured) {
+			const error = new Error("HotelRunner worker configuration is incomplete.");
+			error.code = "HOTELRUNNER_CONFIG_INVALID";
+			throw error;
+		}
 		if (config.projectionEnabled === false) return false;
-		const abandonedRecovery = await failAbandonedFinalRecovery();
-		if (abandonedRecovery) return true;
-		const event =
-			(await claimExpiredExhaustedEvent()) || (await claimEvent());
-		if (!event) return false;
+		if (!(await hasProjectionWork())) return false;
+		const projectionLease = await claimProjectionLease();
+		if (!projectionLease) return false;
+		const heartbeat = startProjectionLeaseHeartbeat();
+		let event = null;
 		try {
-			if (!config.configured || String(event.hotelId) !== String(config.hotelId)) {
+			await heartbeat.assertOwned();
+			const abandonedRecovery = await failAbandonedFinalRecovery();
+			if (abandonedRecovery) return true;
+			event =
+				(await claimExpiredExhaustedEvent()) || (await claimEvent());
+			if (!event) return false;
+			if (String(event.hotelId) !== String(config.hotelId)) {
 				const error = new Error("HotelRunner event property configuration does not match.");
 				error.code = "HOTELRUNNER_EVENT_PROPERTY_MISMATCH";
 				throw error;
@@ -240,7 +461,10 @@ function createHotelRunnerWorker({
 				});
 				return true;
 			}
+			await heartbeat.assertOwned();
+			await assertEventProjectable(event);
 			const result = await project({ normalized, event, hotel, config }, dependencies);
+			await heartbeat.assertOwned();
 			if (result.status === "retry") {
 				const error = new Error("HotelRunner reservation changed concurrently.");
 				error.code = result.code || "HOTELRUNNER_RESERVATION_CAS_CONFLICT";
@@ -249,8 +473,12 @@ function createHotelRunnerWorker({
 			await finishEvent(event, result);
 			return true;
 		} catch (error) {
+			if (!event) throw error;
 			await retryEvent(event, error);
 			return true;
+		} finally {
+			await heartbeat.stop({ throwOnError: false });
+			await releaseProjectionLease();
 		}
 	}
 
@@ -272,6 +500,18 @@ function createHotelRunnerWorker({
 		}
 		if (nowMs - lastPullCheckAt >= 30_000) {
 			lastPullCheckAt = nowMs;
+			if (config.roomListSyncEnabled === true) {
+				try {
+					await pullSync.runRoomListOnly();
+				} catch (error) {
+					console.error("[hotelrunner-worker] room list held", {
+						code: String(
+							error?.code || "HOTELRUNNER_ROOM_LIST_FAILED"
+						).slice(0, 100),
+						message: safeErrorMessage(error),
+					});
+				}
+			}
 			try {
 				await pullSync.runIfDue();
 			} catch (error) {
@@ -307,14 +547,22 @@ function createHotelRunnerWorker({
 	}
 
 	return {
+		assertEventProjectable,
 		claimEvent,
 		claimExpiredExhaustedEvent,
+		claimProjectionLease,
 		failAbandonedFinalRecovery,
+		finishEvent,
+		hasProjectionWork,
 		instanceId,
 		runPullIfDue: pullSync.runIfDue,
+		runRoomListOnly: pullSync.runRoomListOnly,
 		runCycle,
 		runOnce,
 		runUntilIdle,
+		releaseProjectionLease,
+		retryEvent,
+		renewProjectionLease,
 		start,
 		stop,
 	};
@@ -322,8 +570,10 @@ function createHotelRunnerWorker({
 
 module.exports = {
 	EVENT_LEASE_MS,
+	PROJECTION_LEASE_HEARTBEAT_MS,
 	EVENT_POLL_MS,
 	MAX_EVENT_ATTEMPTS,
+	PROJECTION_LEASE_MS,
 	createHotelRunnerWorker,
 	normalizedFromStoredEvent,
 	retryDelayMs,

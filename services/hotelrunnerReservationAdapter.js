@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Reservations = require("../models/reservations");
 const HotelRunnerReservation = require("../models/hotelrunner_reservation");
 const HotelRunnerRoomMapping = require("../models/hotelrunner_room_mapping");
+const HotelRunnerSyncState = require("../models/hotelrunner_sync_state");
 const {
 	createReservationWithAvailabilitySnapshot,
 	validateReservationInventoryForCreate,
@@ -12,6 +13,7 @@ const {
 	authoritativeExistingRefreshProtectedStateGuard,
 	buildOtaIdentityKey,
 	generateUniquePmsConfirmationNumber,
+	verifiedHotelRunnerEmailCommercialEvidence,
 } = require("./otaReservationMapper");
 const {
 	addReservationVersionBump,
@@ -28,6 +30,11 @@ const {
 
 const ObjectId = mongoose.Types.ObjectId;
 const MAX_CAS_ATTEMPTS = 3;
+const DEFAULT_ROOM_LIST_VERIFICATION_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const HOTELRUNNER_PAYOUT_NOT_PROVIDED =
+	"hotelrunner_payout_not_provided";
+const HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE =
+	"hotelrunner_commercial_evidence_stale";
 const OTA_PROVIDER_KEYS = new Set([
 	"booking",
 	"agoda",
@@ -36,6 +43,26 @@ const OTA_PROVIDER_KEYS = new Set([
 	"trip",
 	"airbnb",
 	"hotelrunner",
+]);
+const NATIVE_HOTELRUNNER_PROVIDER_ALIASES = new Set([
+	"hotelrunner",
+	"hotelrunnerbookingengine",
+]);
+const HOTELRUNNER_PROVIDER_ALIASES = new Map([
+	["booking", "booking"],
+	["bookingcom", "booking"],
+	["agoda", "agoda"],
+	["agodacom", "agoda"],
+	["expedia", "expedia"],
+	["expediacom", "expedia"],
+	["hotels", "hotels"],
+	["hotelscom", "hotels"],
+	["trip", "trip"],
+	["tripcom", "trip"],
+	["ctrip", "trip"],
+	["ctripcom", "trip"],
+	["airbnb", "airbnb"],
+	["airbnbcom", "airbnb"],
 ]);
 
 const clean = (value = "") => String(value == null ? "" : value).trim();
@@ -54,6 +81,183 @@ const dateKey = (value) => {
 };
 
 const round2 = (value) => Number((Number(value || 0)).toFixed(2));
+const centsToNullableAmount = (value) =>
+	Number.isSafeInteger(value) ? Number((value / 100).toFixed(2)) : null;
+
+function hotelRunnerPricingBreakdown(normalized = {}) {
+	const rooms = (normalized.rooms || []).map((room) => ({
+		roomId: clean(room.roomId),
+		invCode: clean(room.invCode),
+		rateCode: clean(room.rateCode),
+		ratePlanCode: clean(room.ratePlanCode),
+		currency: clean(normalized.currency).toUpperCase(),
+		priceBeforeTax: centsToNullableAmount(room.priceCents),
+		totalAfterTax: centsToNullableAmount(room.totalCents),
+		roomBasePrice: centsToNullableAmount(room.roomBasePriceCents),
+		roomSubTotal: centsToNullableAmount(room.roomSubTotalCents),
+		extrasTotal: centsToNullableAmount(room.extrasTotalCents),
+		fixedAdjustmentsTotal: centsToNullableAmount(
+			room.fixedAdjustmentsTotalCents
+		),
+		includedTaxesTotal: centsToNullableAmount(room.includedTaxesTotalCents),
+		excludedFeesAndTaxesTotal: centsToNullableAmount(
+			room.excludedFeesAndTaxesTotalCents
+		),
+		cancelationRefundTotal: centsToNullableAmount(
+			room.cancelationRefundTotalCents
+		),
+		cancelationRefundTaxType: clean(room.cancelationRefundTaxType),
+		cancelationPenaltyTotal: centsToNullableAmount(
+			room.cancelationPenaltyTotalCents
+		),
+		cancelationPenaltyTaxType: clean(room.cancelationPenaltyTaxType),
+		promotionsTotal: centsToNullableAmount(room.promotionsTotalCents),
+		nightly: (room.dailyPrices || []).map((day) => ({
+			date: clean(day.date),
+			finalPrice: centsToNullableAmount(day.priceCents),
+			originalPrice: centsToNullableAmount(day.originalPriceCents),
+			discount: centsToNullableAmount(day.discountCents),
+			rateCode: clean(day.rateCode),
+			version: clean(day.version),
+		})),
+		extras: (room.extras || []).map((extra) => ({
+			name: clean(extra.name),
+			price: centsToNullableAmount(extra.priceCents),
+			basePrice: centsToNullableAmount(extra.basePriceCents),
+			code: clean(extra.code),
+			promotionsTotal: centsToNullableAmount(extra.promotionsTotalCents),
+			isExtra: typeof extra.isExtra === "boolean" ? extra.isExtra : null,
+			total: centsToNullableAmount(extra.totalCents),
+			quantity: Number.isFinite(extra.quantity) ? extra.quantity : null,
+			dates: stableClone(extra.dates),
+			repeatType: clean(extra.repeatType),
+			includedInPrice:
+				typeof extra.includedInPrice === "boolean"
+					? extra.includedInPrice
+					: null,
+		})),
+	}));
+	const totalCents = normalized.totalCents;
+	const roomTotals = (normalized.rooms || []).map((room) => room.totalCents);
+	const roomTotalsKnown =
+		roomTotals.length > 0 && roomTotals.every(Number.isSafeInteger);
+	return {
+		schemaVersion: 1,
+		source: "hotelrunner_api",
+		currency: clean(normalized.currency).toUpperCase(),
+		subTotal: centsToNullableAmount(normalized.subTotalCents),
+		extrasTotal: centsToNullableAmount(normalized.extrasTotalCents),
+		adjustmentsTotal: centsToNullableAmount(normalized.adjustmentsTotalCents),
+		itemTotal: centsToNullableAmount(normalized.itemTotalCents),
+		taxTotal: centsToNullableAmount(normalized.taxTotalCents),
+		grandTotal: centsToNullableAmount(totalCents),
+		paidAmount: centsToNullableAmount(normalized.paidAmountCents),
+		depositTaxInclusive:
+			typeof normalized.depositTaxInclusive === "boolean"
+				? normalized.depositTaxInclusive
+				: null,
+		extraAdjustmentsDetails: stableClone(
+			normalized.extraAdjustmentsDetails || []
+		),
+		adjustmentDetails: stableClone(normalized.adjustmentDetails || []),
+		priceAdjustmentsDetails: stableClone(
+			normalized.priceAdjustmentsDetails || []
+		),
+		cancelationPolicy: stableClone(normalized.cancelationPolicy || []),
+		payments: (normalized.payments || []).map((payment) => ({
+			id: clean(payment.id),
+			state: clean(payment.state),
+			amount: centsToNullableAmount(payment.amountCents),
+			currency: clean(payment.currency).toUpperCase(),
+			exchangedAmount: centsToNullableAmount(payment.exchangedAmountCents),
+			exchangeCurrency: clean(payment.exchangeCurrency).toUpperCase(),
+			exchangeRate: Number.isFinite(payment.exchangeRate)
+				? payment.exchangeRate
+				: null,
+			paidAt: payment.paidAt || null,
+			methodName: clean(payment.methodName),
+			method: clean(payment.method),
+			installment: Number.isInteger(payment.installment)
+				? payment.installment
+				: null,
+			responseCode: clean(payment.responseCode),
+		})),
+		rooms,
+		reconciliation: {
+			roomTotalsMatchGrandTotal:
+				roomTotalsKnown && Number.isSafeInteger(totalCents)
+					? roomTotals.reduce((sum, value) => sum + value, 0) === totalCents
+					: null,
+		},
+		otaCommission: null,
+		hotelNetPayout: null,
+		hotelNetStatus: "not_provided_by_hotelrunner",
+	};
+}
+
+function normalizedHasPricingBreakdown(normalized = {}) {
+	if (
+		[
+			normalized.subTotalCents,
+			normalized.extrasTotalCents,
+			normalized.adjustmentsTotalCents,
+			normalized.itemTotalCents,
+			normalized.taxTotalCents,
+			normalized.totalCents,
+			normalized.paidAmountCents,
+		].some(Number.isSafeInteger)
+	) {
+		return true;
+	}
+	if (
+		(normalized.payments || []).some(
+			(payment) =>
+				Number.isSafeInteger(payment?.amountCents) ||
+				Number.isSafeInteger(payment?.exchangedAmountCents) ||
+				Number.isFinite(payment?.exchangeRate)
+		)
+	) {
+		return true;
+	}
+	return (normalized.rooms || []).some((room) => {
+		if (
+			[
+				room?.priceCents,
+				room?.totalCents,
+				room?.roomBasePriceCents,
+				room?.roomSubTotalCents,
+				room?.extrasTotalCents,
+				room?.fixedAdjustmentsTotalCents,
+				room?.includedTaxesTotalCents,
+				room?.excludedFeesAndTaxesTotalCents,
+				room?.cancelationRefundTotalCents,
+				room?.cancelationPenaltyTotalCents,
+				room?.promotionsTotalCents,
+			].some(Number.isSafeInteger)
+		) {
+			return true;
+		}
+		if (
+			(room?.dailyPrices || []).some((day) =>
+				[
+					day?.priceCents,
+					day?.originalPriceCents,
+					day?.discountCents,
+				].some(Number.isSafeInteger)
+			)
+		) {
+			return true;
+		}
+		return (room?.extras || []).some((extra) =>
+			[
+				extra?.priceCents,
+				extra?.basePriceCents,
+				extra?.promotionsTotalCents,
+				extra?.totalCents,
+			].some(Number.isSafeInteger)
+		);
+	});
+}
 
 function allocateCents(totalCents, weights = []) {
 	if (!Number.isSafeInteger(totalCents) || totalCents < 0 || !weights.length) {
@@ -228,14 +432,34 @@ function commercialSourceLabel(normalized = {}) {
 }
 
 function hotelRunnerCommercialProvider(normalized = {}) {
-	const provider = providerKey(
-		normalized.channelDisplay || normalized.sourceDisplay || normalized.channel
+	const providers = new Set(
+		[
+			normalized.channelDisplay,
+			normalized.sourceDisplay,
+			normalized.channel,
+		]
+			.map(providerKey)
+			.filter((provider) => OTA_PROVIDER_KEYS.has(provider))
 	);
-	return OTA_PROVIDER_KEYS.has(provider) ? provider : "";
+	return providers.size === 1 ? Array.from(providers)[0] : "";
+}
+
+function hotelRunnerExternalIdentityAliases(normalized = {}) {
+	const provider = hotelRunnerCommercialProvider(normalized);
+	// hr_number is HotelRunner's own reservation code, not the OTA/provider
+	// confirmation number. For a relayed OTA booking, using it as the shared
+	// email identity can create a second local reservation when provider_number
+	// is blank. Fail closed until the OTA confirmation is supplied. A native
+	// HotelRunner booking may still use its HR number in the HotelRunner namespace.
+	const values =
+		provider === "hotelrunner"
+			? [normalized.providerNumber, normalized.hrNumber]
+			: [normalized.providerNumber];
+	return Array.from(new Set(values.map(clean).filter(Boolean)));
 }
 
 function hotelRunnerExternalAlias(normalized = {}) {
-	return clean(normalized.providerNumber || normalized.hrNumber);
+	return hotelRunnerExternalIdentityAliases(normalized)[0] || "";
 }
 
 function hotelRunnerOtaIdentityKeys(normalized = {}) {
@@ -257,6 +481,9 @@ function hotelRunnerSupplierMetadata(
 	appliedAt = new Date(),
 	previous = {}
 ) {
+	const pricing = normalizedHasPricingBreakdown(normalized)
+		? hotelRunnerPricingBreakdown(normalized)
+		: previous.pricing;
 	return {
 		transport: "hotelrunner_api",
 		reservationId:
@@ -280,6 +507,7 @@ function hotelRunnerSupplierMetadata(
 			: previous.reportedPaidAmount ?? null,
 		reportedPaidAmountCurrency:
 			normalized.currency || previous.reportedPaidAmountCurrency || "",
+		...(pricing ? { pricing } : {}),
 	};
 }
 
@@ -403,7 +631,7 @@ function buildCreateReservationDocument({
 			providerLabel: sourceLabel,
 			sourceCurrency: normalized.currency,
 			sourceAmount: pricing.clientTotal,
-			payoutFallbackReason: "HotelRunner does not provide a verified hotel payout.",
+			payoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		},
 		ota_financial_summary: {
 			show: false,
@@ -421,7 +649,7 @@ function buildCreateReservationDocument({
 			commercialVerified: false,
 			sourceCurrency: normalized.currency,
 			sourceAmount: pricing.clientTotal,
-			payoutFallbackReason: "hotelrunner_payout_not_provided",
+			payoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		},
 		supplierData: {
 			supplierName: sourceLabel,
@@ -434,6 +662,9 @@ function buildCreateReservationDocument({
 			otaSourceAuthority: 4,
 			otaLastSourceReceivedAt: normalized.sourceUpdatedAt,
 			otaLastEventType: normalized.state === "canceled" ? "cancelled" : "reservation",
+			otaTotalPayoutSar: null,
+			otaExpenseTotalSar: null,
+			otaPayoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 			hotelRunner: hotelRunnerSupplierMetadata(normalized, event, now),
 		},
 		reservationAuditLog: [
@@ -845,15 +1076,12 @@ function valuesFromReservation(reservation = {}) {
 }
 
 function providerKey(value = "") {
-	const key = comparable(value).replace(/\s+/g, "");
-	if (key.includes("booking")) return "booking";
-	if (key.includes("agoda")) return "agoda";
-	if (key.includes("expedia")) return "expedia";
-	if (key.includes("hotels")) return "hotels";
-	if (key.includes("trip")) return "trip";
-	if (key.includes("airbnb")) return "airbnb";
-	if (key.includes("hotelrunner")) return "hotelrunner";
-	return key;
+	const compact = comparable(value).replace(/\s+/g, "");
+	// Provider identity is security-sensitive: only explicit aliases are accepted.
+	// Native HotelRunner labels are checked first because labels such as
+	// "HotelRunner Booking Engine" must never be mistaken for Booking.com.
+	if (NATIVE_HOTELRUNNER_PROVIDER_ALIASES.has(compact)) return "hotelrunner";
+	return HOTELRUNNER_PROVIDER_ALIASES.get(compact) || "";
 }
 
 function recognizedProviderKey(value = "") {
@@ -884,7 +1112,7 @@ function parseCandidateIdentityKey(value = "") {
 
 function candidateMatchesStrongIdentity(candidate, normalized, { requireStay = true } = {}) {
 	const incomingAliases = new Set(
-		[normalized.providerNumber, normalized.hrNumber]
+		hotelRunnerExternalIdentityAliases(normalized)
 			.map(identityComparable)
 			.filter(Boolean)
 	);
@@ -1002,7 +1230,7 @@ async function findLinkedReservation(
 		.exec();
 	if (direct) return { reservation: direct, method: "hotelrunner_primary_id" };
 
-	const aliases = [normalized.providerNumber, normalized.hrNumber]
+	const aliases = hotelRunnerExternalIdentityAliases(normalized)
 		.filter(Boolean)
 		.map(escapedExactRegex);
 	if (!aliases.length) return { reservation: null, method: "" };
@@ -1017,9 +1245,16 @@ async function findLinkedReservation(
 			{ "supplierData.platformConfirmationNumber": { $in: aliases } },
 		],
 	})
-		.limit(5)
+		.limit(6)
 		.lean()
 		.exec();
+	if (candidates.length >= 6) {
+		const error = new Error(
+			"Too many PMS reservations match the HotelRunner alias query to prove uniqueness."
+		);
+		error.code = "hotelrunner_identity_ambiguous";
+		throw error;
+	}
 	const strictMatches = candidates.filter((candidate) =>
 		candidateMatchesStrongIdentity(candidate, normalized, {
 			requireStay: true,
@@ -1064,8 +1299,29 @@ async function findLinkedReservation(
 async function discoverAndResolveRoomMappings(
 	normalized,
 	hotel,
-	{ MappingModel = HotelRunnerRoomMapping } = {}
+	{
+		MappingModel = HotelRunnerRoomMapping,
+		SyncStateModel = HotelRunnerSyncState,
+		mappingNow = () => new Date(),
+		roomListVerificationMaxAgeMs = DEFAULT_ROOM_LIST_VERIFICATION_MAX_AGE_MS,
+	} = {}
 ) {
+	const referenceTime = new Date(mappingNow());
+	const referenceMs = Number.isFinite(referenceTime.getTime())
+		? referenceTime.getTime()
+		: Date.now();
+	const maxVerificationAgeMs =
+		Number.isFinite(Number(roomListVerificationMaxAgeMs)) &&
+		Number(roomListVerificationMaxAgeMs) > 0
+			? Number(roomListVerificationMaxAgeMs)
+			: DEFAULT_ROOM_LIST_VERIFICATION_MAX_AGE_MS;
+	const syncState = await SyncStateModel.findOne({ hotelId: hotel._id })
+		.select("activeRoomListSyncGeneration")
+		.lean()
+		.exec();
+	const activeRoomListSyncGeneration = clean(
+		syncState?.activeRoomListSyncGeneration
+	);
 	const byInvCode = new Map();
 	for (const sourceRoom of normalized.rooms) {
 		if (!byInvCode.has(sourceRoom.invCode)) byInvCode.set(sourceRoom.invCode, []);
@@ -1111,6 +1367,7 @@ async function discoverAndResolveRoomMappings(
 			.map((room) => [String(room._id), room])
 	);
 	const missingInvCodes = [];
+	const staleInvCodes = [];
 	const unsafeMasterInvCodes = [];
 	const resolvedRooms = [];
 	for (const sourceRoom of normalized.rooms) {
@@ -1119,9 +1376,24 @@ async function discoverAndResolveRoomMappings(
 			unsafeMasterInvCodes.push(sourceRoom.invCode);
 			continue;
 		}
+		const verifiedAtMs = mapping?.roomListVerifiedAt
+			? new Date(mapping.roomListVerifiedAt).getTime()
+			: Number.NaN;
+		const hasRoomListProof = Boolean(
+			mapping?.roomListSyncGeneration &&
+			mapping?.roomListVerificationState === "verified" &&
+			mapping?.variantConflict !== true
+		);
+		const hasCurrentGenerationProof = Boolean(
+			hasRoomListProof &&
+			activeRoomListSyncGeneration &&
+			mapping.roomListSyncGeneration === activeRoomListSyncGeneration
+		);
 		const roomListVerified = Boolean(
-			mapping?.roomListVerifiedAt &&
-			Number.isFinite(new Date(mapping.roomListVerifiedAt).getTime())
+			hasCurrentGenerationProof &&
+			Number.isFinite(verifiedAtMs) &&
+			verifiedAtMs <= referenceMs + 5 * 60 * 1000 &&
+			referenceMs - verifiedAtMs <= maxVerificationAgeMs
 		);
 		const roomDetails = mapping
 			? localRooms.get(String(mapping.localRoomConfigId || ""))
@@ -1133,6 +1405,14 @@ async function discoverAndResolveRoomMappings(
 			!roomDetails
 		) {
 			missingInvCodes.push(sourceRoom.invCode);
+			if (
+				mapping &&
+				mapping?.variantConflict !== true &&
+				((hasRoomListProof && !roomListVerified) ||
+					mapping?.roomListVerificationState === "refreshing")
+			) {
+				staleInvCodes.push(sourceRoom.invCode);
+			}
 			continue;
 		}
 		resolvedRooms.push({ sourceRoom, mapping, roomDetails });
@@ -1143,7 +1423,9 @@ async function discoverAndResolveRoomMappings(
 			unsafeMasterInvCodes.length === 0 &&
 			resolvedRooms.length === normalized.rooms.length,
 		missingInvCodes: Array.from(new Set(missingInvCodes)),
+		staleInvCodes: Array.from(new Set(staleInvCodes)),
 		unsafeMasterInvCodes: Array.from(new Set(unsafeMasterInvCodes)),
+		activeRoomListSyncGeneration,
 		resolvedRooms,
 	};
 }
@@ -1679,6 +1961,69 @@ function sourceOwnedProjectionAfterUpdate({
 	return stableClone(baseline);
 }
 
+function staleEmailCommercialEvidenceSet({ preserveFinancialAmounts = false } = {}) {
+	const set = {
+		"supplierData.hotelRunnerEmailCommercialEvidence": null,
+		"supplierData.otaPayoutFallbackReason":
+			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
+		"adminPricing.commercialVerified": false,
+		"adminPricing.payoutFallbackReason":
+			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
+		"ota_financial_summary.show": false,
+		"ota_financial_summary.commercialVerified": false,
+		"ota_financial_summary.payoutFallbackReason":
+			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
+	};
+	if (!preserveFinancialAmounts) {
+		set["supplierData.otaTotalPayoutSar"] = null;
+		set["supplierData.otaExpenseTotalSar"] = null;
+		set["adminPricing.netAfterExpensesTotal"] = null;
+		set["adminPricing.otaExpenseTotal"] = null;
+		set["ota_financial_summary.netAfterExpenses"] = null;
+		set["ota_financial_summary.netAfterOtaExpenses"] = null;
+		set["ota_financial_summary.otaExpenseTotal"] = null;
+	}
+	return set;
+}
+
+function availabilitySnapshotInventorySummary(snapshot = {}) {
+	if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+		return null;
+	}
+	const issues = [];
+	for (const room of Array.isArray(snapshot.rooms) ? snapshot.rooms : []) {
+		for (const day of Array.isArray(room?.days) ? room.days : []) {
+			const availableAfterRaw = Number(day?.availableAfterRaw);
+			if (!Number.isFinite(availableAfterRaw) || availableAfterRaw >= 0) {
+				continue;
+			}
+			issues.push({
+				code: "inventory_overbook",
+				date: clean(day?.date),
+				roomType: clean(room?.room_type || room?.roomType),
+				displayName: clean(room?.displayName || room?.display_name),
+				capacity: Number(day?.capacity || room?.capacity || 0),
+				reserved: Number(day?.reservedBefore || 0),
+				requested: Number(day?.requested || room?.requested || 0),
+			});
+			if (issues.length >= 25) break;
+		}
+		if (issues.length >= 25) break;
+	}
+	const reportedIssueCount = Number(snapshot.issueCount);
+	let issueCount =
+		Number.isSafeInteger(reportedIssueCount) && reportedIssueCount >= 0
+			? reportedIssueCount
+			: issues.length;
+	if (snapshot.overbooked === true && issueCount === 0) issueCount = 1;
+	issueCount = Math.min(issueCount, 10_000);
+	return {
+		overbooked: snapshot.overbooked === true || issueCount > 0,
+		issueCount,
+		issues,
+	};
+}
+
 async function applyActiveUpdate({
 	normalized,
 	event,
@@ -1733,16 +2078,68 @@ async function applyActiveUpdate({
 		: same(currentProjection.commercial, incomingProjection.commercial) ||
 			pristineReview ||
 			crossTransportHandoff;
+	const hasFinanceProtection = hasFinanceOrSettlementActivity(existing);
+	const existingCommercialEvidence =
+		existing?.supplierData?.hotelRunnerEmailCommercialEvidence;
+	const verifiedCommercialEvidence =
+		verifiedHotelRunnerEmailCommercialEvidence(existing, {
+			provider: hotelRunnerCommercialProvider(normalized),
+			grossTotalSar: pricing.clientTotal,
+			currency: normalized.currency,
+		});
+	const hasPresentedCommercialEvidence = Boolean(
+		existingCommercialEvidence ||
+			existing?.adminPricing?.commercialVerified === true ||
+			existing?.ota_financial_summary?.commercialVerified === true
+	);
+	const commercialEvidenceStale = Boolean(
+		hasPresentedCommercialEvidence &&
+			(!verifiedCommercialEvidence || criticalChanged)
+	);
 	if (
 		criticalChanged &&
 		(!criticalOwned ||
 			hasHousingOrTerminalProtection(existing) ||
-			hasFinanceOrSettlementActivity(existing))
+			hasFinanceProtection)
 	) {
+		let changedPaths = [];
+		if (commercialEvidenceStale) {
+			const staleSet = staleEmailCommercialEvidenceSet({
+				preserveFinancialAmounts: true,
+			});
+			changedPaths = Object.keys(staleSet);
+			const staleResult = await ReservationModel.updateOne(
+				reservationCasFilter(existing, normalized),
+				addReservationVersionBump({
+					$set: staleSet,
+					$push: {
+						reservationAuditLog: auditEntry(
+							normalized,
+							"hotelrunner-commercial-evidence-invalidated",
+							changedPaths
+						),
+					},
+				})
+			).exec();
+			const matched = Number(
+				staleResult?.matchedCount ?? staleResult?.n ?? 0
+			);
+			if (!matched) {
+				return {
+					status: "retry",
+					code: "hotelrunner_reservation_cas_conflict",
+				};
+			}
+		}
 		return {
 			status: "quarantined",
 			code: "hotelrunner_local_room_or_stay_conflict",
 			message: "Local room, stay, housing, or finance changes protect this reservation from an automatic HotelRunner rewrite.",
+			changedPaths,
+			commercialEvidenceStale,
+			attentionCode: commercialEvidenceStale
+				? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+				: "",
 		};
 	}
 
@@ -1772,8 +2169,12 @@ async function applyActiveUpdate({
 		set.pickedRoomsType = pricing.pickedRooms;
 		set.pickedRoomsPricing = pricing.pickedRooms;
 	}
-	const commercialProtected = commercialChanged &&
-		(!commercialOwned || hasFinanceOrSettlementActivity(existing));
+	const preserveVerifiedEmailCommercial = Boolean(
+		verifiedCommercialEvidence && !criticalChanged
+	);
+	const commercialProtected =
+		commercialChanged &&
+		(!commercialOwned || hasFinanceProtection || preserveVerifiedEmailCommercial);
 	if (commercialChanged && !commercialProtected) {
 		set.total_amount = pricing.clientTotal;
 		set.sub_total = pricing.rootTotal;
@@ -1794,6 +2195,9 @@ async function applyActiveUpdate({
 			source: "hotelrunner_api",
 			sourceCurrency: normalized.currency,
 			sourceAmount: pricing.clientTotal,
+			payoutFallbackReason: commercialEvidenceStale
+				? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+				: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		};
 		set.ota_financial_summary = {
 			...(existing.ota_financial_summary || {}),
@@ -1812,8 +2216,27 @@ async function applyActiveUpdate({
 			commercialVerified: false,
 			sourceCurrency: normalized.currency,
 			sourceAmount: pricing.clientTotal,
-			payoutFallbackReason: "hotelrunner_payout_not_provided",
+			payoutFallbackReason: commercialEvidenceStale
+				? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+				: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		};
+		set["supplierData.otaTotalPayoutSar"] = null;
+		set["supplierData.otaExpenseTotalSar"] = null;
+		set["supplierData.otaPayoutFallbackReason"] = commercialEvidenceStale
+			? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+			: HOTELRUNNER_PAYOUT_NOT_PROVIDED;
+	}
+	if (commercialEvidenceStale) {
+		if (commercialChanged && !commercialProtected) {
+			set["supplierData.hotelRunnerEmailCommercialEvidence"] = null;
+		} else {
+			Object.assign(
+				set,
+				staleEmailCommercialEvidenceSet({
+					preserveFinancialAmounts: commercialProtected,
+				})
+			);
+		}
 	}
 	const now = new Date();
 	if (pristineReview || hotelRunnerOwnedPending || crossTransportPending) {
@@ -1930,6 +2353,10 @@ async function applyActiveUpdate({
 			result: {
 				changedPaths,
 				commercialProtected,
+				commercialEvidenceStale,
+				attentionCode: commercialEvidenceStale
+					? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+					: "",
 				inventoryIssueCount: Number(modificationAvailability?.issues?.length || 0),
 				inventorySummary,
 			},
@@ -1941,8 +2368,13 @@ async function applyActiveUpdate({
 		reservationMongoId: existing._id,
 		changedPaths,
 		commercialProtected,
+		commercialEvidenceStale,
+		attentionCode: commercialEvidenceStale
+			? HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE
+			: "",
 		guestCountsProtected,
 		inventoryIssueCount: Number(modificationAvailability?.issues?.length || 0),
+		inventorySummary,
 	};
 }
 
@@ -2005,6 +2437,10 @@ async function createReservation({
 			};
 		}
 		const projection = projectionFromReservation(existingById);
+		const inventorySummary = availabilitySnapshotInventorySummary(
+			existingById.availabilitySnapshot
+		);
+		const inventoryIssueCount = Number(inventorySummary?.issueCount || 0);
 		await updateMirrorApplied(
 			mirror,
 			{
@@ -2014,11 +2450,21 @@ async function createReservation({
 				linkMethod: "preallocated_create_recovery",
 				linkEvidence: { recovered: true },
 				lastAppliedProjection: projection,
-				result: { crashRecovery: true },
+				result: {
+					crashRecovery: true,
+					inventoryIssueCount,
+					inventorySummary,
+				},
 			},
 			dependencies
 		);
-		return { status: "created", reservationMongoId, crashRecovery: true };
+		return {
+			status: "created",
+			reservationMongoId,
+			crashRecovery: true,
+			inventoryIssueCount,
+			inventorySummary,
+		};
 	}
 	const generateConfirmation =
 		dependencies.generateConfirmation || generateUniquePmsConfirmationNumber;
@@ -2078,6 +2524,10 @@ async function createReservation({
 		throw error;
 	}
 	const projection = projectionFromReservation(persistedReservation);
+	const inventorySummary = availabilitySnapshotInventorySummary(
+		persistedReservation.availabilitySnapshot
+	);
+	const inventoryIssueCount = Number(inventorySummary?.issueCount || 0);
 	await updateMirrorApplied(
 		mirror,
 		{
@@ -2087,11 +2537,21 @@ async function createReservation({
 			linkMethod: "hotelrunner_primary_create",
 			linkEvidence: { hotelId: String(hotel._id) },
 			lastAppliedProjection: projection,
-			result: { confirmationNumber },
+			result: {
+				confirmationNumber,
+				inventoryIssueCount,
+				inventorySummary,
+			},
 		},
 		dependencies
 	);
-	return { status: "created", reservationMongoId, confirmationNumber };
+	return {
+		status: "created",
+		reservationMongoId,
+		confirmationNumber,
+		inventoryIssueCount,
+		inventorySummary,
+	};
 }
 
 async function projectHotelRunnerReservation(
@@ -2319,18 +2779,28 @@ async function projectHotelRunnerReservation(
 			mirrorId: mirror._id,
 		};
 	}
-	const mapping = await discoverAndResolveRoomMappings(
-		normalized,
-		hotel,
-		dependencies
-	);
+	const configuredRoomListAgeMs =
+		Math.max(48, Number(config.roomListIntervalHours || 24) * 3) *
+		60 *
+		60 *
+		1000;
+	const mapping = await discoverAndResolveRoomMappings(normalized, hotel, {
+		...dependencies,
+		roomListVerificationMaxAgeMs:
+			dependencies.roomListVerificationMaxAgeMs || configuredRoomListAgeMs,
+	});
 	if (!mapping.ok) {
 		const masterRoomConflict = mapping.unsafeMasterInvCodes.length > 0;
+		const staleRoomMapping = mapping.staleInvCodes.length > 0;
 		const code = masterRoomConflict
 			? "hotelrunner_master_room_not_mappable"
+			: staleRoomMapping
+				? "hotelrunner_room_mapping_stale"
 			: "hotelrunner_room_mapping_required";
 		const message = masterRoomConflict
 			? "HotelRunner master fallback inventory cannot be mapped to a PMS room category."
+			: staleRoomMapping
+				? "One or more HotelRunner room-list verifications are stale and must be refreshed before projection."
 			: "One or more HotelRunner inventory codes need an explicit PMS room mapping.";
 		await markMirrorReview(
 			mirror,
@@ -2339,6 +2809,7 @@ async function projectHotelRunnerReservation(
 			message,
 			{
 				missingInvCodes: mapping.missingInvCodes,
+				staleInvCodes: mapping.staleInvCodes,
 				unsafeMasterInvCodes: mapping.unsafeMasterInvCodes,
 			},
 			dependencies
@@ -2347,6 +2818,7 @@ async function projectHotelRunnerReservation(
 			status: "needs_mapping",
 			code,
 			missingInvCodes: mapping.missingInvCodes,
+			staleInvCodes: mapping.staleInvCodes,
 			unsafeMasterInvCodes: mapping.unsafeMasterInvCodes,
 			mirrorId: mirror._id,
 		};
@@ -2446,6 +2918,7 @@ async function projectHotelRunnerReservation(
 
 module.exports = {
 	MAX_CAS_ATTEMPTS,
+	DEFAULT_ROOM_LIST_VERIFICATION_MAX_AGE_MS,
 	allocateCents,
 	applyActiveUpdate,
 	applyCancellation,
@@ -2458,6 +2931,8 @@ module.exports = {
 	findLinkedReservation,
 	hasFinanceOrSettlementActivity,
 	hasHousingOrTerminalProtection,
+	hotelRunnerCommercialProvider,
+	hotelRunnerPricingBreakdown,
 	isLocalTerminal,
 	isEligibleCrossTransportHandoff,
 	isPristinePendingOtaReview,

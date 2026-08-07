@@ -1,3 +1,7 @@
+const {
+  verifiedHotelRunnerOtaExpense,
+} = require("./hotelrunnerReportPricing");
+
 const RESERVATION_OVERVIEW_PROJECTION = [
   "createdAt",
   "checkin_date",
@@ -6,6 +10,15 @@ const RESERVATION_OVERVIEW_PROJECTION = [
   "total_amount",
   "hotelId",
   "pickedRoomsType",
+  "adminPricing.mode",
+  "adminPricing.commercialVerified",
+  "adminPricing.otaExpenseTotal",
+  "ota_financial_summary.commercialVerified",
+  "ota_financial_summary.otaExpenseTotal",
+  "otaFinancialSummary.commercialVerified",
+  "otaFinancialSummary.otaExpenseTotal",
+  "supplierData.hotelRunner.transport",
+  "supplierData.otaAutomationPipeline",
   "paid_amount_breakdown",
   "customer_details.cardNumber",
   "customer_details.cardHolderName",
@@ -51,6 +64,11 @@ const getPaymentStatus = (reservation) => {
 const computeReservationCommission = (reservation) => {
   if (!reservation) return 0;
 
+  const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+  if (hotelRunnerExpense.isHotelRunner) {
+    return hotelRunnerExpense.available ? hotelRunnerExpense.amount : 0;
+  }
+
   const specialHotelId = "675c41a3fd79ed7586b970ee";
   const currentHotelId = String(
     reservation.hotelId?._id || reservation.hotelId || ""
@@ -81,11 +99,25 @@ const computeReservationCommission = (reservation) => {
   return totalCommission;
 };
 
+const reservationCommissionMetric = (reservation) => {
+  const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+  return {
+    amount: hotelRunnerExpense.isHotelRunner
+      ? hotelRunnerExpense.available
+        ? hotelRunnerExpense.amount
+        : 0
+      : computeReservationCommission(reservation),
+    unavailable:
+      hotelRunnerExpense.isHotelRunner && !hotelRunnerExpense.available,
+  };
+};
+
 const newGroup = (groupKey) => ({
   groupKey,
   reservationsCount: 0,
   total_amount: 0,
   commission: 0,
+  commissionUnavailableCount: 0,
   paymentStatusCounts: {
     captured: 0,
     notCaptured: 0,
@@ -99,6 +131,9 @@ const addToGroup = (groups, key, reservationMetrics) => {
   group.reservationsCount += 1;
   group.total_amount += reservationMetrics.totalAmount;
   group.commission += reservationMetrics.commission;
+  if (reservationMetrics.commissionUnavailable) {
+    group.commissionUnavailableCount += 1;
+  }
 
   if (reservationMetrics.paymentStatus === "captured") {
     group.paymentStatusCounts.captured += 1;
@@ -124,9 +159,11 @@ const buildReservationOverview = (reservations = [], requestedTopLimit = 5) => {
   const byHotelName = {};
 
   for (const reservation of reservations) {
+    const commissionMetric = reservationCommissionMetric(reservation);
     const metrics = {
       totalAmount: safeNumber(reservation.total_amount),
-      commission: computeReservationCommission(reservation),
+      commission: commissionMetric.amount,
+      commissionUnavailable: commissionMetric.unavailable,
       paymentStatus: getPaymentStatus(reservation),
     };
 
@@ -159,6 +196,7 @@ const buildReservationOverview = (reservations = [], requestedTopLimit = 5) => {
       reservationsCount: group.reservationsCount,
       total_amount: group.total_amount,
       commission: group.commission,
+      commissionUnavailableCount: group.commissionUnavailableCount,
       paymentStatusCounts: group.paymentStatusCounts,
     }));
 
@@ -172,6 +210,7 @@ const buildReservationOverview = (reservations = [], requestedTopLimit = 5) => {
         reservationsCount: group.reservationsCount,
         total_amount: group.total_amount,
         commission: group.commission,
+        commissionUnavailableCount: group.commissionUnavailableCount,
         paymentStatusCounts: group.paymentStatusCounts,
       })
     ),
@@ -180,6 +219,7 @@ const buildReservationOverview = (reservations = [], requestedTopLimit = 5) => {
       reservationsCount: group.reservationsCount,
       total_amount: group.total_amount,
       commission: group.commission,
+      commissionUnavailableCount: group.commissionUnavailableCount,
       paymentStatusCounts: group.paymentStatusCounts,
     })),
     topHotels,

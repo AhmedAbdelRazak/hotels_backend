@@ -42,6 +42,9 @@ const {
 	RESERVATION_OVERVIEW_PROJECTION,
 	buildReservationOverview,
 } = require("../services/adminReservationOverview");
+const {
+	verifiedHotelRunnerOtaExpense,
+} = require("../services/hotelrunnerReportPricing");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -355,6 +358,10 @@ const computePaidBreakdownTotal = (breakdown = {}) =>
    ------------------------------------------------------------------ */
 function computeReservationCommission(reservation) {
 	if (!reservation) return 0;
+	const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+	if (hotelRunnerExpense.isHotelRunner) {
+		return hotelRunnerExpense.available ? hotelRunnerExpense.amount : 0;
+	}
 
 	const specialHotelId = "675c41a3fd79ed7586b970ee";
 	const currentHotelId = String(
@@ -490,6 +497,7 @@ function groupReservations(reservations, groupKeyFn) {
 				reservationsCount: 0,
 				total_amount: 0,
 				commission: 0,
+				commissionUnavailableCount: 0,
 				paymentStatusCounts: {
 					captured: 0,
 					notCaptured: 0,
@@ -501,6 +509,10 @@ function groupReservations(reservations, groupKeyFn) {
 		groupsMap[key].reservationsCount++;
 		groupsMap[key].total_amount += safeNumber(r.total_amount);
 		groupsMap[key].commission += computeReservationCommission(r);
+		const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(r);
+		if (hotelRunnerExpense.isHotelRunner && !hotelRunnerExpense.available) {
+			groupsMap[key].commissionUnavailableCount += 1;
+		}
 
 		// Payment status aggregator
 		const pStatus = getPaymentStatus(r);
@@ -664,6 +676,7 @@ exports.reservationsByDayByHotelName = async (req, res) => {
 				reservationsCount: group.reservationsCount,
 				total_amount: group.total_amount,
 				commission: group.commission,
+				commissionUnavailableCount: group.commissionUnavailableCount,
 				paymentStatusCounts: group.paymentStatusCounts,
 			};
 		});
@@ -693,6 +706,7 @@ exports.reservationsByBookingStatus = async (req, res) => {
 			reservationsCount: group.reservationsCount,
 			total_amount: group.total_amount,
 			commission: group.commission,
+			commissionUnavailableCount: group.commissionUnavailableCount,
 			paymentStatusCounts: group.paymentStatusCounts,
 		}));
 
@@ -721,6 +735,7 @@ exports.reservationsByHotelNames = async (req, res) => {
 			reservationsCount: group.reservationsCount,
 			total_amount: group.total_amount,
 			commission: group.commission,
+			commissionUnavailableCount: group.commissionUnavailableCount,
 			paymentStatusCounts: group.paymentStatusCounts,
 		}));
 
@@ -754,6 +769,7 @@ exports.topHotelsByReservations = async (req, res) => {
 			reservationsCount: g.reservationsCount,
 			total_amount: g.total_amount,
 			commission: g.commission,
+			commissionUnavailableCount: g.commissionUnavailableCount,
 			paymentStatusCounts: g.paymentStatusCounts,
 		}));
 
@@ -960,7 +976,12 @@ exports.specificListOfReservations = async (req, res) => {
 	}
 
 	function computeReservationCommission(reservation) {
-		if (!reservation || !reservation.pickedRoomsType) return 0;
+		if (!reservation) return 0;
+		const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+		if (hotelRunnerExpense.isHotelRunner) {
+			return hotelRunnerExpense.available ? hotelRunnerExpense.amount : 0;
+		}
+		if (!reservation.pickedRoomsType) return 0;
 
 		const hotelName = reservation.hotelId?.hotelName?.toLowerCase() || "";
 		const totalAmount = safeNumber(reservation.total_amount);
@@ -1200,6 +1221,10 @@ exports.specificListOfReservations = async (req, res) => {
 		const nonCancelled = allReservations.filter(
 			(r) => r.reservation_status !== "cancelled"
 		);
+		const commissionUnavailableCount = nonCancelled.filter((reservation) => {
+			const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+			return hotelRunnerExpense.isHotelRunner && !hotelRunnerExpense.available;
+		}).length;
 
 		// Today Commission
 		const todayCommission = nonCancelled
@@ -1233,12 +1258,18 @@ exports.specificListOfReservations = async (req, res) => {
 		// Top 3 Hotels by Commission
 		const hotelCommissions = nonCancelled.reduce((acc, reservation) => {
 			const name = reservation.hotelId?.hotelName || "Unknown Hotel";
-			const comm = computeReservationCommission(reservation);
-			acc[name] = (acc[name] || 0) + comm;
+			if (!acc[name]) {
+				acc[name] = { commission: 0, commissionUnavailableCount: 0 };
+			}
+			acc[name].commission += computeReservationCommission(reservation);
+			const hotelRunnerExpense = verifiedHotelRunnerOtaExpense(reservation);
+			if (hotelRunnerExpense.isHotelRunner && !hotelRunnerExpense.available) {
+				acc[name].commissionUnavailableCount += 1;
+			}
 			return acc;
 		}, {});
 		const topHotelsByCommission = Object.entries(hotelCommissions)
-			.map(([name, commission]) => ({ name, commission }))
+			.map(([name, values]) => ({ name, ...values }))
 			.sort((a, b) => b.commission - a.commission)
 			.slice(0, 3);
 
@@ -1268,6 +1299,7 @@ exports.specificListOfReservations = async (req, res) => {
 			weeklyCommissionRatio,
 			topHotelsByCommission,
 			overallCommission,
+			commissionUnavailableCount,
 		};
 
 		// 9) Return final payload

@@ -75,6 +75,9 @@ const {
 	isConfiguredSuperAdminId,
 } = require("../services/bofaVccPolicy");
 const {
+	guardDirectHotelRunnerGuestPaymentCommissionSet,
+} = require("../services/hotelrunnerGuestPaymentFinance");
+const {
 	scheduleReservationConfirmedConversion,
 	schedulePaymentCapturedConversion,
 } = require("../services/conversionTracking");
@@ -2450,6 +2453,10 @@ async function reconcileLinkPendingReviewCapture(resource = {}) {
 	if (sarInc > 0) {
 		setAfter["payment_details.triggeredAmountSAR"] = sarInc;
 	}
+	const guardedSetAfter = guardDirectHotelRunnerGuestPaymentCommissionSet({
+		reservation: updated || reservation,
+		set: setAfter,
+	}).set;
 	updated = await Reservations.findByIdAndUpdate(
 		reservation._id,
 		{
@@ -2461,7 +2468,7 @@ async function reconcileLinkPendingReviewCapture(resource = {}) {
 						},
 				  }
 				: {}),
-			$set: setAfter,
+			$set: guardedSetAfter,
 			$pull: {
 				"paypal_details.pending_review_captures": { capture_id: captureId },
 			},
@@ -4342,15 +4349,19 @@ exports.mitChargeReservation = async (req, res) => {
 			updated?.paypal_details?.captured_total_usd || 0,
 		);
 		const fullyPaid = newCapturedTotal >= capLimit - 1e-9;
+		const paymentStateSet = guardDirectHotelRunnerGuestPaymentCommissionSet({
+			reservation: updated || r,
+			set: {
+				payment: fullyPaid ? "paid online" : "deposit paid",
+				commissionPaid: true,
+				financeStatus: fullyPaid ? "paid" : "authorized",
+			},
+		}).set;
 
 		updated = await Reservations.findByIdAndUpdate(
 			reservationId,
 			{
-				$set: {
-					payment: fullyPaid ? "paid online" : "deposit paid",
-					commissionPaid: true,
-					financeStatus: fullyPaid ? "paid" : "authorized",
-				},
+				$set: paymentStateSet,
 			},
 			{ new: true },
 		).populate("hotelId");
@@ -5149,11 +5160,15 @@ exports.linkPayReservation = async (req, res) => {
 				if (srcCard.billing_address)
 					setOps["paypal_details.billing_address"] = srcCard.billing_address;
 			}
+			const guardedSetOps = guardDirectHotelRunnerGuestPaymentCommissionSet({
+				reservation,
+				set: setOps,
+			}).set;
 
 			const incOps = paidSar > 0 ? { paid_amount: paidSar } : null;
 			const updated = await Reservations.findByIdAndUpdate(
 				reservation._id,
-				{ ...(incOps ? { $inc: incOps } : {}), $set: setOps },
+				{ ...(incOps ? { $inc: incOps } : {}), $set: guardedSetOps },
 				{ new: true },
 			).populate("hotelId");
 
@@ -5530,15 +5545,19 @@ exports.linkPayReservation = async (req, res) => {
 			updated?.paypal_details?.captured_total_usd || 0,
 		);
 		const fullyPaid = newCapturedTotal >= toNumber2(limit) - 1e-9;
+		const paymentStateSet = guardDirectHotelRunnerGuestPaymentCommissionSet({
+			reservation: updated || reservation,
+			set: {
+				payment: fullyPaid ? "paid online" : "deposit paid",
+				commissionPaid: true,
+				financeStatus: fullyPaid ? "paid" : "authorized",
+			},
+		}).set;
 
 		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
 			{
-				$set: {
-					payment: fullyPaid ? "paid online" : "deposit paid",
-					commissionPaid: true,
-					financeStatus: fullyPaid ? "paid" : "authorized",
-				},
+				$set: paymentStateSet,
 			},
 			{ new: true },
 		).populate("hotelId");

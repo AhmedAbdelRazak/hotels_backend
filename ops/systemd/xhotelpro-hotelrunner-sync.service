@@ -1,0 +1,40 @@
+[Unit]
+Description=xHotelPro HotelRunner reservation projection worker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ahmedadmin
+Group=ahmedadmin
+WorkingDirectory=/home/ahmedadmin/Hotels/hotels_backend
+Environment=NODE_ENV=production
+ExecStartPre=/usr/bin/test -r /home/ahmedadmin/Hotels/hotels_backend/.env
+ExecStartPre=/usr/bin/test -f /home/ahmedadmin/Hotels/hotels_backend/workers/hotelrunnerSyncWorker.js
+ExecStart=/usr/bin/node /home/ahmedadmin/Hotels/hotels_backend/workers/hotelrunnerSyncWorker.js
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+UMask=0077
+MemoryMax=256M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xhotelpro-hotelrunner-sync
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -13,6 +13,10 @@ const {
 	resolveAuditViewerFromRequest,
 	sanitizeReservationAuditLogsCollectionForViewer,
 } = require("../services/auditPrivacy");
+const {
+	resolveHotelRunnerPlatformCommission,
+	summarizeHotelRunnerFinanceUnavailable,
+} = require("../services/hotelrunnerPlatformFinance");
 
 const SINCE_UTC = new Date("2025-06-01T00:00:00.000Z");
 
@@ -146,6 +150,61 @@ function isCommissionPaid(r) {
 }
 const n2 = (v) => Number(Number(v || 0).toFixed(2));
 
+const deriveReservationPayoutFinance = (reservation = {}) => {
+	const hotelRunnerCommission =
+		resolveHotelRunnerPlatformCommission(reservation);
+	if (
+		hotelRunnerCommission.isHotelRunner &&
+		!hotelRunnerCommission.available
+	) {
+		return {
+			available: false,
+			commissionSAR: null,
+			payoutSAR: null,
+			reason: hotelRunnerCommission.reason,
+		};
+	}
+
+	const stored = Number(reservation?.commission || 0);
+	const commissionSAR = n2(
+		hotelRunnerCommission.isHotelRunner
+			? hotelRunnerCommission.amount
+			: stored > 0
+			? stored
+			: computeCommissionFromPickedRooms(
+					reservation?.pickedRoomsType || []
+			  )
+	);
+	return {
+		available: true,
+		commissionSAR,
+		payoutSAR: n2(Number(reservation?.total_amount || 0) - commissionSAR),
+		reason: "",
+	};
+};
+
+const withDerivedPayoutFinance = (reservation = {}) => {
+	const finance = deriveReservationPayoutFinance(reservation);
+	return {
+		...reservation,
+		hotelrunner_finance_available: finance.available,
+		hotelrunner_finance_unavailable_reason: finance.reason || undefined,
+		computed_commission_sar: finance.commissionSAR,
+		computed_online_payout_sar: finance.payoutSAR,
+	};
+};
+
+const rejectUnreviewedHotelRunnerFinanceMutation = (reservation, res) => {
+	const finance = resolveHotelRunnerPlatformCommission(reservation);
+	if (!finance.isHotelRunner || finance.available) return false;
+	res.status(409).json({
+		message:
+			"HotelRunner platform commission must be explicitly reviewed before payout or commission status changes.",
+		code: finance.reason,
+	});
+	return true;
+};
+
 /** Collect helper for summaries: returns gross, commission, and net */
 const collect = (arr) => {
 	const totalSAR = arr.reduce((a, x) => a + Number(x?.total_amount || 0), 0);
@@ -262,6 +321,10 @@ exports.listAdminPayouts = async (req, res) => {
 			moneyTransferredToHotel: 1,
 			moneyTransferredAt: 1,
 			commissionData: 1,
+			financial_cycle: 1,
+			"adminPricing.mode": 1,
+			"supplierData.hotelRunner.transport": 1,
+			"supplierData.otaAutomationPipeline": 1,
 			adminChangeLog: { $slice: -12 },
 			adminLastUpdatedAt: 1,
 			adminLastUpdatedBy: 1,
@@ -283,26 +346,23 @@ exports.listAdminPayouts = async (req, res) => {
 			hotels.map((h) => [String(h._id), h.hotelName || "—"])
 		);
 
-		const derived = included.map((r) => {
+		const allDerived = included.map((r) => {
 			const pay = summarizePayment(r);
-			const stored = Number(r?.commission || 0);
-			const comm =
-				stored > 0
-					? stored
-					: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-			const commissionSAR = n2(comm);
-			const payoutOnlineSAR = n2(Number(r?.total_amount || 0) - commissionSAR);
 			return {
-				...r,
+				...withDerivedPayoutFinance(r),
 				hotelName: hotelMap.get(String(r.hotelId)) || "—",
 				computed_payment_status: pay.status,
 				computed_payment_channel: pay.channel,
-				computed_commission_sar: commissionSAR,
-				computed_online_payout_sar: payoutOnlineSAR,
 				commissionPaid: isCommissionPaid(r),
 				eligibleForHotelTransfer: pay.channel === "online",
 			};
 		});
+		const financeUnavailable = allDerived.filter(
+			(r) => r.hotelrunner_finance_available === false
+		);
+		const derived = allDerived.filter(
+			(r) => r.hotelrunner_finance_available !== false
+		);
 
 		const isOffline = (x) =>
 			x.computed_payment_channel === "offline" ||
@@ -323,6 +383,7 @@ exports.listAdminPayouts = async (req, res) => {
 		);
 
 		const summary = {
+			unavailable: summarizeHotelRunnerFinanceUnavailable(financeUnavailable),
 			pending: {
 				offline: collect(pendingOffline),
 				online: collect(onlineNotTransferred),
@@ -410,38 +471,40 @@ exports.getAdminPayoutsOverview = async (req, res) => {
 			commission: 1,
 			commissionPaid: 1,
 			commissionStatus: 1,
+			commissionData: 1,
+			financial_cycle: 1,
+			"adminPricing.mode": 1,
+			"supplierData.hotelRunner.transport": 1,
+			"supplierData.otaAutomationPipeline": 1,
 			moneyTransferredToHotel: 1,
 			checkin_date: 1,
 			checkout_date: 1,
 			createdAt: 1,
 		}).lean();
 
-		const derived = raw
+		const allDerived = raw
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const pay = summarizePayment(r);
-				const stored = Number(r?.commission || 0);
-				const commSar =
-					stored > 0
-						? stored
-						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
 				return {
-					...r,
+					...withDerivedPayoutFinance(r),
 					computed_payment_status: pay.status,
 					computed_payment_channel: pay.channel,
-					computed_commission_sar: n2(commSar),
 					commissionPaid: isCommissionPaid(r),
 					eligibleForHotelTransfer: pay.channel === "online",
 				};
 			});
+		const financeUnavailable = allDerived.filter(
+			(r) => r.hotelrunner_finance_available === false
+		);
+		const derived = allDerived.filter(
+			(r) => r.hotelrunner_finance_available !== false
+		);
 
 		const sum = (arr, get) => arr.reduce((a, x) => a + Number(get(x) || 0), 0);
 		const sumNet = (arr) =>
 			arr.reduce(
-				(a, r) =>
-					a +
-					(Number(r?.total_amount || 0) -
-						Number(r?.computed_commission_sar || 0)),
+				(a, r) => a + Number(r?.computed_online_payout_sar || 0),
 				0
 			);
 
@@ -531,7 +594,11 @@ exports.getAdminPayoutsOverview = async (req, res) => {
 			},
 		};
 
-		const summary = { ...legacy, ...nested };
+		const summary = {
+			...legacy,
+			...nested,
+			unavailable: summarizeHotelRunnerFinanceUnavailable(financeUnavailable),
+		};
 
 		res.set("Cache-Control", "no-cache, no-store, must-revalidate");
 		res.set("Pragma", "no-cache");
@@ -562,9 +629,7 @@ exports.updateCommissionStatus = async (req, res) => {
 		if (!canAccessPayoutReservation(req, r)) {
 			return res.status(403).json({ message: "Hotel payout access denied." });
 		}
-		if (!canAccessPayoutReservation(req, r)) {
-			return res.status(403).json({ message: "Hotel payout access denied." });
-		}
+		if (rejectUnreviewedHotelRunnerFinanceMutation(r, res)) return;
 
 		const prevPaid = !!r.commissionPaid;
 		const nextPaid = !!commissionPaid;
@@ -647,6 +712,7 @@ exports.updateTransferStatus = async (req, res) => {
 		if (!canAccessPayoutReservation(req, r)) {
 			return res.status(403).json({ message: "Hotel payout access denied." });
 		}
+		if (rejectUnreviewedHotelRunnerFinanceMutation(r, res)) return;
 
 		const prevTr = !!r.moneyTransferredToHotel;
 		const nextTr = !!moneyTransferredToHotel;
@@ -722,6 +788,10 @@ exports.updateReservationPayoutFlags = async (req, res) => {
 		const by = getAdminActor(req);
 		const r = await Reservations.findById(reservationId).lean();
 		if (!r) return res.status(404).json({ message: "Reservation not found." });
+		if (!canAccessPayoutReservation(req, r)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
+		}
+		if (rejectUnreviewedHotelRunnerFinanceMutation(r, res)) return;
 
 		const now = new Date();
 		const $set = {};
@@ -841,6 +911,11 @@ exports.autoReconcileHotel = async (req, res) => {
 			total_amount: 1,
 			pickedRoomsType: 1,
 			commission: 1,
+			commissionData: 1,
+			financial_cycle: 1,
+			"adminPricing.mode": 1,
+			"supplierData.hotelRunner.transport": 1,
+			"supplierData.otaAutomationPipeline": 1,
 			reservation_status: 1,
 			payment: 1,
 			payment_details: 1,
@@ -867,23 +942,30 @@ exports.autoReconcileHotel = async (req, res) => {
 		const included = rows.filter((r) => statusIncluded(r?.reservation_status));
 
 		// derive channel + amounts
-		const derived = included.map((r) => {
+		const allDerived = included.map((r) => {
 			const pay = summarizePayment(r);
-			const stored = Number(r?.commission || 0);
-			const comm =
-				stored > 0
-					? stored
-					: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-			const commissionSAR = n2(comm);
-			const netToHotel = n2(Number(r?.total_amount || 0) - commissionSAR);
 			return {
-				...r,
+				...withDerivedPayoutFinance(r),
 				computed_payment_channel: pay.channel,
-				computed_commission_sar: commissionSAR,
-				computed_online_payout_sar: netToHotel,
 				commissionPaid: isCommissionPaid(r),
 			};
 		});
+		const financeUnavailable = allDerived.filter(
+			(r) => r.hotelrunner_finance_available === false
+		);
+		const derived = allDerived.filter(
+			(r) => r.hotelrunner_finance_available !== false
+		);
+		const unavailable =
+			summarizeHotelRunnerFinanceUnavailable(financeUnavailable);
+		if (unavailable.count > 0) {
+			return res.status(409).json({
+				message:
+					"HotelRunner platform commission review is required before automatic reconciliation.",
+				code: "hotelrunner_platform_finance_review_required",
+				unavailable,
+			});
+		}
 
 		// Pools
 		const onlineDue = derived.filter(
@@ -927,6 +1009,7 @@ exports.autoReconcileHotel = async (req, res) => {
 				ok: true,
 				reconciled: 0,
 				message: "Nothing to reconcile.",
+				unavailable,
 				hotel_wallet: hotelBalance,
 				platform_wallet: platformBalance,
 			});
@@ -1039,6 +1122,7 @@ exports.autoReconcileHotel = async (req, res) => {
 				reconciled: 0,
 				message:
 					"Could not find a viable subset to reconcile (within tolerance).",
+				unavailable,
 			});
 		}
 
@@ -1156,21 +1240,13 @@ exports.autoReconcileHotel = async (req, res) => {
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const pay = summarizePayment(r);
-				const stored = Number(r?.commission || 0);
-				const comm =
-					stored > 0
-						? stored
-						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-				const commissionSAR = n2(comm);
-				const netToHotel = n2(Number(r?.total_amount || 0) - commissionSAR);
 				return {
-					...r,
+					...withDerivedPayoutFinance(r),
 					computed_payment_channel: pay.channel,
-					computed_commission_sar: commissionSAR,
-					computed_online_payout_sar: netToHotel,
 					commissionPaid: isCommissionPaid(r),
 				};
-			});
+			})
+			.filter((r) => r.hotelrunner_finance_available !== false);
 
 		const afterOnlineDue = afterInc.filter(
 			(r) =>
@@ -1221,6 +1297,7 @@ exports.autoReconcileHotel = async (req, res) => {
 			hotelId,
 			batchKey,
 			settledSAR: Number(settled),
+			unavailable,
 			offline: {
 				count: chosenOffline.length,
 				confirmation_numbers: chosenOffline.map((r) => r.confirmation_number),
@@ -1264,4 +1341,9 @@ exports.listHotelsLite = async (req, res) => {
 		console.error("listHotelsLite:", e);
 		return res.status(500).json({ message: "Failed to list hotels." });
 	}
+};
+
+exports.__hotelRunnerPlatformFinanceTest = {
+	deriveReservationPayoutFinance,
+	withDerivedPayoutFinance,
 };

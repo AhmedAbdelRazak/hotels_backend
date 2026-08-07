@@ -15,6 +15,17 @@ const parseBoolean = (value, fallback = false) => {
 	return fallback;
 };
 
+const parseBooleanSetting = (env, key, fallback, errors) => {
+	if (!Object.prototype.hasOwnProperty.call(env, key)) return fallback;
+	const text = clean(env[key]).toLowerCase();
+	if (["1", "true", "yes", "on"].includes(text)) return true;
+	if (["0", "false", "no", "off"].includes(text)) return false;
+	errors.push(
+		`${key} must be an explicit boolean (true/false, yes/no, on/off, or 1/0).`
+	);
+	return false;
+};
+
 const boundedInteger = (value, fallback, min, max) => {
 	const parsed = Number.parseInt(value, 10);
 	if (!Number.isFinite(parsed)) return fallback;
@@ -34,17 +45,50 @@ const parseSupportedHotelIds = (value = "") =>
 		)
 	);
 
+const parseIsoTimestamp = (value = "") => {
+	const text = clean(value);
+	const match = text.match(
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|([+-])(\d{2}):(\d{2}))$/
+	);
+	if (!match) return null;
+	const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = [
+		match[1],
+		match[2],
+		match[3],
+		match[4],
+		match[5],
+		match[6],
+		match[8],
+		match[9],
+	].map(Number);
+	if (
+		year < 1 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > new Date(Date.UTC(year, month, 0)).getUTCDate() ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 ||
+		(match[7] && (offsetHour > 23 || offsetMinute > 59))
+	) {
+		return null;
+	}
+	const parsed = new Date(text);
+	return Number.isFinite(parsed.getTime()) ? parsed : null;
+};
+
 function getHotelRunnerConfig(env = process.env) {
 	const token = clean(env.HOTELRUNNER_API_TOKEN);
 	const hrId = clean(env.HOTELRUNNER_API_HR_ID);
 	const supportedHotelIds = parseSupportedHotelIds(
 		env.HOTELRUNNER_SUPPORTED_HOTELIDS
 	);
-	const errors = [];
-	if (!token) errors.push("HOTELRUNNER_API_TOKEN is not configured.");
-	if (!hrId) errors.push("HOTELRUNNER_API_HR_ID is not configured.");
+	const callbackErrors = [];
+	if (!token) callbackErrors.push("HOTELRUNNER_API_TOKEN is not configured.");
+	if (!hrId) callbackErrors.push("HOTELRUNNER_API_HR_ID is not configured.");
 	if (supportedHotelIds.length !== 1) {
-		errors.push(
+		callbackErrors.push(
 			"Exactly one HOTELRUNNER_SUPPORTED_HOTELIDS value is required for this property credential."
 		);
 	}
@@ -52,10 +96,52 @@ function getHotelRunnerConfig(env = process.env) {
 		supportedHotelIds.length === 1 &&
 		!mongoose.Types.ObjectId.isValid(supportedHotelIds[0])
 	) {
-		errors.push("The configured HotelRunner PMS hotel identifier is invalid.");
+		callbackErrors.push("The configured HotelRunner PMS hotel identifier is invalid.");
+	}
+	const errors = [...callbackErrors];
+	const pullEnabled = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_PULL_ENABLED",
+		false,
+		errors
+	);
+	const roomListSyncEnabled = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_ROOM_LIST_SYNC_ENABLED",
+		false,
+		errors
+	);
+	const projectionEnabled = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_PROJECTION_ENABLED",
+		false,
+		errors
+	);
+	const confirmDeliveryEnabled = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_CONFIRM_DELIVERY_ENABLED",
+		false,
+		errors
+	);
+	const projectionNotBefore = parseIsoTimestamp(
+		env.HOTELRUNNER_PROJECTION_NOT_BEFORE
+	);
+	if (projectionEnabled && !projectionNotBefore) {
+		errors.push(
+			"HOTELRUNNER_PROJECTION_NOT_BEFORE must be a timezone-qualified ISO timestamp when HotelRunner projection is enabled."
+		);
+	}
+	if (projectionEnabled && pullEnabled) {
+		errors.push(
+			"HOTELRUNNER_PULL_ENABLED and HOTELRUNNER_PROJECTION_ENABLED cannot both be true during the push-only activation phase."
+		);
 	}
 
 	return {
+		// Callback availability depends only on the credential/property boundary.
+		// Worker-only safety errors must stop the worker without making HotelRunner
+		// retry a callback that this process can still authenticate and archive.
+		callbackConfigured: callbackErrors.length === 0,
 		configured: errors.length === 0,
 		errors,
 		token,
@@ -65,18 +151,22 @@ function getHotelRunnerConfig(env = process.env) {
 			hrId && token ? fingerprint(`${hrId}\u0000${token}`) : "",
 		hotelId: supportedHotelIds.length === 1 ? supportedHotelIds[0] : "",
 		apiBaseUrl: clean(env.HOTELRUNNER_API_BASE_URL) || API_BASE_URL,
-		pullEnabled: parseBoolean(env.HOTELRUNNER_PULL_ENABLED, true),
+		// Historical reconciliation is opt-in. The explicit room-list command can
+		// still discover mappings while this background reservation pull is off.
+		pullEnabled,
+		roomListSyncEnabled,
 		// Projection is a separate activation gate. A new property can safely
 		// discover rooms and archive deliveries before any existing PMS reservation
 		// is created, updated, or cancelled.
-		projectionEnabled: parseBoolean(
-			env.HOTELRUNNER_PROJECTION_ENABLED,
-			false
-		),
-		// Delivery confirmation is intentionally disabled. HotelRunner pull
-		// acknowledgements are only safe after the local projection succeeds and
-		// the real PMS number is known; the reconciliation pull does not need them.
-		confirmPulledDeliveryEnabled: false,
+		projectionEnabled,
+		projectionNotBefore,
+		projectionNotBeforeIso: projectionNotBefore
+			? projectionNotBefore.toISOString()
+			: "",
+		// Keep the existing property name for status/API compatibility. The client
+		// enforces this gate again at the actual PUT boundary.
+		confirmDeliveryEnabled,
+		confirmPulledDeliveryEnabled: confirmDeliveryEnabled,
 		pullIntervalMinutes: boundedInteger(
 			env.HOTELRUNNER_PULL_INTERVAL_MINUTES,
 			30,
@@ -136,5 +226,7 @@ module.exports = {
 	fingerprint,
 	getHotelRunnerConfig,
 	parseBoolean,
+	parseBooleanSetting,
+	parseIsoTimestamp,
 	parseSupportedHotelIds,
 };

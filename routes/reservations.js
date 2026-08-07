@@ -104,13 +104,13 @@ router.get(
 
 router.get(
 	"/collected-reservations/list/:status/:page/:records/:hotelId",
-	optionalSignin,
+	requireSignin,
 	CollectedReservations
 );
 
 router.get(
 	"/aggregated-collected-reservations/list/:status/:page/:records/:hotelId",
-	optionalSignin,
+	requireSignin,
 	aggregateCollectedReservations
 );
 
@@ -281,35 +281,35 @@ router.get(
 
 router.get(
 	"/reservations-summary-checkedout/:accountId/:channel/:startDate/:endDate",
-	optionalSignin,
+	requireSignin,
 	totalCheckoutRecords
 );
 router.get(
 	"/reservations-checkedout/:page/:records/:accountId/:channel/:startDate/:endDate",
-	optionalSignin,
+	requireSignin,
 	checkedoutReport
 );
 
 router.get(
 	"/reservations-pending/:page/:records/:hotelId",
-	optionalSignin,
+	requireSignin,
 	pendingPaymentReservations
 );
 
 router.get(
 	"/reservations-paid-commission/:page/:records/:hotelId",
-	optionalSignin,
+	requireSignin,
 	commissionPaidReservations
 );
 
 router.get(
 	"/general-report-reservations/list/:accountId/:channel/:startDate/:endDate/:dateBy/:noshow/:cancel/:inhouse/:checkedout/:payment",
-	optionalSignin,
+	requireSignin,
 	totalGeneralReservationsRecords
 );
 router.get(
 	"/reservations-general-report/:page/:records/:accountId/:channel/:startDate/:endDate/:dateBy/:noshow/:cancel/:inhouse/:checkedout/:payment",
-	optionalSignin,
+	requireSignin,
 	generalReservationsReport
 );
 

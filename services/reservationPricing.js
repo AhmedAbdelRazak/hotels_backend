@@ -9,6 +9,9 @@ const {
 	agentIdFromReservation,
 	getAgentPricingForDate,
 } = require("./agentRoomOverrides");
+const {
+	hasDirectHotelRunnerProjection,
+} = require("./hotelrunnerOtaEmailBoundary");
 
 class ReservationPricingError extends Error {
 	constructor(message, statusCode = 400, code = "reservation_pricing_error", details = {}) {
@@ -582,6 +585,75 @@ const roomIdentitiesAreSame = (left = [], right = []) => {
 	);
 };
 
+const roomSelectionsAreSame = (left = [], right = []) => {
+	const leftRooms = Array.isArray(left) ? left : [];
+	const rightRooms = Array.isArray(right) ? right : [];
+	if (!roomIdentitiesAreSame(leftRooms, rightRooms)) return false;
+	return leftRooms.every(
+		(room, index) =>
+			normalizeRoomCount(room?.count) ===
+			normalizeRoomCount(rightRooms[index]?.count)
+	);
+};
+
+const preserveHotelRunnerSourcePricingForOrdinaryEdit = ({
+	existing = {},
+	updates = {},
+	stayDates = [],
+	dateChanged = false,
+	hotelChanged = false,
+	keepCommission = false,
+} = {}) => {
+	const incomingRooms = hasOwn(updates, "pickedRoomsType")
+		? updates.pickedRoomsType
+		: null;
+	const incomingPricingRooms = hasOwn(updates, "pickedRoomsPricing")
+		? updates.pickedRoomsPricing
+		: null;
+	const existingRooms = Array.isArray(existing.pickedRoomsType)
+		? existing.pickedRoomsType
+		: [];
+	const existingPricingRooms =
+		Array.isArray(existing.pickedRoomsPricing) &&
+		existing.pickedRoomsPricing.length > 0
+			? existing.pickedRoomsPricing
+			: existingRooms;
+	const selectionChanged =
+		(Array.isArray(incomingRooms) &&
+			incomingRooms.length > 0 &&
+			!roomSelectionsAreSame(incomingRooms, existingRooms)) ||
+		(Array.isArray(incomingPricingRooms) &&
+			incomingPricingRooms.length > 0 &&
+			!roomSelectionsAreSame(
+				incomingPricingRooms,
+				existingPricingRooms
+			));
+
+	if (hotelChanged || selectionChanged) {
+		throw new ReservationPricingError(
+			"HotelRunner-owned room or property changes require the authorized pricing workflow so source pricing cannot be replaced by local calendar prices.",
+			409,
+			"hotelrunner_source_pricing_requires_pricing_payload"
+		);
+	}
+
+	[
+		"pickedRoomsType",
+		"pickedRoomsPricing",
+		"total_rooms",
+		"total_amount",
+		"sub_total",
+		"adminPricing",
+		"adminPricingVisibility",
+	].forEach((field) => {
+		delete updates[field];
+	});
+	if (!keepCommission) delete updates.commission;
+	if (dateChanged) updates.days_of_residence = stayDates.length;
+	else delete updates.days_of_residence;
+	return updates;
+};
+
 const findExistingRoomFor = (existingRooms = [], room = {}, index = 0) => {
 	const byIndex = Array.isArray(existingRooms) ? existingRooms[index] : null;
 	if (byIndex && roomIdentity(byIndex) === roomIdentity(room)) return byIndex;
@@ -1009,11 +1081,15 @@ const normalizeReservationStayPricing = async (
 	const checkoutTouched = hasOwn(updates, "checkout_date");
 	const dateTouched = checkinTouched || checkoutTouched;
 	const hotelTouched = hasOwn(updates, "hotelId");
+	const ownerTouched = hasOwn(updates, "belongsTo");
 	const roomFieldsSent =
 		hasOwn(updates, "pickedRoomsType") || hasOwn(updates, "pickedRoomsPricing");
 
 	const nextHotelId = normalizeId(
 		hotelTouched ? updates.hotelId : existing.hotelId
+	);
+	const nextOwnerId = normalizeId(
+		ownerTouched ? updates.belongsTo : existing.belongsTo
 	);
 	const agentId = normalizeId(
 		agentIdFromReservation(updates) || agentIdFromReservation(existing)
@@ -1022,6 +1098,44 @@ const normalizeReservationStayPricing = async (
 	const nextCheckout = checkoutTouched
 		? updates.checkout_date
 		: existing.checkout_date;
+	const dateChanged =
+		(checkinTouched &&
+			dateOnlyKey(nextCheckin) !== dateOnlyKey(existing.checkin_date)) ||
+		(checkoutTouched &&
+			dateOnlyKey(nextCheckout) !== dateOnlyKey(existing.checkout_date));
+	const hotelChanged =
+		hotelTouched && nextHotelId !== normalizeId(existing.hotelId);
+	const ownerChanged =
+		ownerTouched && nextOwnerId !== normalizeId(existing.belongsTo);
+
+	if (
+		hasDirectHotelRunnerProjection(existing) &&
+		(hotelChanged || ownerChanged)
+	) {
+		throw new ReservationPricingError(
+			"HotelRunner-owned property assignments can only be changed by the HotelRunner projection.",
+			409,
+			"hotelrunner_source_property_requires_projection",
+			{ hotelChanged, ownerChanged }
+		);
+	}
+
+	if (dateChanged && hasDirectHotelRunnerProjection(existing)) {
+		throw new ReservationPricingError(
+			"HotelRunner-owned stay dates can only be changed by the HotelRunner projection.",
+			409,
+			"hotelrunner_source_stay_dates_require_projection",
+			{
+				checkinChanged:
+					checkinTouched &&
+					dateOnlyKey(nextCheckin) !== dateOnlyKey(existing.checkin_date),
+				checkoutChanged:
+					checkoutTouched &&
+					dateOnlyKey(nextCheckout) !== dateOnlyKey(existing.checkout_date),
+			}
+		);
+	}
+
 	const stayDates = buildStayDateKeys(nextCheckin, nextCheckout);
 
 	if (dateTouched && stayDates.length === 0) {
@@ -1035,14 +1149,6 @@ const normalizeReservationStayPricing = async (
 	if (!stayDates.length) {
 		return updates;
 	}
-
-	const dateChanged =
-		(checkinTouched &&
-			dateOnlyKey(nextCheckin) !== dateOnlyKey(existing.checkin_date)) ||
-		(checkoutTouched &&
-			dateOnlyKey(nextCheckout) !== dateOnlyKey(existing.checkout_date));
-	const hotelChanged =
-		hotelTouched && nextHotelId !== normalizeId(existing.hotelId);
 
 	if (dateChanged) {
 		updates.days_of_residence = stayDates.length;
@@ -1091,6 +1197,19 @@ const normalizeReservationStayPricing = async (
 			!roomIdentitiesAreSame(rooms, existingRooms)) ||
 		(hasOwn(updates, "pickedRoomsPricing") &&
 			!roomIdentitiesAreSame(pricingRooms, existingPricingRooms));
+	if (
+		hasDirectHotelRunnerProjection(existing) &&
+		(dateChanged || hotelChanged || roomFieldsSent)
+	) {
+		return preserveHotelRunnerSourcePricingForOrdinaryEdit({
+			existing,
+			updates,
+			stayDates,
+			dateChanged,
+			hotelChanged,
+			keepCommission: options.keepExplicitCommission === true,
+		});
+	}
 	const primaryRoomsComplete = roomsHaveCompleteStayPricing(
 		primaryRooms,
 		stayDates
