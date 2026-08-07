@@ -29,6 +29,10 @@ const {
 	hotelRunnerEmailCommercialEvidenceHash,
 	validateReservationOtaIdentityConsistency,
 } = require("./otaReservationMapper");
+const {
+	isOtaPlatformReviewPending,
+	validateOtaPlatformReviewActionState,
+} = require("./otaReservationVisibility");
 
 const LOCAL_DOUBLE_ID = "64b000000000000000000101";
 const LOCAL_TRIPLE_ID = "64b000000000000000000102";
@@ -409,6 +413,7 @@ function createInMemoryProjectionSystem() {
 		hotel: {
 			_id: "64b000000000000000000001",
 			belongsTo: "64b000000000000000000002",
+			hotelName: "Zad AJYAD Hotel",
 			currency: "SAR",
 			roomCountDetails: localRooms,
 		},
@@ -723,6 +728,54 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	);
 });
 
+test("review mode uses the existing canonical OTA review lifecycle with HotelRunner metadata", () => {
+	const normalized = normalizedMultiRoom();
+	const pricing = buildPickedRoomsProjection(
+		normalized,
+		resolvedRooms(normalized)
+	);
+	const document = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "event-review-mode" },
+		hotel: {
+			_id: "64b000000000000000000001",
+			belongsTo: "64b000000000000000000002",
+			hotelName: "Zad AJYAD Hotel",
+			currency: "SAR",
+		},
+		pricing,
+		confirmationNumber: "PMS-HR-REVIEW-1",
+		reservationMongoId: "64b000000000000000000003",
+		config: { requireOtaReview: true },
+	});
+
+	assert.equal(document.state, "OTA Platform Review");
+	assert.equal(document.reservation_status, "OTA Platform Review");
+	assert.equal(document.pendingConfirmation, undefined);
+	assert.equal(document.otaPlatformReview.status, "pending");
+	assert.equal(document.otaPlatformReview.source, "hotelrunner_api");
+	assert.equal(document.otaPlatformReview.hotelRunnerManaged, true);
+	assert.equal(document.otaPlatformReview.provider, "booking");
+	assert.equal(document.otaPlatformReview.confirmationNumber, "BOOKING-101");
+	assert.equal(document.otaPlatformReview.hotelAssignmentRequired, false);
+	assert.equal(document.otaPlatformReview.hotelAssignmentStatus, "assigned");
+	assert.equal(
+		document.otaPlatformReview.assignedHotelId,
+		"64b000000000000000000001"
+	);
+	assert.equal(document.otaPlatformReview.roomMappingStatus, "mapped");
+	assert.equal(document.adminPricingVisibility.rootOnlyForHotelManagement, true);
+	assert.equal(document.adminPricingVisibility.source, "hotelrunner_api");
+	assert.equal(isOtaPlatformReviewPending(document), true);
+	assert.deepEqual(validateOtaPlatformReviewActionState(document), {
+		ready: true,
+	});
+	assert.equal(
+		document.supplierData.hotelRunner.transport,
+		"hotelrunner_api"
+	);
+});
+
 test("HotelRunner create surfaces the durable overbooking snapshot as attention data", async () => {
 	const system = createInMemoryProjectionSystem();
 	const normalized = normalizedMultiRoom({
@@ -934,6 +987,54 @@ test("reserved bookings block inventory locally until HotelRunner confirms them"
 	);
 });
 
+test("review mode routes a HotelRunner reserved-to-confirmed transition into OTA review", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const reserved = normalizedMultiRoom({
+		message_uid: "review-mode-reserved-1",
+		state: "reserved",
+		requires_response: true,
+		updated_at: "2026-08-06T11:00:00.000Z",
+	});
+	assert.equal(
+		(
+			await projectHotelRunnerReservation(
+				{
+					normalized: reserved,
+					event: { payload: reserved.storedPayload },
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			)
+		).status,
+		"created"
+	);
+	assert.equal(system.reservations[0].state, "Pending Confirmation");
+
+	const confirmed = normalizedMultiRoom({
+		message_uid: "review-mode-reserved-confirmed-2",
+		state: "confirmed",
+		modified: true,
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: confirmed,
+			event: { payload: confirmed.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(system.reservations[0].reservation_status, "OTA Platform Review");
+	assert.equal(system.reservations[0].otaPlatformReview.status, "pending");
+	assert.equal(system.reservations[0].otaPlatformReview.source, "hotelrunner_api");
+});
+
 test("authoritative HotelRunner confirmation upgrades an untouched email-ingested pending match", async () => {
 	const system = createInMemoryProjectionSystem();
 	const normalized = normalizedMultiRoom({
@@ -990,6 +1091,72 @@ test("authoritative HotelRunner confirmation upgrades an untouched email-ingeste
 		"hotelrunner-background-worker"
 	);
 	assert.equal(system.reservations[0].supplierData.otaProvider, "booking");
+});
+
+test("review mode links an email-first OTA review without releasing or duplicating it", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-email-first-review-link",
+		state: "confirmed",
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const pricing = buildPickedRoomsProjection(normalized, resolvedRooms(normalized));
+	const existing = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "email-first-review-event" },
+		hotel: system.hotel,
+		pricing,
+		confirmationNumber: "PMS-EMAIL-REVIEW-1",
+		reservationMongoId: "64b000000000000000000099",
+		config: { requireOtaReview: true },
+	});
+	existing.otaPlatformReview = {
+		...existing.otaPlatformReview,
+		source: "ota_email_create",
+		inboundEmailId: "64b000000000000000000098",
+		hotelRunnerManaged: false,
+		hotelRunnerLinkedAt: null,
+		lastHotelRunnerUpdatedAt: null,
+		roomMappingStatus: "unreviewed",
+		roomMappingHotelId: "",
+	};
+	existing.adminPricingVisibility.source = "ota_email_create";
+	existing.supplierData.otaAutomationPipeline = "ota-email-orchestrator";
+	existing.supplierData.otaSourceAuthority = 1;
+	delete existing.supplierData.hotelRunner;
+	system.reservations.push(existing);
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(String(system.reservations[0]._id), String(existing._id));
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(system.reservations[0].reservation_status, "OTA Platform Review");
+	assert.equal(system.reservations[0].otaPlatformReview.status, "pending");
+	assert.equal(
+		system.reservations[0].otaPlatformReview.source,
+		"ota_email_create",
+		"the original email-review provenance remains auditable"
+	);
+	assert.equal(system.reservations[0].otaPlatformReview.hotelRunnerManaged, true);
+	assert.equal(
+		system.reservations[0].supplierData.hotelRunner.reservationId,
+		normalized.hotelRunnerReservationId
+	);
+	assert.equal(
+		system.reservations[0].supplierData.otaAutomationPipeline,
+		"hotelrunner-background-worker"
+	);
 });
 
 test("concurrent email and HotelRunner creates converge through the unique OTA identity", async () => {
@@ -1663,6 +1830,117 @@ test("critical ownership ignores transport room IDs but detects local room, date
 	]) {
 		assert.notDeepEqual(criticalOwnershipProjection(changed), owned);
 	}
+});
+
+test("review-mode create, modifications, redelivery, and cancellation keep one PMS reservation", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const confirmed = normalizedMultiRoom({
+		message_uid: "review-mode-confirmed-1",
+		updated_at: "2026-08-06T11:00:00.000Z",
+	});
+	const created = await projectHotelRunnerReservation(
+		{
+			normalized: confirmed,
+			event: { payload: confirmed.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(created.status, "created");
+	assert.equal(system.reservations.length, 1);
+	const reservationId = String(system.reservations[0]._id);
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(
+		system.reservations[0].reservation_status,
+		"OTA Platform Review"
+	);
+	assert.equal(system.reservations[0].otaPlatformReview.status, "pending");
+	assert.equal(system.reservations[0].otaPlatformReview.source, "hotelrunner_api");
+
+	const modified = normalizedMultiRoom({
+		message_uid: "review-mode-modified-2",
+		modified: true,
+		guest: "Updated Review Guest",
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const updated = await projectHotelRunnerReservation(
+		{
+			normalized: modified,
+			event: { payload: modified.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(updated.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(String(system.reservations[0]._id), reservationId);
+	assert.equal(system.reservations[0].customer_details.name, "Updated Review Guest");
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(system.reservations[0].reservation_status, "OTA Platform Review");
+	assert.equal(system.reservations[0].otaPlatformReview.status, "pending");
+
+	const redelivered = await projectHotelRunnerReservation(
+		{
+			normalized: modified,
+			event: { payload: modified.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(redelivered.status, "ignored");
+	assert.equal(redelivered.code, "hotelrunner_already_applied");
+	assert.equal(system.reservations.length, 1);
+
+	// Once created as a HotelRunner review, a configuration rollback must not
+	// silently release it. Only the existing staff release workflow may do that.
+	system.config.requireOtaReview = false;
+	const modifiedAfterFlagRollback = normalizedMultiRoom({
+		message_uid: "review-mode-modified-3",
+		modified: true,
+		guest: "Updated After Flag Rollback",
+		updated_at: "2026-08-06T13:00:00.000Z",
+	});
+	const updatedAfterFlagRollback = await projectHotelRunnerReservation(
+		{
+			normalized: modifiedAfterFlagRollback,
+			event: { payload: modifiedAfterFlagRollback.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(updatedAfterFlagRollback.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(String(system.reservations[0]._id), reservationId);
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(system.reservations[0].reservation_status, "OTA Platform Review");
+	assert.equal(system.reservations[0].otaPlatformReview.status, "pending");
+
+	const cancelled = normalizedMultiRoom({
+		message_uid: "review-mode-cancelled-4",
+		state: "canceled",
+		modified: true,
+		updated_at: "2026-08-06T14:00:00.000Z",
+	});
+	const cancelledResult = await projectHotelRunnerReservation(
+		{
+			normalized: cancelled,
+			event: { payload: cancelled.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(cancelledResult.status, "cancelled");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(String(system.reservations[0]._id), reservationId);
+	assert.equal(system.reservations[0].state, "cancelled");
+	assert.equal(system.reservations[0].reservation_status, "cancelled");
+	assert.equal(system.reservations[0].otaPlatformReview.status, "cancelled");
 });
 
 test("offline projection creates once, updates owned guest counts, preserves local counts, and cancels", async () => {

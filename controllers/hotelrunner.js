@@ -352,6 +352,7 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 				projectionEnabled: config.projectionEnabled,
 				projectionNotBefore: config.projectionNotBeforeIso || null,
 				confirmPulledDeliveryEnabled: config.confirmPulledDeliveryEnabled,
+				requireOtaReview: config.requireOtaReview,
 			},
 			hotel: { _id: hotel._id, hotelName: hotel.hotelName || "" },
 			queue: Object.fromEntries(eventCounts.map((row) => [row._id, row.count])),

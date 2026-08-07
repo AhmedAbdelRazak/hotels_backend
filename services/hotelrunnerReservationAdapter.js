@@ -20,6 +20,10 @@ const {
 	buildReservationSnapshotFilter,
 } = require("./otaReviewConcurrency");
 const {
+	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+	buildOtaReviewSnapshot,
+} = require("./otaReservationVisibility");
+const {
 	centsToAmount,
 	dateRange,
 	decimalToCents,
@@ -511,6 +515,30 @@ function hotelRunnerSupplierMetadata(
 	};
 }
 
+function hotelRunnerOtaReviewMetadata(normalized, hotel, now = new Date()) {
+	const externalConfirmation = hotelRunnerExternalAlias(normalized);
+	return {
+		...buildOtaReviewSnapshot({
+			source: "hotelrunner_api",
+			provider: hotelRunnerCommercialProvider(normalized),
+			providerLabel: commercialSourceLabel(normalized),
+			confirmationNumber: externalConfirmation,
+		}),
+		createdAt: now,
+		hotelRunnerManaged: true,
+		hotelRunnerLinkedAt: now,
+		lastHotelRunnerUpdatedAt: now,
+		hotelAssignmentRequired: false,
+		hotelAssignmentStatus: "assigned",
+		assignedHotelId: String(hotel._id),
+		assignedHotelName: hotel.hotelName || "",
+		assignedAt: now,
+		roomMappingStatus: "mapped",
+		roomMappingHotelId: String(hotel._id),
+		lastUpdatedAt: now,
+	};
+}
+
 function buildCreateReservationDocument({
 	normalized,
 	event,
@@ -518,6 +546,7 @@ function buildCreateReservationDocument({
 	pricing,
 	confirmationNumber,
 	reservationMongoId,
+	config = {},
 }) {
 	const sourceLabel = commercialSourceLabel(normalized);
 	const externalConfirmation = hotelRunnerExternalAlias(normalized);
@@ -531,6 +560,13 @@ function buildCreateReservationDocument({
 	);
 	const now = new Date();
 	const sourceConfirmed = normalized.state === "confirmed";
+	const requiresOtaReview =
+		sourceConfirmed && config.requireOtaReview === true;
+	const initialStatus = requiresOtaReview
+		? OTA_PLATFORM_REVIEW_RESERVATION_STATUS
+		: sourceConfirmed
+			? "confirmed"
+			: "Pending Confirmation";
 	const identityKeys = hotelRunnerOtaIdentityKeys(normalized);
 	if (!externalConfirmation || !identityKeys.otaIdentityKey) {
 		const error = new Error(
@@ -570,8 +606,8 @@ function buildCreateReservationDocument({
 			postalCode: normalized.address?.postalCode || "",
 			confirmation_number2: externalConfirmation,
 		},
-		state: sourceConfirmed ? "confirmed" : "Pending Confirmation",
-		reservation_status: sourceConfirmed ? "confirmed" : "Pending Confirmation",
+		state: initialStatus,
+		reservation_status: initialStatus,
 		pendingConfirmation: sourceConfirmed
 			? undefined
 			: {
@@ -633,6 +669,14 @@ function buildCreateReservationDocument({
 			sourceAmount: pricing.clientTotal,
 			payoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		},
+		adminPricingVisibility: requiresOtaReview
+			? {
+					rootOnlyForHotelManagement: true,
+					source: "hotelrunner_api",
+					appliedAt: now,
+					appliedBy: null,
+			  }
+			: undefined,
 		ota_financial_summary: {
 			show: false,
 			source: "hotelrunner_api",
@@ -651,6 +695,9 @@ function buildCreateReservationDocument({
 			sourceAmount: pricing.clientTotal,
 			payoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 		},
+		otaPlatformReview: requiresOtaReview
+			? hotelRunnerOtaReviewMetadata(normalized, hotel, now)
+			: undefined,
 		supplierData: {
 			supplierName: sourceLabel,
 			suppliedBookingNo: externalConfirmation,
@@ -981,13 +1028,29 @@ function isLocalTerminal(reservation = {}) {
 	return "";
 }
 
-function isPristinePendingOtaReview(reservation = {}) {
+function isCanonicalPendingOtaReview(reservation = {}) {
 	return Boolean(
 		clean(reservation.otaPlatformReview?.status).toLowerCase() === "pending" &&
 		comparable(reservation.state) === "ota platform review" &&
 		comparable(reservation.reservation_status) === "ota platform review" &&
 		!reservation.otaPlatformReview?.releasedAt &&
-		!reservation.otaPlatformReview?.releasedBy &&
+		!reservation.otaPlatformReview?.releasedBy
+	);
+}
+
+function isHotelRunnerManagedOtaReview(reservation = {}) {
+	return Boolean(
+		reservation.otaPlatformReview?.hotelRunnerManaged === true ||
+		clean(reservation.otaPlatformReview?.source).toLowerCase() ===
+			"hotelrunner_api" ||
+		clean(reservation.supplierData?.hotelRunner?.transport).toLowerCase() ===
+			"hotelrunner_api"
+	);
+}
+
+function isPristinePendingOtaReview(reservation = {}) {
+	return Boolean(
+		isCanonicalPendingOtaReview(reservation) &&
 		!(reservation.roomId || []).some(Boolean) &&
 		!reservation.orderTakeId &&
 		!reservation.createdByUserId &&
@@ -2031,6 +2094,8 @@ async function applyActiveUpdate({
 	existing,
 	pricing,
 	linkMethod,
+	hotel,
+	config = {},
 }, dependencies) {
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const terminal = isLocalTerminal(existing);
@@ -2045,12 +2110,27 @@ async function applyActiveUpdate({
 	const incomingProjection = projectionFromIncoming(normalized, pricing);
 	const priorProjection = mirror.lastAppliedProjection || {};
 	const hasPriorProjection = Boolean(mirror.appliedCanonicalHash);
+	const pendingOtaReview = isCanonicalPendingOtaReview(existing);
 	const pristineReview = isPristinePendingOtaReview(existing);
 	const hotelRunnerOwnedPending = isHotelRunnerOwnedPendingConfirmation(existing);
 	const crossTransportHandoff =
 		!hasPriorProjection && isEligibleCrossTransportHandoff(existing, linkMethod);
 	const crossTransportPending =
 		crossTransportHandoff && isSystemOwnedOtaPendingConfirmation(existing);
+	const reviewLifecycleManaged =
+		config.requireOtaReview === true || isHotelRunnerManagedOtaReview(existing);
+	const preservePendingOtaReview =
+		pendingOtaReview && reviewLifecycleManaged;
+	const preserveReleasedOtaReview = Boolean(
+		reviewLifecycleManaged &&
+		crossTransportPending &&
+		clean(existing.otaPlatformReview?.status).toLowerCase() === "released"
+	);
+	const enterOtaReviewFromHotelRunnerPending = Boolean(
+		config.requireOtaReview === true &&
+		hotelRunnerOwnedPending &&
+		normalized.state === "confirmed"
+	);
 	const currentCriticalOwnership = criticalOwnershipProjection(
 		currentProjection.critical
 	);
@@ -2239,7 +2319,12 @@ async function applyActiveUpdate({
 		}
 	}
 	const now = new Date();
-	if (pristineReview || hotelRunnerOwnedPending || crossTransportPending) {
+	if (
+		!preservePendingOtaReview &&
+		!preserveReleasedOtaReview &&
+		!enterOtaReviewFromHotelRunnerPending &&
+		(pristineReview || hotelRunnerOwnedPending || crossTransportPending)
+	) {
 		const sourceConfirmed = normalized.state === "confirmed";
 		set.state = sourceConfirmed ? "confirmed" : "Pending Confirmation";
 		set.reservation_status = sourceConfirmed
@@ -2262,10 +2347,40 @@ async function applyActiveUpdate({
 				existing.pendingConfirmation?.requestedAt || now;
 		}
 	}
-	if (pristineReview) {
+	if (pristineReview && !preservePendingOtaReview) {
 		set["otaPlatformReview.status"] = "released";
 		set["otaPlatformReview.releasedAt"] = now;
 		set["otaPlatformReview.releaseReason"] = "superseded_by_hotelrunner_api";
+	}
+	if (preservePendingOtaReview) {
+		set.state = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set.reservation_status = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set["otaPlatformReview.status"] = "pending";
+		set["otaPlatformReview.hotelRunnerManaged"] = true;
+		set["otaPlatformReview.hotelRunnerLinkedAt"] =
+			existing.otaPlatformReview?.hotelRunnerLinkedAt || now;
+		set["otaPlatformReview.lastHotelRunnerUpdatedAt"] = now;
+		set["otaPlatformReview.lastUpdatedAt"] = now;
+		set["adminPricingVisibility.rootOnlyForHotelManagement"] = true;
+	}
+	if (enterOtaReviewFromHotelRunnerPending) {
+		set.state = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set.reservation_status = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set.otaPlatformReview = hotelRunnerOtaReviewMetadata(
+			normalized,
+			hotel || { _id: existing.hotelId, hotelName: "" },
+			now
+		);
+		set["adminPricingVisibility.rootOnlyForHotelManagement"] = true;
+		set["adminPricingVisibility.source"] = "hotelrunner_api";
+		set["adminPricingVisibility.appliedAt"] = now;
+		set["adminPricingVisibility.appliedBy"] = null;
+	}
+	if (preserveReleasedOtaReview) {
+		set["otaPlatformReview.hotelRunnerManaged"] = true;
+		set["otaPlatformReview.hotelRunnerLinkedAt"] =
+			existing.otaPlatformReview?.hotelRunnerLinkedAt || now;
+		set["otaPlatformReview.lastHotelRunnerUpdatedAt"] = now;
 	}
 	set.hr_number = normalized.hrNumber || existing.hr_number || "";
 	set["supplierData.hotelRunner"] = hotelRunnerSupplierMetadata(
@@ -2384,6 +2499,7 @@ async function createReservation({
 	mirror,
 	hotel,
 	pricing,
+	config = {},
 }, dependencies) {
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const MirrorModel = dependencies.MirrorModel || HotelRunnerReservation;
@@ -2476,6 +2592,7 @@ async function createReservation({
 		pricing,
 		confirmationNumber,
 		reservationMongoId,
+		config,
 	});
 	let createdReservation = null;
 	try {
@@ -2896,11 +3013,13 @@ async function projectHotelRunnerReservation(
 					existing,
 					pricing,
 					linkMethod: linked.method,
+					hotel,
+					config,
 				},
 				dependencies
 		  )
 		: await createReservation(
-				{ normalized, event, mirror, hotel, pricing },
+				{ normalized, event, mirror, hotel, pricing, config },
 				dependencies
 		  );
 	if (["quarantined", "needs_mapping"].includes(result.status)) {

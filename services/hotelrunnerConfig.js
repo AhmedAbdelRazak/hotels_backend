@@ -123,6 +123,12 @@ function getHotelRunnerConfig(env = process.env) {
 		false,
 		errors
 	);
+	const requireOtaReview = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_REQUIRE_OTA_REVIEW",
+		false,
+		errors
+	);
 	const projectionNotBefore = parseIsoTimestamp(
 		env.HOTELRUNNER_PROJECTION_NOT_BEFORE
 	);
@@ -167,6 +173,10 @@ function getHotelRunnerConfig(env = process.env) {
 		// enforces this gate again at the actual PUT boundary.
 		confirmDeliveryEnabled,
 		confirmPulledDeliveryEnabled: confirmDeliveryEnabled,
+		// Keep the canonical PMS lifecycle unchanged. This only selects whether
+		// a new confirmed HotelRunner reservation enters the existing OTA review
+		// workflow before it is released to the hotel.
+		requireOtaReview,
 		pullIntervalMinutes: boundedInteger(
 			env.HOTELRUNNER_PULL_INTERVAL_MINUTES,
 			30,
