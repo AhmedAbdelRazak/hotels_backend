@@ -26,6 +26,19 @@ const MIN_ROOM_LIST_VERIFICATION_AGE_HOURS = 48;
 const ROOM_LIST_VERIFICATION_INTERVAL_MULTIPLIER = 3;
 const ROOM_LIST_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const ObjectId = mongoose.Types.ObjectId;
+const callbackEnvelopeDiagnostics = new WeakMap();
+const CALLBACK_STRUCTURAL_KEYS = new Set([
+	"reservations",
+	"reservation",
+	"data",
+	"count",
+	"current_page",
+	"pages",
+	"reservation_id",
+	"hr_number",
+	"provider_number",
+	"message_uid",
+]);
 
 const roomListVerificationWindow = (config = {}, now = new Date()) => {
 	const reference = new Date(now);
@@ -196,29 +209,170 @@ exports.parseHotelRunnerCallbackForm = (req, res, next) => {
 	});
 };
 
-function parseCallbackEnvelope(data, maxReservations) {
-	let envelope;
-	try {
-		envelope = JSON.parse(data);
-	} catch {
-		const error = new Error("Callback data is not valid JSON.");
-		error.code = "HOTELRUNNER_INVALID_JSON";
-		throw error;
+const callbackPayloadError = (code, message, diagnostics = {}) => {
+	const error = new Error(message);
+	error.code = code;
+	error.callbackDiagnostics = diagnostics;
+	return error;
+};
+
+const callbackValueType = (value) =>
+	Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+
+const recognizedCallbackKeys = (value) =>
+	value && typeof value === "object" && !Array.isArray(value)
+		? Object.keys(value)
+				.filter((key) => CALLBACK_STRUCTURAL_KEYS.has(key))
+				.sort()
+		: [];
+
+const callbackContentTypeFamily = (req) => {
+	const contentType = String(req?.get?.("content-type") || "").toLowerCase();
+	if (contentType.startsWith("application/x-www-form-urlencoded")) {
+		return "urlencoded";
 	}
+	if (contentType.startsWith("multipart/form-data")) return "multipart";
+	return "other";
+};
+
+function decodeCallbackJson(data) {
+	let value = data;
+	let jsonLayers = 0;
+	let percentDecoded = false;
+	while (typeof value === "string" && jsonLayers < 3) {
+		const text = value.trim().replace(/^\uFEFF/, "");
+		try {
+			value = JSON.parse(text);
+			jsonLayers += 1;
+			continue;
+		} catch {
+			// Some form clients encode the JSON value a second time. Express/multer
+			// already decode the normal form layer; accept exactly one additional
+			// percent-encoded JSON layer without relaxing authentication or limits.
+			if (
+				!percentDecoded &&
+				/^(?:%EF%BB%BF)?%(?:7B|5B|22)/i.test(text)
+			) {
+				try {
+					value = decodeURIComponent(text.replace(/\+/g, "%20"));
+					percentDecoded = true;
+					continue;
+				} catch {
+					// Fall through to the stable, non-sensitive rejection below.
+				}
+			}
+			throw callbackPayloadError(
+				"HOTELRUNNER_INVALID_JSON",
+				"Callback data is not valid JSON.",
+				{
+					bytes: Buffer.byteLength(String(data || ""), "utf8"),
+					jsonLayers,
+					percentDecoded,
+				}
+			);
+		}
+	}
+	return { value, jsonLayers, percentDecoded };
+}
+
+const looksLikeReservation = (value) =>
+	Boolean(
+		value &&
+			typeof value === "object" &&
+			!Array.isArray(value) &&
+			Object.prototype.hasOwnProperty.call(value, "message_uid") &&
+			(Object.prototype.hasOwnProperty.call(value, "reservation_id") ||
+				Object.prototype.hasOwnProperty.call(value, "hr_number"))
+	);
+
+function parseCallbackEnvelope(data, maxReservations) {
+	const decoded = decodeCallbackJson(data);
+	let envelope = decoded.value;
+	const originalValue = envelope;
+	let representation = "documented_envelope";
+	let nestedJsonLayers = 0;
+	let nestedPercentDecoded = false;
+
+	// The documented REST shape is { reservations: [...] }. Keep compatibility
+	// with production senders that serialize that form value twice, send the
+	// reservations member as JSON, or omit only the outer collection wrapper.
+	if (
+		envelope &&
+		typeof envelope === "object" &&
+		!Array.isArray(envelope) &&
+		typeof envelope.reservations === "string"
+	) {
+		const nestedDecoded = decodeCallbackJson(envelope.reservations);
+		const nested = nestedDecoded.value;
+		nestedJsonLayers = nestedDecoded.jsonLayers;
+		nestedPercentDecoded = nestedDecoded.percentDecoded;
+		representation = "encoded_reservations_member";
+		envelope = {
+			...envelope,
+			reservations: Array.isArray(nested)
+				? nested
+				: nested && Array.isArray(nested.reservations)
+					? nested.reservations
+					: nested,
+		};
+	}
+	if (Array.isArray(envelope) && envelope.every(looksLikeReservation)) {
+		representation = "top_level_reservations_array";
+		envelope = { reservations: envelope };
+	} else if (looksLikeReservation(envelope)) {
+		representation = "top_level_reservation";
+		envelope = { reservations: [envelope] };
+	} else if (
+		envelope &&
+		typeof envelope === "object" &&
+		!Array.isArray(envelope) &&
+		looksLikeReservation(envelope.reservation)
+	) {
+		representation = "singular_reservation_member";
+		envelope = { ...envelope, reservations: [envelope.reservation] };
+	}
+
 	if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
-		const error = new Error("Callback envelope must be an object.");
-		error.code = "HOTELRUNNER_INVALID_ENVELOPE";
-		throw error;
+		throw callbackPayloadError(
+			"HOTELRUNNER_INVALID_ENVELOPE",
+			"Callback envelope must be an object.",
+			{
+				decodedType: callbackValueType(envelope),
+				jsonLayers: decoded.jsonLayers,
+				percentDecoded: decoded.percentDecoded,
+			}
+		);
 	}
 	if (
 		!Array.isArray(envelope.reservations) ||
 		envelope.reservations.length < 1 ||
 		envelope.reservations.length > maxReservations
 	) {
-		const error = new Error("Callback reservations array is invalid.");
-		error.code = "HOTELRUNNER_INVALID_RESERVATIONS";
-		throw error;
+		throw callbackPayloadError(
+			"HOTELRUNNER_INVALID_RESERVATIONS",
+			"Callback reservations array is invalid.",
+			{
+				recognizedTopLevelKeys: recognizedCallbackKeys(envelope),
+				topLevelKeyCount: Object.keys(envelope).length,
+				reservationsType: callbackValueType(envelope.reservations),
+				reservationCount: Array.isArray(envelope.reservations)
+					? envelope.reservations.length
+					: null,
+				jsonLayers: decoded.jsonLayers,
+				percentDecoded: decoded.percentDecoded,
+			}
+		);
 	}
+	callbackEnvelopeDiagnostics.set(envelope, {
+		representation,
+		decodedType: callbackValueType(originalValue),
+		recognizedTopLevelKeys: recognizedCallbackKeys(originalValue),
+		reservationCount: envelope.reservations.length,
+		jsonLayers: decoded.jsonLayers,
+		percentDecoded: decoded.percentDecoded,
+		nestedJsonLayers,
+		nestedPercentDecoded,
+	});
 	return envelope;
 }
 
@@ -242,6 +396,11 @@ function createHandleHotelRunnerCallback({
 				source: "push",
 				receivedAt: now(),
 			});
+			console.info("[hotelrunner] callback envelope durably accepted", {
+				contentType: callbackContentTypeFamily(req),
+				bytes: Buffer.byteLength(String(req.body.data || ""), "utf8"),
+				...(callbackEnvelopeDiagnostics.get(envelope) || {}),
+			});
 			return res.status(200).json({ status: "ok" });
 		} catch (error) {
 			if (
@@ -252,6 +411,14 @@ function createHandleHotelRunnerCallback({
 					"HOTELRUNNER_BATCH_LIMIT",
 				].includes(error?.code)
 			) {
+				console.warn("[hotelrunner] callback payload rejected", {
+					code: String(error.code).slice(0, 80),
+					diagnostics: {
+						contentType: callbackContentTypeFamily(req),
+						bytes: Buffer.byteLength(String(req?.body?.data || ""), "utf8"),
+						...(error.callbackDiagnostics || {}),
+					},
+				});
 				return res.status(422).json({ error: "Invalid HotelRunner callback payload." });
 			}
 			console.error("[hotelrunner] callback persistence failed", {
