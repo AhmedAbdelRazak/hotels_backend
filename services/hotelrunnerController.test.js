@@ -8,6 +8,7 @@ const http = require("node:http");
 const express = require("express");
 const {
 	callbackCredentialsMatch,
+	callbackLeadingSyntax,
 	createHandleHotelRunnerCallback,
 	hotelRunnerCallbackPreflight,
 	hotelRunnerAdminStatus,
@@ -191,6 +192,16 @@ test("timing-safe text equality supports unequal lengths without throwing", () =
 	assert.equal(timingSafeTextEqual("short", "a much longer value"), false);
 	assert.equal(timingSafeTextEqual("hotelrunner", "HotelRunner"), false);
 	assert.equal(timingSafeTextEqual("", ""), true);
+});
+
+test("callback diagnostics classify syntax without retaining payload values", () => {
+	assert.equal(callbackLeadingSyntax('{"reservations":[]}'), "json_object");
+	assert.equal(callbackLeadingSyntax('[{"message_uid":"secret-value"}]'), "json_array");
+	assert.equal(callbackLeadingSyntax('"{\\"reservations\\":[]}"'), "json_string");
+	assert.equal(callbackLeadingSyntax("<OTA_HotelResNotifRQ/>"), "xml");
+	assert.equal(callbackLeadingSyntax("%7B%22reservations%22%3A%5B%5D%7D"), "percent_encoded_json_object");
+	assert.equal(callbackLeadingSyntax("%3COTA_HotelResNotifRQ%2F%3E"), "percent_encoded_xml");
+	assert.equal(callbackLeadingSyntax(""), "empty");
 });
 
 test("callback envelope accepts bounded documented and safe form-serialization variants", () => {

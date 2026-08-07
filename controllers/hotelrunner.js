@@ -235,6 +235,19 @@ const callbackContentTypeFamily = (req) => {
 	return "other";
 };
 
+const callbackLeadingSyntax = (data) => {
+	const text = String(data || "").trim().replace(/^\uFEFF/, "");
+	if (text.startsWith("{")) return "json_object";
+	if (text.startsWith("[")) return "json_array";
+	if (text.startsWith('"')) return "json_string";
+	if (text.startsWith("<")) return "xml";
+	if (/^(?:%EF%BB%BF)?%7B/i.test(text)) return "percent_encoded_json_object";
+	if (/^(?:%EF%BB%BF)?%5B/i.test(text)) return "percent_encoded_json_array";
+	if (/^(?:%EF%BB%BF)?%22/i.test(text)) return "percent_encoded_json_string";
+	if (/^(?:%EF%BB%BF)?%3C/i.test(text)) return "percent_encoded_xml";
+	return text ? "other" : "empty";
+};
+
 function decodeCallbackJson(data) {
 	let value = data;
 	let jsonLayers = 0;
@@ -399,6 +412,7 @@ function createHandleHotelRunnerCallback({
 			console.info("[hotelrunner] callback envelope durably accepted", {
 				contentType: callbackContentTypeFamily(req),
 				bytes: Buffer.byteLength(String(req.body.data || ""), "utf8"),
+				leadingSyntax: callbackLeadingSyntax(req.body.data),
 				...(callbackEnvelopeDiagnostics.get(envelope) || {}),
 			});
 			return res.status(200).json({ status: "ok" });
@@ -416,6 +430,7 @@ function createHandleHotelRunnerCallback({
 					diagnostics: {
 						contentType: callbackContentTypeFamily(req),
 						bytes: Buffer.byteLength(String(req?.body?.data || ""), "utf8"),
+						leadingSyntax: callbackLeadingSyntax(req?.body?.data),
 						...(error.callbackDiagnostics || {}),
 					},
 				});
@@ -754,6 +769,7 @@ exports.updateHotelRunnerRoomMapping = async (req, res) => {
 };
 
 module.exports.callbackCredentialsMatch = callbackCredentialsMatch;
+module.exports.callbackLeadingSyntax = callbackLeadingSyntax;
 module.exports.createHandleHotelRunnerCallback = createHandleHotelRunnerCallback;
 module.exports.hasCurrentRoomListProof = hasCurrentRoomListProof;
 module.exports.parseCallbackEnvelope = parseCallbackEnvelope;
