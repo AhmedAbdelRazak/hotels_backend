@@ -465,6 +465,8 @@ function attachVerifiedHotelRunnerEmailCommercialEvidence(reservation) {
 		exchangeRateToSar: 1,
 	};
 	reservation.supplierData.hotelRunnerEmailCommercialEvidence = evidence;
+	reservation.commission = 0;
+	reservation.commission_ota = 15;
 	reservation.supplierData.otaTotalPayoutSar = 85.01;
 	reservation.supplierData.otaExpenseTotalSar = 15;
 	reservation.supplierData.otaPayoutFallbackReason = "";
@@ -629,6 +631,8 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	assert.equal(document.paid_amount, 0);
 	assert.equal(document.payment_details.captured, false);
 	assert.equal(document.payment_details.onsite_paid_amount, 0);
+	assert.equal(document.commission, 0);
+	assert.equal(document.commission_ota, null);
 	assert.equal(document.moneyTransferredToHotel, undefined);
 	assert.equal(document.commissionPaid, undefined);
 	assert.equal(document.vcc_payment, undefined);
@@ -1156,6 +1160,223 @@ test("review mode links an email-first OTA review without releasing or duplicati
 	assert.equal(
 		system.reservations[0].supplierData.otaAutomationPipeline,
 		"hotelrunner-background-worker"
+	);
+	assert.equal(system.reservations[0].commission, 0);
+	assert.equal(system.reservations[0].commission_ota, null);
+});
+
+test("Trip source-currency API lifecycle claims one email reservation without inventing OTA commission", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const providerNumber = "1539366616295913";
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-trip-usd-email-bridge",
+		provider_number: providerNumber,
+		channel: "tripcom",
+		channel_display: "Trip.com",
+		source_display: "Trip.com",
+		currency: "USD",
+		sub_total: "18.78",
+		item_total: "18.78",
+		total: "18.78",
+		paid_amount: "0",
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const pricing = buildPickedRoomsProjection(normalized, resolvedRooms(normalized));
+	const existing = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "trip-email-event" },
+		hotel: system.hotel,
+		pricing,
+		confirmationNumber: "PMS-TRIP-EMAIL-1",
+		reservationMongoId: "64b000000000000000000099",
+		config: { requireOtaReview: true },
+	});
+	existing.total_amount = 70.43;
+	existing.currency = "SAR";
+	existing.adminPricing.clientTotal = 70.43;
+	existing.adminPricing.sourceCurrency = "USD";
+	existing.adminPricing.sourceAmount = 18.78;
+	existing.ota_financial_summary.clientTotal = 70.43;
+	existing.ota_financial_summary.currency = "SAR";
+	existing.otaIdentityKey = `hotelrunner:${providerNumber}`;
+	existing.otaCrossTransportIdentityKey = `trip:${providerNumber}`;
+	existing.reservation_id = providerNumber;
+	existing.supplierData.otaProvider = "trip";
+	existing.supplierData.otaAutomationPipeline = "ota-email-orchestrator";
+	existing.supplierData.otaSourceAuthority = 1;
+	existing.supplierData.otaLastInboundEmailId =
+		"64b000000000000000000098";
+	existing.supplierData.otaLastSourceReceivedAt =
+		new Date("2026-08-06T11:55:00.000Z");
+	existing.commission = 15;
+	delete existing.supplierData.hotelRunner;
+	system.reservations.push(existing);
+	system.dependencies.loadEmailCommercialBridge = async () => ({
+		ok: true,
+		reason: "",
+		amountRole: "gross",
+		grossTotalSar: 70.43,
+		sourceCurrency: "USD",
+		sourceAmount: 18.78,
+		hotelRunnerAmount: 18.78,
+		evidence: null,
+	});
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(String(system.reservations[0]._id), String(existing._id));
+	assert.equal(system.reservations[0].total_amount, 70.43);
+	assert.equal(system.reservations[0].currency, "SAR");
+	assert.equal(system.reservations[0].commission, 0);
+	assert.equal(system.reservations[0].commission_ota, null);
+	assert.equal(system.reservations[0].state, "OTA Platform Review");
+	assert.equal(
+		system.reservations[0].supplierData.hotelRunner.transport,
+		"hotelrunner_api"
+	);
+});
+
+test("cross-currency API event waits visibly for its email identity bridge instead of creating a second reservation", async () => {
+	const system = createInMemoryProjectionSystem();
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-trip-usd-waits-for-email",
+		provider_number: "1539366616295999",
+		channel: "tripcom",
+		channel_display: "Trip.com",
+		source_display: "Trip.com",
+		currency: "USD",
+		sub_total: "18.78",
+		item_total: "18.78",
+		total: "18.78",
+		paid_amount: "0",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "retry");
+	assert.equal(result.code, "hotelrunner_currency_waiting_for_email_bridge");
+	assert.equal(system.reservations.length, 0);
+	assert.equal(system.reservationWrites.length, 0);
+	assert.equal(system.mappingWrites.length, 0);
+});
+
+test("verified Agoda email pricing enriches the one API-owned reservation and keeps raw API pricing", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-agoda-payout-email-bridge",
+		provider_number: "687268443",
+		channel: "agoda",
+		channel_display: "Agoda",
+		source_display: "Agoda",
+		sub_total: "58.82",
+		item_total: "58.82",
+		total: "58.82",
+		paid_amount: "0",
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const pricing = buildPickedRoomsProjection(normalized, resolvedRooms(normalized));
+	const existing = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "agoda-email-event" },
+		hotel: system.hotel,
+		pricing,
+		confirmationNumber: "PMS-AGODA-EMAIL-1",
+		reservationMongoId: "64b000000000000000000097",
+		config: { requireOtaReview: true },
+	});
+	existing.total_amount = 95.06;
+	existing.adminPricing.clientTotal = 95.06;
+	existing.adminPricing.netAfterExpensesTotal = 58.82;
+	existing.adminPricing.otaExpenseTotal = 36.24;
+	existing.adminPricing.defaultDeductionApplied = false;
+	existing.adminPricing.commercialVerified = false;
+	existing.adminPricing.payoutFallbackReason =
+		"hotelrunner_commercial_evidence_stale";
+	existing.ota_financial_summary.clientTotal = 95.06;
+	existing.ota_financial_summary.netAfterExpenses = 58.82;
+	existing.ota_financial_summary.netAfterOtaExpenses = 58.82;
+	existing.ota_financial_summary.otaExpenseTotal = 36.24;
+	existing.ota_financial_summary.commercialVerified = false;
+	existing.ota_financial_summary.payoutFallbackReason =
+		"hotelrunner_commercial_evidence_stale";
+	existing.supplierData.otaProvider = "agoda";
+	existing.supplierData.otaAutomationPipeline = "ota-email-orchestrator";
+	existing.supplierData.otaSourceAuthority = 1;
+	existing.supplierData.otaLastSourceReceivedAt =
+		new Date("2026-08-06T11:55:00.000Z");
+	existing.commission = 15;
+	delete existing.supplierData.hotelRunner;
+	system.reservations.push(existing);
+	const evidenceWithoutHash = {
+		version: 1,
+		verified: true,
+		source: "authenticated_ota_email",
+		provider: "agoda",
+		otaIdentityKey: "agoda:687268443",
+		grossTotalSar: 95.06,
+		payoutTotalSar: 58.82,
+		otaExpenseTotalSar: 36.24,
+		currency: "SAR",
+		sourceReceivedAt: "2026-08-06T11:55:00.000Z",
+		appliedAt: new Date("2026-08-06T11:56:00.000Z"),
+	};
+	const evidence = {
+		...evidenceWithoutHash,
+		evidenceHash: hotelRunnerEmailCommercialEvidenceHash(evidenceWithoutHash),
+	};
+	system.dependencies.loadEmailCommercialBridge = async () => ({
+		ok: true,
+		reason: "",
+		amountRole: "payout",
+		grossTotalSar: 95.06,
+		sourceCurrency: "SAR",
+		sourceAmount: 95.06,
+		hotelRunnerAmount: 58.82,
+		evidence,
+	});
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(system.reservations.length, 1);
+	assert.equal(system.reservations[0].total_amount, 95.06);
+	assert.equal(system.reservations[0].commission, 0);
+	assert.equal(system.reservations[0].commission_ota, 36.24);
+	assert.equal(system.reservations[0].adminPricing.commercialVerified, true);
+	assert.equal(
+		system.reservations[0].supplierData.hotelRunner.pricing.grandTotal,
+		58.82
+	);
+	assert.equal(
+		system.reservations[0].supplierData.hotelRunnerEmailCommercialEvidence
+			.evidenceHash,
+		evidence.evidenceHash
 	);
 });
 
@@ -2179,6 +2400,7 @@ test("HotelRunner preserves verified email payout evidence until provider or gro
 	assert.equal(reservation.adminPricing.netAfterExpensesTotal, 85.01);
 	assert.equal(reservation.adminPricing.otaExpenseTotal, 15);
 	assert.equal(reservation.adminPricing.commercialVerified, true);
+	assert.equal(reservation.commission_ota, 15);
 	assert.deepEqual(
 		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
 		evidence
@@ -2205,6 +2427,7 @@ test("HotelRunner preserves verified email payout evidence until provider or gro
 	assert.equal(reservation.adminPricing.netAfterExpensesTotal, null);
 	assert.equal(reservation.adminPricing.otaExpenseTotal, null);
 	assert.equal(reservation.adminPricing.commercialVerified, false);
+	assert.equal(reservation.commission_ota, null);
 	assert.equal(
 		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
 		null

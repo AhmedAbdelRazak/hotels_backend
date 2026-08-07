@@ -7372,6 +7372,8 @@ const makeDirectHotelRunnerCommercialReservation = (overrides = {}) => ({
 	sub_total: 70,
 	currency: "SAR",
 	paid_amount: 0,
+	commission: 0,
+	commission_ota: null,
 	financeStatus: "not paid",
 	payment: "",
 	payment_details: { captured: false, onsite_paid_amount: 0 },
@@ -7516,6 +7518,8 @@ test("a direct-owned reservation accepts only verified OTA net and expense enric
 			64
 		);
 		assert.equal(writtenUpdate.$inc.__v, 1);
+		assert.equal(writtenUpdate.$set.commission, 0);
+		assert.equal(writtenUpdate.$set.commission_ota, 20);
 		assert.equal(writtenUpdate.$set["adminPricing.netAfterExpensesTotal"], 80);
 		assert.equal(writtenUpdate.$set["adminPricing.otaExpenseTotal"], 20);
 		assert.equal(
@@ -7532,6 +7536,8 @@ test("a direct-owned reservation accepts only verified OTA net and expense enric
 			writtenUpdate.$push.reservationAuditLog.action,
 			"hotelrunner-commercial-enriched-from-verified-email"
 		);
+		assert.equal(writtenFilter.commission, 0);
+		assert.equal(writtenFilter.commission_ota, null);
 		for (const forbiddenPath of [
 			"state",
 			"reservation_status",
@@ -7606,6 +7612,200 @@ test("a direct-owned reservation accepts only verified OTA net and expense enric
 			}),
 			{},
 			"the general email updater must remain closed for a direct-owned record"
+		);
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		HotelDetails.find = originalHotelFind;
+	}
+});
+
+test("OTA commission storage is nullable and remains separate from legacy commission", () => {
+	assert.equal(Reservations.schema.path("commission").options.default, 0);
+	assert.equal(Reservations.schema.path("commission_ota").instance, "Number");
+	assert.equal(Reservations.schema.path("commission_ota").options.default, null);
+	const reservation = new Reservations({ confirmation_number: "commission-fields" });
+	assert.equal(reservation.commission, 0);
+	assert.equal(reservation.commission_ota, null);
+});
+
+test("a pristine HotelRunner OTA review may receive verified commercial evidence", () => {
+	const normalized = makeVerifiedHotelRunnerCommercialEmail();
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		state: "OTA Platform Review",
+		reservation_status: "OTA Platform Review",
+		adminPricingVisibility: {
+			rootOnlyForHotelManagement: true,
+			source: "hotelrunner_api",
+			appliedAt: new Date("2026-08-06T14:00:00.000Z"),
+			appliedBy: null,
+		},
+		otaPlatformReview: {
+			status: "pending",
+			source: "hotelrunner_api",
+			inboundEmailId: "",
+			provider: "booking",
+			providerLabel: "Booking.com",
+			confirmationNumber: HOTELRUNNER_COMMERCIAL_CONFIRMATION,
+			createdAt: new Date("2026-08-06T14:00:00.000Z"),
+			releasedAt: null,
+			releasedBy: null,
+			priceAtRelease: 0,
+			hotelRunnerManaged: true,
+			hotelRunnerLinkedAt: new Date("2026-08-06T14:00:00.000Z"),
+			lastHotelRunnerUpdatedAt: new Date("2026-08-06T14:00:00.000Z"),
+			hotelAssignmentRequired: false,
+			hotelAssignmentStatus: "assigned",
+			assignedHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			assignedHotelName: "Zad Ajyad",
+			assignedAt: new Date("2026-08-06T14:00:00.000Z"),
+			roomMappingStatus: "mapped",
+			roomMappingHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			lastUpdatedAt: new Date("2026-08-06T14:00:00.000Z"),
+		},
+	});
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-06T15:00:01.000Z"),
+	});
+	const base = {
+		normalized,
+		existing,
+		hotelDetails: hotelRunnerCommercialHotel(),
+		matchedReservationBy: ["otaIdentityKey"],
+		evidence,
+	};
+	assert.equal(directHotelRunnerEmailCommercialGuard(base).ok, true);
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...base,
+			existing: {
+				...existing,
+				state: "Pending Confirmation",
+				reservation_status: "Pending Confirmation",
+				otaPlatformReview: {
+					...existing.otaPlatformReview,
+					status: "released",
+					releasedAt: new Date("2026-08-06T14:30:00.000Z"),
+					releasedBy: { _id: "64b000000000000000000099" },
+				},
+			},
+		}).reason,
+		"protected_state",
+		"a released review must remain protected"
+	);
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...base,
+			existing: {
+				...existing,
+				createdByUserId: "64b000000000000000000099",
+			},
+		}).reason,
+		"protected_state",
+		"a manually created reservation must remain protected"
+	);
+});
+
+test("only canonical Agoda may treat HotelRunner reported total as verified payout", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalHotelFind = HotelDetails.find;
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+		commissionOta: 999,
+	});
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		otaIdentityKey: `agoda:${HOTELRUNNER_COMMERCIAL_CONFIRMATION}`,
+		booking_source: "Agoda",
+		total_amount: 80,
+		adminPricing: {
+			...makeDirectHotelRunnerCommercialReservation().adminPricing,
+			clientTotal: 80,
+		},
+		ota_financial_summary: {
+			...makeDirectHotelRunnerCommercialReservation().ota_financial_summary,
+			clientTotal: 80,
+		},
+		supplierData: {
+			...makeDirectHotelRunnerCommercialReservation().supplierData,
+			supplierName: "Agoda",
+			otaProvider: "agoda",
+			hotelRunner: {
+				...makeDirectHotelRunnerCommercialReservation().supplierData.hotelRunner,
+				pricing: { total: 80, currency: "SAR", immutableMarker: true },
+			},
+		},
+	});
+	let writtenUpdate = null;
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return [existing];
+		},
+	});
+	Reservations.updateOne = async (_filter, update) => {
+		writtenUpdate = update;
+		return { matchedCount: 1 };
+	};
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [hotelRunnerCommercialHotel()];
+		},
+	});
+
+	try {
+		const result = await reconcileOtaReservation(normalized);
+		assert.equal(result.status, "updated");
+		assert.equal(result.actionTaken, "commercial_enrichment");
+		assert.equal(writtenUpdate.$set.total_amount, 100);
+		assert.equal(writtenUpdate.$set["adminPricing.clientTotal"], 100);
+		assert.equal(writtenUpdate.$set["ota_financial_summary.clientTotal"], 100);
+		assert.equal(writtenUpdate.$set.commission, 0);
+		assert.equal(
+			writtenUpdate.$set.commission_ota,
+			20,
+			"OTA commission must come from verified gross minus payout, not an untrusted input field"
+		);
+		assert.equal(
+			Object.keys(writtenUpdate.$set).some((path) =>
+				path.startsWith("supplierData.hotelRunner.pricing")
+			),
+			false,
+			"the raw HotelRunner pricing snapshot must remain untouched"
+		);
+
+		const bookingExisting = {
+			...existing,
+			otaIdentityKey: `booking:${HOTELRUNNER_COMMERCIAL_CONFIRMATION}`,
+			booking_source: "Booking.com",
+			supplierData: {
+				...existing.supplierData,
+				supplierName: "Booking.com",
+				otaProvider: "booking",
+			},
+		};
+		const bookingNormalized = makeVerifiedHotelRunnerCommercialEmail();
+		const bookingEvidence = buildHotelRunnerEmailCommercialEvidence(
+			bookingNormalized,
+			{ appliedAt: new Date("2026-08-06T15:00:01.000Z") }
+		);
+		assert.equal(
+			directHotelRunnerEmailCommercialGuard({
+				normalized: bookingNormalized,
+				existing: bookingExisting,
+				hotelDetails: hotelRunnerCommercialHotel(),
+				matchedReservationBy: ["otaIdentityKey"],
+				evidence: bookingEvidence,
+			}).reason,
+			"gross_total",
+			"non-Agoda providers cannot reinterpret a reported total as payout"
 		);
 	} finally {
 		Reservations.find = originalReservationFind;

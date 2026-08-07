@@ -695,8 +695,15 @@ A modification can update source-owned guest/stay/room/price fields only when ow
 
 ### Currency and pricing
 
-- Incoming currency must equal the configured hotel currency.
-- A foreign or invalid currency is quarantined; no exchange rate is invented.
+- Same-currency HotelRunner pricing can project directly after the normal
+  identity, mapping, and ownership checks.
+- A source-currency amount may bridge to an already-created SAR reservation
+  only through that reservation's exact, authenticated OTA-email audit. The
+  source currency and amount, identity, hotel stay, and room count must all
+  agree. No exchange rate is invented by the HotelRunner worker.
+- If the corresponding email record has not arrived yet, the foreign-currency
+  event remains visibly retryable. A mismatch fails closed into quarantine; it
+  never creates a second reservation or rewrites the SAR amount.
 - Monetary parsing uses integer cents.
 - Multi-room totals are allocated deterministically and checked before conversion to the existing PMS pricing structure.
 - Existing local root-price maps are reused where appropriate.
@@ -726,7 +733,25 @@ The hotel-facing contract is therefore:
 
 The frontend's canonical guest-gross/report adapters retain missing money as `null` with `available: false`; renderers use an unavailable marker instead of coercing that absence to zero. Receipt summaries use the HotelRunner canonical grand total when present and keep the legacy receipt amount/wording path for non-HotelRunner reservations.
 
-Verified email evidence is recorded in `supplierData.hotelRunnerEmailCommercialEvidence`. It survives a later matching HotelRunner update only while provider, reservation identity, SAR currency, stay/room ownership, and gross total remain compatible. A provider, critical-stay, or gross change invalidates it rather than carrying a stale net amount forward.
+Verified email evidence is recorded in `supplierData.hotelRunnerEmailCommercialEvidence`. It survives a later matching HotelRunner update only while provider, reservation identity, currency/amount role, stay/room ownership, and commercial totals remain compatible. A provider, critical-stay, or commercial-amount change invalidates both the evidence and `commission_ota` rather than carrying a stale amount forward. A minimal cancellation without replacement pricing preserves still-valid evidence.
+
+Two commission fields are intentionally separate:
+
+- `commission` is the legacy xHotelPro/platform commission field. Direct
+  HotelRunner ownership writes it as numeric `0`; this does not mean that the
+  OTA charged no fee and does not create finance-assignment evidence.
+- `commission_ota` is a nullable numeric SAR field for an exact OTA
+  deduction proven by authenticated commercial evidence. `null` means unknown
+  or unverified. It is never populated from HotelRunner taxes, discounts,
+  adjustments, local room cost, `paid_amount`, or a default percentage.
+
+The field name follows the PMS contract requested for this integration. Its
+provenance remains explicit: the generic HotelRunner reservation schema does
+not guarantee a dedicated OTA-commission value, so the stored number is the
+verified difference between OTA guest gross and hotel payout. Depending on the
+OTA contract, that difference can include commission and other OTA deductions.
+The generic reservation editor cannot write `commission_ota`; only the guarded
+background/email-evidence paths can set or clear it.
 
 Availability is consensus-based, not first-value-wins. Every explicitly verified finite candidate for a report metric across `adminPricing`, `ota_financial_summary`, and `otaFinancialSummary` must agree to cents; malformed or contradictory candidates make that metric unavailable. The separate PMS platform-commission workflow likewise requires an explicit assignment (including an intentional zero), valid money, and agreement between assigned finance records. Missing, malformed, or conflicting evidence remains `null`/unavailable in detail views and is counted as unavailable in aggregates.
 
@@ -741,6 +766,73 @@ The same policy applies outside the reservation-detail screen:
 - a later unrelated finance update cannot reconstruct commission from HotelRunner room pricing when no reviewed commission exists.
 
 Legacy non-HotelRunner calculations retain their existing semantics. These guards are transport-specific and do not globally change the PMS financial model.
+
+### Targeted production consistency audit on 2026-08-07
+
+The activation audit examined the eight HotelRunner pushes that existed for
+the supported Zad Ajyad property at the cutoff. No vendor API request was made.
+The result was:
+
+- all eight pushes were already durably archived;
+- no duplicate PMS reservation was found for any of the eight identities;
+- four Trip.com pushes were held because HotelRunner reported the booking in
+  USD while the existing email-created PMS rows were in SAR;
+- three active Agoda pushes were linked to their one existing PMS reservation,
+  but the earlier generic gross assumption had marked their otherwise exact
+  commercial evidence stale;
+- one Agoda cancellation had updated the same linked reservation; and
+- all five approved room mappings were active and used as expected. The master
+  fallback remained unmapped and was not involved.
+
+The observed provider amount roles were not treated as universal vendor
+contracts. In these audited records, Trip.com HotelRunner totals matched the
+email's source-currency guest total. The email's fixed-rate conversion was
+enough to link/protect the SAR gross, but its default percentage deduction was
+only an estimate, so `commission_ota` remains `null`. The audited Agoda
+HotelRunner totals matched the authenticated email payout; where that email
+also supplied exact guest gross and payout, `commission_ota` can be stored as
+their exact difference while the original HotelRunner pricing snapshot remains
+unchanged.
+
+The resulting priority rule is lifecycle-first, not transport-first creation:
+the email safety net may create the local row before a delayed or temporarily
+held API event, but the next valid HotelRunner event links to that same row,
+sets direct source authority, and becomes the create/modify/cancel lifecycle
+owner. The email remains the commercial-evidence source only for fields the
+HotelRunner schema does not guarantee. Uncovered reservations continue through
+the existing email path.
+
+### One-time audited reconciliation
+
+The 2026-08-07 repair is deliberately fixed to those exact eight archived
+pushes and is dry-run-only unless the immutable repair ID is supplied. It never
+calls HotelRunner, creates a reservation, or changes lifecycle, guest, stay,
+room, or payment data.
+
+Run the production dry-run first:
+
+```bash
+npm run hotelrunner:reconcile-priority-commission-20260807
+```
+
+Apply only after that output reports eight exact targets, four Trip requeues,
+four Agoda commercial backfills, zero reservation creations, zero lifecycle
+mutations, and zero vendor API calls:
+
+```bash
+npm run hotelrunner:reconcile-priority-commission-20260807 -- \
+  --apply \
+  --repair-id=hotelrunner-zad-ajyad-20260807-api-priority-commission-v1
+```
+
+The apply path uses exact event/mirror/reservation compare-and-set filters,
+majority writes, and an immutable resumable manifest. A changed identity,
+payload proof, mirror proof, reservation version, commission value, active
+lease, configuration gate, or authenticated email fact stops the repair. Trip
+events are handed back to the normal serialized worker; Agoda records receive
+only the already-proven financial aliases and stale commercial-attention
+cleanup. Re-running the command is idempotent and must not repeat a completed
+target.
 
 ## OTA-email authority boundary
 
@@ -1265,6 +1357,7 @@ Vendor documentation does not publish a guaranteed REST retry count or email-fal
 
 ## Change log
 
+- **2026-08-07:** Audited the eight current Zad Ajyad HotelRunner pushes with zero vendor calls and zero writes: every identity had exactly one PMS reservation, four were already API-owned, and four foreign-currency events were safely held against existing email-created rows. Added the authenticated email-commercial bridge, direct-source `commission=0`, nullable evidence-only `commission_ota`, and the immutable one-time reconciliation runbook. The production dry-run proved four Trip handoffs plus four Agoda evidence backfills without reservation creation or lifecycle/stay/room/payment mutation.
 - **2026-08-07:** Installed and verified the versioned Nginx callback log hardener, proved configured callback authentication with a write-free `422` probe, completed exactly one six-code room-list discovery with zero reservation-history calls, preserved PMS/OTA invariants, and stopped with five verified mappings pending owner approval plus the master fallback permanently unmapped.
 - **2026-08-06:** Added a fail-closed frontend environment preflight, removed unused server credential names from local and production frontend environments with protected rollback copies, tightened the production frontend environment to mode `600`, and recorded clean-build/cache/provider-rotation requirements for the historical public-bundle incident.
 - **2026-08-06:** Deployed, but did not activate, reservation-level OTA-email coexistence, verified commercial-only payout enrichment, the complete sanitized HotelRunner gross-pricing snapshot, fail-closed pull/configuration, one-call room discovery, room-list generations/retirement/conflict checks, outbound confirmation boundary enforcement, a mandatory production activation cutoff, database-backed one-at-a-time property projection, durable overbooking attention, and removal of only the top-navbar shortcut. Production remains Gate 0 with the worker absent and all HotelRunner gates false.
