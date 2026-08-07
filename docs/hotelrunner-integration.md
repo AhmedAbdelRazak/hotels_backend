@@ -53,7 +53,7 @@ The not-yet-proven linking claim must be demonstrated with an archived HotelRunn
 
 ## Production status snapshot
 
-Snapshot date: **2026-08-06**. This is historical deployment evidence, not a substitute for checking the current runtime before an operation.
+Snapshot date: **2026-08-07**. This is operational evidence, not a substitute for checking the current runtime before an operation.
 
 | Area | Snapshot state |
 | --- | --- |
@@ -61,8 +61,8 @@ Snapshot date: **2026-08-06**. This is historical deployment evidence, not a sub
 | Frontend source | PR #26 deployed at exact merge `3e25743572da2890eef4d4ebe2eca4894cd2db5a` |
 | Main backend/frontend | Online under PM2 |
 | Public callback health | HTTPS GET returns `200 {"ok":true}` |
-| Callback authentication | Invalid form `POST` credentials return `401` at loopback and public HTTPS; GET remains an intentionally unauthenticated health check |
-| Callback proxy logging | Exact Nginx callback location has `access_log off`; the reviewed `error_log off` hardener still requires one root invocation before token rotation |
+| Callback authentication | Invalid credentials return `401`; the configured credential returned `422` for an intentionally empty reservation array, proving authentication and parsing succeeded while stopping before persistence; GET remains an intentionally unauthenticated health check |
+| Callback proxy logging | Exact Nginx callback location has `access_log off` and `error_log /dev/null crit`; the hardened configuration passed `nginx -t`, reloaded successfully, and a synthetic public POST did not increase the callback access-log count |
 | Origin exposure | Backend/frontend listen only on `127.0.0.1:8080` and `127.0.0.1:3080` |
 | Projection | OFF |
 | Reservation-history pull | OFF |
@@ -70,23 +70,24 @@ Snapshot date: **2026-08-06**. This is historical deployment evidence, not a sub
 | Delivery confirmation | OFF |
 | Projection activation cutoff | Blank while projection is off |
 | Independent HotelRunner worker | OFF |
-| HotelRunner API calls made during deployment/testing | Zero |
-| Room-list discovery | Not yet run |
-| Room mappings | Awaiting discovery and administrator review |
+| HotelRunner API calls made during deployment/testing | Exactly one approved room-list GET; zero reservation-history or delivery-confirmation calls |
+| Room-list discovery | Completed once; six inventory codes were saved in one complete generation |
+| Room mappings | Five verified non-master codes remain `pending`; one HotelRunner master fallback remains blocked as `conflict`; awaiting owner approval |
 | Existing OTA-email path | Active; health returns `200`, invalid-secret POST returns `401` before parsing, dedupe index is present, and per-reservation coexistence rules are deployed |
-| Token rotation | Required before worker/API discovery |
+| Token status | Exactly one value is configured locally and in production and it authenticated successfully. It is the same credential present in 17 historical Nginx lines; the owner explicitly instructed retention after log hardening. A one-time rotation remains the recommended way to revoke that historical exposure. |
 | Room-calendar update permission | Must remain disabled |
 | Frontend environment | Mode `600`; clean PR #26 build deployed and scanned across 50 files against 40 protected production values with no match; historically exposed provider credential rotations remain an external security task |
 
 The reservation involved in the live fallback incident had an unchanged secure document hash across deployment. Exact hashes and identifiers are intentionally retained outside this repository.
 
-Current release boundary: the reviewed backend/frontend hardening is deployed, but production deliberately remains Gate 0. No room discovery, mapping approval, worker installation, projection activation, delivery confirmation, history pull, or controlled live lifecycle test has occurred. The exposed HotelRunner token still requires revocation/replacement, and the reviewed Nginx error-log hardener must be installed first. “Deployed” below means code is present with every HotelRunner mutation/network gate false; it does not mean inbound projection is live.
+Current release boundary: the reviewed backend/frontend hardening is deployed and the one-call discovery gate is complete. Production is stopped at Gate 3 for explicit room-mapping approval. No mapping has been activated, no persistent worker has been installed or started, projection remains false, and no reservation history, delivery confirmation, reservation projection, or controlled live lifecycle test has occurred. “Deployed” below means code is present with every HotelRunner reservation-mutation gate false; it does not yet mean inbound projection is live.
 
 Traceability recorded at this snapshot:
 
 | Artifact | Revision / rollback evidence |
 | --- | --- |
 | Backend application production revision | `538678e0fcabe4df56621b5328612ff382da0871` |
+| Backend repository/documentation production revision before this update | `145487c6afe83d698cd9af5378242d38475079c1` |
 | Backend HotelRunner baseline | GitHub PR #33 / merge `05702cf981532815998858f8f7a37bc5205524bf` |
 | Backend environment baseline | GitHub PR #34 / merge `c42d2d5ae2dbe3899d43dd5d7f36ead92c08b6db` |
 | Backend hardening implementation | `ce7217159c13e10cb0ae3135714d86385c5a044e`; GitHub PR #35 / merge `538678e0fcabe4df56621b5328612ff382da0871` |
@@ -94,6 +95,7 @@ Traceability recorded at this snapshot:
 | Frontend production baseline | GitHub PR #25 / merge `34c2daf672ca8c3b29466ee57d5acbcf629fa97e` |
 | Frontend hardening deployment | GitHub PR #26; head `b1f937e8d5137f642e8dfb5274b4a0e8f88e0751`; merge `3e25743572da2890eef4d4ebe2eca4894cd2db5a` |
 | Nginx pre-change file | `/etc/nginx/sites-available/xhotelpro.pre-hotelrunner-20260806T203000Z` |
+| Nginx pre-log-hardening file | `/etc/nginx/sites-available/xhotelpro.pre-hotelrunner-log-hardening-20260807T011419Z` |
 | Frontend pre-change build | `build.pre-hotelrunner-20260806T205200Z` |
 | Secure environment rollback filename | `.env.pre-hotelrunner-runtime-20260806T204200Z` |
 | Safe bootstrap-flag rollback | `/home/ahmedadmin/secure_env_backups/hotels_backend/.env.pre-bootstrap-hardening-20260806T223020704199Z-190045` |
@@ -116,9 +118,44 @@ The exact PR #35 and PR #26 merge revisions were deployed on 2026-08-06 local ti
 - all five isolated HotelRunner collections remained empty, proving the deployment itself archived or projected nothing; and
 - the OTA inbound endpoint, exact dedupe index, audit count, and latest processed audit remained intact; a synthetic invalid-secret probe was rejected before multipart parsing and created no audit record.
 
-The active Nginx block still lacks `error_log off`. Do not install or test a replacement token and do not run room discovery until `scripts/ops/hardenHotelRunnerNginxLogging.sh` has been run as root and its config-test/reload/log-isolation checks have passed.
+The versioned Nginx hardener was installed on 2026-08-07. The exact callback location now has both `access_log off;` and `error_log /dev/null crit;`. The active site and symlink were verified, both Nginx syntax tests passed, reload succeeded, and a synthetic invalid-credential HTTPS callback returned `401` without increasing the 19 historical callback access-log lines.
 
 The Nginx installer was a timestamped one-shot operation and must not be rerun blindly. The later environment helpers create a new unique mode-`600` rollback for every accepted atomic update, reject duplicate or unexpected keys, and fail closed unless projection, history pull, recurring room discovery, and delivery confirmation remain false during bootstrap. A rotated token still requires a fresh reviewed invocation; never copy or print it in command history or documentation.
+
+### Controlled Gate-1 authentication and Gate-2 discovery evidence
+
+The following production checks were completed on 2026-08-07 with projection, history pull, recurring room-list sync, and delivery confirmation all false:
+
+- the backend and frontend repositories were tracked-clean and matched their GitHub upstream revisions;
+- both protected environment files remained regular mode-`600` files, and local/production HotelRunner token, HR ID, and supported-property settings matched without printing values or hashes;
+- there was exactly one configured supported PMS property and it resolved to active Zad Ajyad with an owner, currency, and five active local room configurations;
+- all ten PM2 applications were online, the two PMS targets remained on loopback-only `127.0.0.1:8080` and `127.0.0.1:3080`, no PM2 process inherited a `HOTELRUNNER_*` override, and no HotelRunner worker or systemd unit was running;
+- public PMS, OTA inbound, and callback health each returned `200`; an invalid callback returned `401` and did not enter Nginx access logs;
+- one authenticated callback probe used `data={"reservations":[]}` and returned the expected `422`, proving the current credential reached the parser while the empty-array guard stopped before hotel loading or persistence;
+- that callback probe left the reservation count, protected incident reservation hash, all HotelRunner collection counts, and historical Nginx callback counts unchanged;
+- the read-only reservation-index verifier passed for `uniq_ota_identity_key` and `uniq_ota_cross_transport_identity_key`;
+- the room-list-only entry point completed with six inventory codes and exactly one HotelRunner API call; conservative budget counters recorded one claim in each of the application-minute, property-minute, and property-day scopes;
+- the room-list sync state ended `idle`, with one successful room-list pull, no pull failure, no active pull/projection lease, and no error;
+- HotelRunner event and mirror counts remained zero, the PMS reservation count remained `18,238`, and the protected real fallback reservation remained exactly one cancelled, email-owned record with its original hash;
+- the OTA-email audit remained at `1,833` records with its latest record processed and its exact partial-unique dedupe index intact; and
+- production load remained low during verification (load averages below `0.4`, about `12.4 GiB` memory available, and root disk at `10%`).
+
+The first npm-wrapped discovery launch created only the isolated collection indexes and made zero quota claims/API requests; its silent wrapper did not print a completion result. The entry point was therefore invoked directly once. That invocation is the single vendor request recorded above and must not be repeated merely as a health check.
+
+### Discovered room mapping proposal — approval required
+
+No row below is active yet. The proposed pairing is based on the exact HotelRunner capacity/name and the exact active PMS room configuration. The owner must approve it before any mapping update or projection activation.
+
+| HotelRunner inventory | HotelRunner room | Capacity | Proposed local PMS room | Current state |
+| --- | --- | ---: | --- | --- |
+| `HR:1329539` | Default room type | 0 | **Never map** | `conflict`; `is_master=true` fallback |
+| `HR:1332317` | Comfort Family Room - 4 beds | 4 | `quadRooms` — Quadruple Room – Comfort & Privacy (`6a40e45a1a6d1850eb25c58b`) | verified, `pending` |
+| `HR:1332547` | Comfort Double Room | 2 | `doubleRooms` — Double Room – Comfort & Relaxation (`6a40df5f1a6d1850eb25c183`) | verified, `pending` |
+| `HR:1332566` | Comfort Family - 5 Beds | 5 | `familyRooms` — Family Quintuple Room (`6a40e4ec1a6d1850eb25c635`) | verified, `pending` |
+| `HR:1332585` | Comfort Family Room - 6 beds | 6 | `familyRooms` — Spacious Six-Bed Room (`6a4a84216022cd7f31729011`) | verified, `pending` |
+| `HR:1332587` | Comfort Triple Room - 3 beds | 3 | `tripleRooms` — Triple Room - Premium Comfort (`6a40e0981a6d1850eb25c27c`) | verified, `pending` |
+
+Each non-master code exposes its standard and non-refundable rate-code variants and reports SAR plus availability/restriction/price-update capability. Those capabilities do not authorize outbound updates: **Can update room calendar remains disabled**, and outbound availability/rates remain a later phase.
 
 ## Non-negotiable invariants
 
@@ -236,7 +273,7 @@ The normal backend process:
 
 The worker:
 
-- when Gate 4 is explicitly approved, runs as exactly one dedicated systemd service; at the current Gate 0, no HotelRunner unit or worker process is installed or running;
+- when Gate 4 is explicitly approved, runs as exactly one dedicated systemd service; at the current Gate-3 mapping-review stop, no HotelRunner unit or worker process is installed or running;
 - obtains a separate database-backed projection lease before claiming any event, guaranteeing one projection at a time for the property even if a second process is accidentally started;
 - renews that property lease during work and fails closed if ownership is lost;
 - checks for a due pull no more often than every 30 seconds;
@@ -736,7 +773,7 @@ Reservation-state response is also disabled. Even when `requires_response=true`,
 - Callback credential/property readiness is separated from worker-only feature-flag validity: callback archival can remain available while an invalid worker configuration still prevents every worker/database action.
 - Callback authentication happens before parsing the form body.
 - Body, field, part, reservation-count, text, room, night, and response limits bound memory/work.
-- The deployed repository contains an Nginx hardener that disables both `access_log` and `error_log` in the exact callback location; it preserves the rest of the active site, tests the candidate config, reloads, and rolls back on failure. Its root installation remains pending at the current stop point, so only `access_log off` is active.
+- The deployed Nginx hardener disables both `access_log` and callback error logging in the exact callback location; it preserves the rest of the active site, tests the candidate config, reloads, and rolls back on failure. Its root installation completed on 2026-08-07, and the active block now has `access_log off;` plus `error_log /dev/null crit;`.
 - The deployed backend and frontend default their production servers to loopback, and post-deploy listener checks proved only `127.0.0.1:8080` and `127.0.0.1:3080`; Nginx/Cloudflare and local health monitors continue through loopback.
 - Application URL sanitization removes the complete callback query, not only known keys.
 - Error sanitization redacts common credentials and truncates messages.
@@ -784,9 +821,9 @@ OAuth client IDs, payment publishable keys, PayPal client IDs, and properly prov
 8. Verify exact Git SHAs, loopback listeners, Nginx/Cloudflare public health, callback behavior/log isolation, frontend asset integrity, OTA-email continuity, and unchanged unrelated PM2 PIDs/status. Keep the HotelRunner worker absent/stopped and every mutation/network gate false.
 9. If a named check fails, roll back only the affected repository/process to its recorded security-floor SHA/build backup. Once loopback edge hardening has been deployed and verified, do not roll back behind it. Never alter reservation data as part of code rollback.
 
-### Gate 0 - current stop point
+### Gate 0 - historical pre-discovery stop point
 
-This is the current production stop point. Do not proceed to Gate 1 or worker start while token rotation is outstanding.
+This was the production stop point before the 2026-08-07 Nginx hardening, authenticated callback probe, and one-call discovery. The owner explicitly instructed retention of the one current credential after being told it matches the historical logged value; rotation remains recommended but was not performed. The persistent worker and projection must still not start before mapping approval.
 
 - Projection stays false.
 - Worker stays stopped.
@@ -1035,7 +1072,7 @@ Suggested alert conditions for the future monitoring page:
 
 All future HotelRunner screens stay under `/admin/hotelrunner/*`, use the same isolated frontend module, call only authenticated local backend APIs, and are property-scoped server-side. Credentials never become browser-readable.
 
-### Phase 1A - deployed at Gate 0; projection not active
+### Phase 1A - deployed at Gate 3 mapping review; projection not active
 
 Current route:
 
@@ -1149,7 +1186,7 @@ HotelRunner reservation comments and payment metadata are not substitutes for me
 
 ## Definition of done for inbound go-live (acceptance criteria, not current status)
 
-This checklist is not evidence of completion. Current production has not passed token rotation, discovery, mapping approval, worker activation, projection, or controlled lifecycle validation.
+This checklist is not evidence of completion. Current production has passed the one-call discovery but has not passed token rotation, mapping approval, worker activation, projection, or controlled lifecycle validation.
 
 Inbound HotelRunner authority is not done until all are true:
 
@@ -1195,6 +1232,7 @@ Vendor documentation does not publish a guaranteed REST retry count or email-fal
 
 ## Change log
 
+- **2026-08-07:** Installed and verified the versioned Nginx callback log hardener, proved configured callback authentication with a write-free `422` probe, completed exactly one six-code room-list discovery with zero reservation-history calls, preserved PMS/OTA invariants, and stopped with five verified mappings pending owner approval plus the master fallback permanently unmapped.
 - **2026-08-06:** Added a fail-closed frontend environment preflight, removed unused server credential names from local and production frontend environments with protected rollback copies, tightened the production frontend environment to mode `600`, and recorded clean-build/cache/provider-rotation requirements for the historical public-bundle incident.
 - **2026-08-06:** Deployed, but did not activate, reservation-level OTA-email coexistence, verified commercial-only payout enrichment, the complete sanitized HotelRunner gross-pricing snapshot, fail-closed pull/configuration, one-call room discovery, room-list generations/retirement/conflict checks, outbound confirmation boundary enforcement, a mandatory production activation cutoff, database-backed one-at-a-time property projection, durable overbooking attention, and removal of only the top-navbar shortcut. Production remains Gate 0 with the worker absent and all HotelRunner gates false.
 - **2026-08-06:** Merged backend implementation commit `ce7217159c13e10cb0ae3135714d86385c5a044e` and this runbook through PR #35; deployed application merge `538678e0fcabe4df56621b5328612ff382da0871` and passed the controlled Gate-0 checks recorded above.
