@@ -79,7 +79,7 @@ Snapshot date: **2026-08-06**. This is historical deployment evidence, not a sub
 
 The reservation involved in the live fallback incident had an unchanged secure document hash across deployment. Exact hashes and identifiers are intentionally retained outside this repository.
 
-Current release boundary: production is still Gate 0 at backend `c42d2d5ae2dbe3899d43dd5d7f36ead92c08b6db` and frontend `34c2daf672ca8c3b29466ee57d5acbcf629fa97e`. Frontend hardening is merged on GitHub but is not deployed; backend hardening has an immutable local implementation commit but has not yet completed GitHub review/merge. No room discovery, mapping approval, worker installation, projection activation, delivery confirmation, history pull, or controlled live lifecycle test has occurred. “Implemented” or “current” below describes release-candidate code unless a production snapshot row explicitly says otherwise.
+Current release boundary: production is still Gate 0 at backend `c42d2d5ae2dbe3899d43dd5d7f36ead92c08b6db` and frontend `34c2daf672ca8c3b29466ee57d5acbcf629fa97e`. Frontend hardening is merged on GitHub but is not deployed; backend hardening is published in draft PR #35 but has not yet completed review/merge. No room discovery, mapping approval, worker installation, projection activation, delivery confirmation, history pull, or controlled live lifecycle test has occurred. “Implemented” or “current” below describes release-candidate code unless a production snapshot row explicitly says otherwise.
 
 Traceability recorded at this snapshot:
 
@@ -88,7 +88,7 @@ Traceability recorded at this snapshot:
 | Backend production revision | `c42d2d5ae2dbe3899d43dd5d7f36ead92c08b6db` |
 | Backend HotelRunner baseline | GitHub PR #33 / merge `05702cf981532815998858f8f7a37bc5205524bf` |
 | Backend environment baseline | GitHub PR #34 / merge `c42d2d5ae2dbe3899d43dd5d7f36ead92c08b6db` |
-| Backend hardening implementation candidate | `ce7217159c13e10cb0ae3135714d86385c5a044e`; GitHub PR/merge pending at this snapshot |
+| Backend hardening implementation candidate | `ce7217159c13e10cb0ae3135714d86385c5a044e`; GitHub PR #35, merge pending at this snapshot |
 | Frontend production revision | `34c2daf672ca8c3b29466ee57d5acbcf629fa97e` |
 | Frontend production baseline | GitHub PR #25 / merge `34c2daf672ca8c3b29466ee57d5acbcf629fa97e` |
 | Frontend reviewed candidate, not production | GitHub PR #26; head `b1f937e8d5137f642e8dfb5274b4a0e8f88e0751`; merge/deploy target `3e25743572da2890eef4d4ebe2eca4894cd2db5a` |
@@ -1177,5 +1177,6 @@ Vendor documentation does not publish a guaranteed REST retry count or email-fal
 
 - **2026-08-06:** Added a fail-closed frontend environment preflight, removed unused server credential names from local and production frontend environments with protected rollback copies, tightened the production frontend environment to mode `600`, and recorded clean-build/cache/provider-rotation requirements for the historical public-bundle incident.
 - **2026-08-06:** Added in release-candidate code, not activated in production: reservation-level OTA-email coexistence, verified commercial-only payout enrichment, the complete sanitized HotelRunner gross-pricing snapshot, fail-closed pull/configuration, one-call room discovery, room-list generations/retirement/conflict checks, outbound confirmation boundary enforcement, a mandatory production activation cutoff, database-backed one-at-a-time property projection, durable overbooking attention, and removal of only the top-navbar shortcut. Production remains Gate 0 with the worker absent and all HotelRunner gates false.
+- **2026-08-06:** Published backend implementation commit `ce7217159c13e10cb0ae3135714d86385c5a044e` and this runbook through draft PR #35; merge and production deployment remain pending at this snapshot.
 - **2026-08-06:** Frontend safeguards merged through PR #26 (head `b1f937e8d5137f642e8dfb5274b4a0e8f88e0751`, merge `3e25743572da2890eef4d4ebe2eca4894cd2db5a`); 430 tests across 69 suites and the optimized build passed. Production deployment remains pending at this snapshot.
 - **2026-08-06:** Replaced the short runbook with the complete local-first architecture, security controls, production snapshot, live-fallback interpretation, staged activation, rollback, admin roadmap, and outbound inventory/rate design. Recorded token rotation and dedicated admin permission as outstanding gates.
