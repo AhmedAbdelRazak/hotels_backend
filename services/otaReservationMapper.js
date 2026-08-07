@@ -170,6 +170,13 @@ function containsConfiguredZadAjyadAlias(value = "") {
 	return hasZad && hasAjyad;
 }
 
+function containsStandaloneAjyadHotelSegment(value = "") {
+	return String(value || "")
+		.split(/\s*(?:[-–—·|]|::)\s*/u)
+		.map((segment) => normalizeAjyadComparable(segment))
+		.some((segment) => /^(?:ajyad|agyad)(?: hotel)?$/i.test(segment));
+}
+
 function normalizedReservationContainsConfiguredZadAjyadAlias(normalized = {}) {
 	const sourceBackedHotelValues = hasSourceField(normalized, "hotelName")
 		? [
@@ -2547,6 +2554,43 @@ function extractAirbnbMoneyAfterLabel(text = "", label = "") {
 	return parseMoney(match?.[1] || "");
 }
 
+function extractAirbnbHostServiceFee(text = "") {
+	const matches = Array.from(
+		String(text || "").matchAll(
+			/Host\s+service\s+fee(?:\s*\([^)]{0,40}\))?\s*(?:[:#]?\s*)-?\s*((?:SR|SAR|USD|US\$|\$)\s*[0-9][0-9,.]*)/gi
+		)
+	)
+		.map((match) => parseMoney(match[1] || ""))
+		.filter(
+			(value) =>
+				Number.isFinite(Number(value.amount)) && Number(value.amount) >= 0
+		);
+	const unique = Array.from(
+		new Map(
+			matches.map((value) => [
+				`${String(value.currency || "SAR").toUpperCase()}:${round2(
+					value.amount
+				).toFixed(2)}`,
+				value,
+			])
+		).values()
+	);
+	if (unique.length !== 1) {
+		return {
+			amount: 0,
+			currency: "",
+			matched: false,
+			conflict: unique.length > 1,
+		};
+	}
+	return {
+		amount: round2(unique[0].amount),
+		currency: unique[0].currency || "SAR",
+		matched: true,
+		conflict: false,
+	};
+}
+
 function normalizeMappingKey(value = "") {
 	return normalizeIntlComparable(value);
 }
@@ -2663,17 +2707,29 @@ function resolveConfiguredAirbnbHotelMapping(context = {}) {
 		if (exactMatch.hotelId || exactMatch.hotelName) return exactMatch;
 	}
 
-	const ajyadMatchedValue = [
+	const ajyadCandidates = [
 		context.listingTitle,
 		...(Array.isArray(context.hostLabels) ? context.hostLabels : []),
-	]
-		.filter(Boolean)
-		.find((value) => containsConfiguredZadAjyadAlias(value));
+	].filter(Boolean);
+	const ajyadMatchedValue = ajyadCandidates.find((value) =>
+		containsConfiguredZadAjyadAlias(value)
+	);
 	if (ajyadMatchedValue) {
 		return {
 			hotelId: configuredAjyadHotelId(),
 			matchedBy: "zad ajyad alias",
 			matchedValue: ajyadMatchedValue,
+			matchStrength: "exact_alias",
+		};
+	}
+	const standaloneAjyadMatchedValue = ajyadCandidates.find((value) =>
+		containsStandaloneAjyadHotelSegment(value)
+	);
+	if (standaloneAjyadMatchedValue) {
+		return {
+			hotelId: configuredAjyadHotelId(),
+			matchedBy: "standalone ajyad hotel segment",
+			matchedValue: standaloneAjyadMatchedValue,
 			matchStrength: "exact_alias",
 		};
 	}
@@ -2700,6 +2756,7 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 	const occupancy = extractAirbnbOccupancy(text);
 	const guestTotal = extractAirbnbMoneyAfterLabel(text, "Total (SAR)");
 	const payout = extractAirbnbMoneyAfterLabel(text, "You earn");
+	const hostServiceFee = extractAirbnbHostServiceFee(text);
 	const guestTotalCurrency = guestTotal.currency || "SAR";
 	const payoutCurrency = payout.currency || guestTotalCurrency || "SAR";
 	const guestTotalConversion = getSarConversionMeta(
@@ -2707,6 +2764,10 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		guestTotalCurrency
 	);
 	const payoutConversion = getSarConversionMeta(payout.amount, payoutCurrency);
+	const hostServiceFeeConversion = getSarConversionMeta(
+		hostServiceFee.amount,
+		hostServiceFee.currency || guestTotalCurrency || "SAR"
+	);
 	const hotelMapping = resolveConfiguredAirbnbHotelMapping({
 		hostLabels,
 		listingId,
@@ -2735,6 +2796,19 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		amountConvertedAt: guestTotalConversion.convertedAt,
 		totalPayoutSar: payoutConversion.totalAmountSar,
 		netAfterExpensesTotal: payoutConversion.totalAmountSar,
+		otaCommissionSar:
+			hostServiceFee.matched && !hostServiceFee.conflict
+				? hostServiceFeeConversion.totalAmountSar
+				: null,
+		otaCommissionCurrency:
+			hostServiceFee.matched && !hostServiceFee.conflict
+				? hostServiceFee.currency || guestTotalCurrency || "SAR"
+				: "",
+		otaCommissionSource:
+			hostServiceFee.matched && !hostServiceFee.conflict
+				? "airbnb_host_service_fee"
+				: "",
+		otaCommissionConflict: hostServiceFee.conflict === true,
 		paymentSummary:
 			guestTotal.amount || payout.amount
 				? {
@@ -2753,6 +2827,10 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		paymentInstructions: guestTotal.amount
 			? "Airbnb collected guest payment; host payout is provided by Airbnb."
 			: "",
+		sourcePresence: {
+			otaCommission:
+				hostServiceFee.matched === true && hostServiceFee.conflict !== true,
+		},
 		hotelId: hotelMapping.hotelId || "",
 		hotelName: hotelMapping.hotelName || "",
 		hotelNameAliases: hostLabels,
@@ -4514,12 +4592,19 @@ function safeOtaPaymentSummary(summary = {}) {
 	}, {});
 }
 
-function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar = 0, commissionAmountSar = 0) {
+function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar, commissionAmountSar = 0) {
 	const providerLabel =
 		normalized.bookingSource || normalized.providerLabel || "OTA";
 	const collectionModel = normalized.paymentCollectionModel || "unknown";
 	const total = round2(totalAmountSar);
-	const subTotal = round2(subTotalSar || total);
+	const parsedSubTotal = Number(subTotalSar);
+	const subTotal =
+		subTotalSar !== undefined &&
+		subTotalSar !== null &&
+		String(subTotalSar).trim() !== "" &&
+		Number.isFinite(parsedSubTotal)
+			? round2(parsedSubTotal)
+			: total;
 	const commission = round2(commissionAmountSar);
 
 	if (collectionModel === "virtual_card") {
@@ -4761,6 +4846,13 @@ function extractNormalizedReservation(email) {
 	const genericRepeatedFactConflict =
 		genericRepeatedFactConflictFields.length > 0;
 	const airbnbFields = extractAirbnbFields(email, text, provider);
+	const verifiedAirbnbCommissionEvidence = !!(
+		provider === "airbnb" &&
+		trustedTransportProvider === "airbnb" &&
+		sourceSenderAuthenticated === true &&
+		airbnbFields.sourcePresence?.otaCommission === true &&
+		airbnbFields.otaCommissionSource === "airbnb_host_service_fee"
+	);
 	const agodaFields = extractAgodaFields(email, text, provider);
 	const expediaPartnerCentralFields = extractExpediaPartnerCentralFields(
 		text,
@@ -5496,6 +5588,11 @@ function extractNormalizedReservation(email) {
 			"Trip.com declared night counts conflict with the check-in/check-out date range."
 		);
 	}
+	if (airbnbFields.otaCommissionConflict === true) {
+		warnings.push(
+			"Airbnb email contains conflicting Host service fee amounts; OTA commission was left unverified."
+		);
+	}
 	for (const field of genericRepeatedFactConflictFields) {
 		warnings.push(genericRepeatedFactConflictReason(field));
 	}
@@ -5568,6 +5665,16 @@ function extractNormalizedReservation(email) {
 				vccPayoutSar ||
 				0
 		),
+		otaCommissionSar:
+			verifiedAirbnbCommissionEvidence
+				? airbnbFields.otaCommissionSar
+				: null,
+		otaCommissionCurrency: verifiedAirbnbCommissionEvidence
+			? airbnbFields.otaCommissionCurrency || "SAR"
+			: "",
+		otaCommissionSource: verifiedAirbnbCommissionEvidence
+			? airbnbFields.otaCommissionSource
+			: "",
 		nightlyPricingSource: directTripFields.nightlyPricingSource || [],
 		nightlyPricingSar: directTripFields.nightlyPricingSar || [],
 		paymentSummary,
@@ -5696,6 +5803,7 @@ function extractNormalizedReservation(email) {
 				!genericRepeatedFactConflictSet.has("amount") &&
 				(!!amountText || !!airbnbFields.amount || !!agodaFields.amount) &&
 				Number(parsedMoney.amount || 0) > 0,
+			otaCommission: verifiedAirbnbCommissionEvidence,
 			adults:
 				!genericRepeatedFactConflictSet.has("adults") &&
 				(!!adultsField ||
@@ -7241,19 +7349,43 @@ async function resolveRoomMatchWithAi(hotelDetails, normalized = {}) {
 	};
 }
 
-function resolveRootPriceForDate(roomDetails, ymd) {
+function resolveRootPriceForDate(roomDetails, ymd, options = {}) {
 	const pricingRate = (roomDetails.pricingRate || []).find(
 		(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
 	);
 	if (pricingRate) {
-		const calendarRoot = n(pricingRate.rootPrice);
-		if (calendarRoot >= MIN_REAL_CALENDAR_ROOT_PRICE) return calendarRoot;
+		const rawCalendarRoot = pricingRate.rootPrice;
+		if (
+			rawCalendarRoot !== undefined &&
+			rawCalendarRoot !== null &&
+			String(rawCalendarRoot).trim() !== ""
+		) {
+			const calendarRoot = Number(rawCalendarRoot);
+			if (Number.isFinite(calendarRoot) && calendarRoot >= 0) {
+				if (calendarRoot >= MIN_REAL_CALENDAR_ROOT_PRICE) return calendarRoot;
+				if (options.preserveExplicitZero === true) return 0;
+			}
+		}
 		const calendarPrice = n(pricingRate.price);
 		if (calendarPrice > 0) return calendarPrice;
 	}
 	if (roomDetails.defaultCost) return n(roomDetails.defaultCost);
 	if (roomDetails.price?.basePrice) return n(roomDetails.price.basePrice);
-	return 0;
+	return null;
+}
+
+function verifiedExplicitOtaCommissionSar(normalized = {}) {
+	if (
+		normalizeComparable(normalized.provider || "") !== "airbnb" ||
+		normalizeComparable(normalized.trustedTransportProvider || "") !== "airbnb" ||
+		normalized.sourceSenderAuthenticated !== true ||
+		normalized.otaCommissionSource !== "airbnb_host_service_fee" ||
+		!hasSourceField(normalized, "otaCommission")
+	) {
+		return null;
+	}
+	const value = Number(normalized.otaCommissionSar);
+	return Number.isFinite(value) && value >= 0 ? round2(value) : null;
 }
 
 function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
@@ -7296,6 +7428,11 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	const nightlyPricingSar = Array.isArray(normalized.nightlyPricingSar)
 		? normalized.nightlyPricingSar
 		: [];
+	const preserveExplicitCalendarZero =
+		normalizeComparable(normalized.provider || "") === "airbnb" &&
+		normalizeComparable(normalized.trustedTransportProvider || "") ===
+			"airbnb" &&
+		normalized.sourceSenderAuthenticated === true;
 	const usesSourceNightlyPricing =
 		roomCount === 1 &&
 		nightlyPricingSar.length === dateRange.length &&
@@ -7355,14 +7492,15 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 				netAfterExpensesSlots[currentSlot] || finalPrice
 			);
 			slotIndex += 1;
-			const configuredRootPrice = round2(resolveRootPriceForDate(roomDetails, ymd));
+			const resolvedRootPrice = resolveRootPriceForDate(roomDetails, ymd, {
+				preserveExplicitZero: preserveExplicitCalendarZero,
+			});
 			const fallbackRootPrice = round2(
 				fallbackRootSlots[currentSlot] || netAfterExpenses || finalPrice
 			);
 			const rootPrice =
-				configuredRootPrice > 0 ? configuredRootPrice : fallbackRootPrice;
-			const commissionRate =
-				rootPrice > 0 ? round2(defaultDeductionRate * 100) : 0;
+				resolvedRootPrice === null ? fallbackRootPrice : round2(resolvedRootPrice);
+			const commissionRate = 0;
 			const otaExpenseAmount = Math.max(0, round2(finalPrice - netAfterExpenses));
 			const platformMargin = round2(netAfterExpenses - rootPrice);
 
@@ -7420,10 +7558,7 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	});
 
 	const subTotalSar = round2(sumRootPriceAllRooms);
-	const commissionAmountSar = defaultOtaReviewDeductionAmount(
-		subTotalSar,
-		defaultDeductionRate
-	);
+	const commissionAmountSar = 0;
 
 	return {
 		ok: true,
@@ -7540,6 +7675,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 		defaultDeductionRate,
 		defaultDeductionApplied: true,
 	};
+	const otaCommissionSar = verifiedExplicitOtaCommissionSar(normalized);
 	const guestComment = cleanOtaGuestNote(
 		normalized.comment || normalized.guestNotes || ""
 	);
@@ -7595,6 +7731,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 			paid_amount: paymentMapping.paidAmount,
 			paid_amount_breakdown: paymentMapping.paidAmountBreakdown,
 			commission: pricing.commissionAmountSar,
+			commission_ota: otaCommissionSar,
 			financial_cycle: paymentMapping.financialCycle,
 			pickedRoomsType: pricing.pickedRoomsType,
 			pickedRoomsPricing: pricing.pickedRoomsType,
@@ -7684,6 +7821,9 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 				otaPayoutFallbackReason: normalized.otaPayoutFallbackReason || "",
 				otaTotalPayoutSar: adminPricingTotals.netAfterExpensesTotal,
 				otaExpenseTotalSar: adminPricingTotals.otaExpenseTotal,
+				otaCommissionSar,
+				otaCommissionSource: normalized.otaCommissionSource || "",
+				otaCommissionSourceBacked: otaCommissionSar !== null,
 				otaPlatformMarginSar: adminPricingTotals.platformMarginTotal,
 				otaExchangeRateToSar: normalized.exchangeRateToSar || 0,
 				otaExchangeRateSource: normalized.exchangeRateSource || "",
@@ -7726,6 +7866,7 @@ function compactUpdate(document) {
 		"paid_amount",
 		"paid_amount_breakdown",
 		"commission",
+		"commission_ota",
 		"financial_cycle",
 		"pickedRoomsType",
 		"pickedRoomsPricing",
@@ -14772,6 +14913,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		normalized.exchangeRateSource ||
 		"";
 	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
+	const otaCommissionSar = verifiedExplicitOtaCommissionSar(normalized);
 	const explicitNetAfterExpenses = round2(
 		normalized.totalPayoutSar ||
 			normalized.netAfterExpensesTotal ||
@@ -14907,6 +15049,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		paid_amount: paymentMapping.paidAmount,
 		paid_amount_breakdown: paymentMapping.paidAmountBreakdown,
 		commission: 0,
+		commission_ota: otaCommissionSar,
 		financial_cycle: paymentMapping.financialCycle,
 		pickedRoomsType,
 		pickedRoomsPricing: pickedRoomsType,
@@ -15013,6 +15156,9 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaPayoutFallbackReason: normalized.otaPayoutFallbackReason || "",
 			otaTotalPayoutSar: netAfterExpensesTotal,
 			otaExpenseTotalSar: otaExpenseTotal,
+			otaCommissionSar,
+			otaCommissionSource: normalized.otaCommissionSource || "",
+			otaCommissionSourceBacked: otaCommissionSar !== null,
 			otaPlatformMarginSar: 0,
 			otaExchangeRateToSar: normalized.exchangeRateToSar || 0,
 			otaExchangeRateSource: normalized.exchangeRateSource || "",
