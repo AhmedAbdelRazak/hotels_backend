@@ -8,6 +8,7 @@ const test = require("node:test");
 const {
 	REPAIR_ID,
 	TARGETS,
+	assertPendingOtaReview,
 	assertExpectedProjection,
 	hmzCorrectionSet,
 	parseArguments,
@@ -79,6 +80,23 @@ test("both exact target projections require separate zero legacy and explicit OT
 		wrong.commission = target.otaCommission;
 		assert.throws(() => assertExpectedProjection(wrong, code, target));
 	}
+});
+
+test("postverify accepts the lowercase canonical status persisted by the reservation schema", () => {
+	assert.doesNotThrow(() =>
+		assertPendingOtaReview({
+			state: "ota platform review",
+			reservation_status: "ota platform review",
+			otaPlatformReview: { status: "pending" },
+		})
+	);
+	assert.throws(() =>
+		assertPendingOtaReview({
+			state: "confirmed",
+			reservation_status: "confirmed",
+			otaPlatformReview: { status: "pending" },
+		})
+	);
 });
 
 test("Safwan correction changes only the scoped commercial bundle and records post-release provenance", () => {
