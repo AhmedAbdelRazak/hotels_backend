@@ -697,6 +697,7 @@ test("generic reservation updates strip server-owned pricing and audit evidence"
 		"hotelrunnerPricing.grandTotal": 1000,
 		otaIdentityKey: "fabricated",
 		"otaPlatformReview.status": "approved",
+		commission_ota: 75,
 	};
 
 	reservationAccess.stripServerManagedReservationUpdateFields(update);
@@ -724,6 +725,7 @@ const directHotelRunnerSourceFixture = () => ({
 	tax_total: 140,
 	item_total: 990,
 	currency: "SAR",
+	commission_ota: 150,
 });
 
 test("direct HotelRunner source echoes are removed while local housing remains editable", () => {
@@ -745,6 +747,7 @@ test("direct HotelRunner source echoes are removed while local housing remains e
 		tax_total: 140,
 		item_total: 990,
 		currency: "sar",
+		commission_ota: "150.00",
 		roomId: [new mongoose.Types.ObjectId().toString()],
 		comment: "Local operational note",
 	};
@@ -772,6 +775,7 @@ test("direct HotelRunner source changes fail closed", () => {
 		[{ total_amount: 1 }, "total_amount"],
 		[{ adjustments_total: 1 }, "adjustments_total"],
 		[{ currency: "USD" }, "currency"],
+		[{ commission_ota: 1 }, "commission_ota"],
 	]) {
 		const result = reservationAccess.protectDirectHotelRunnerSourceUpdate(
 			payload,

@@ -10,6 +10,9 @@ const {
 	validateReservationInventoryForCreate,
 } = require("../controllers/reservations");
 const {
+	loadHotelRunnerEmailCommercialBridge,
+} = require("./hotelrunnerEmailCommercialBridge");
+const {
 	authoritativeExistingRefreshProtectedStateGuard,
 	buildOtaIdentityKey,
 	generateUniquePmsConfirmationNumber,
@@ -648,6 +651,7 @@ function buildCreateReservationDocument({
 		payment_details: { captured: false, onsite_paid_amount: 0 },
 		paid_amount: 0,
 		commission: 0,
+		commission_ota: null,
 		pickedRoomsType: pricing.pickedRooms,
 		pickedRoomsPricing: pricing.pickedRooms,
 		roomId: [],
@@ -1867,7 +1871,7 @@ const IMMUTABLE_HOTELRUNNER_LINK_METHODS = new Set([
 ]);
 
 async function applyCancellation(
-	{ normalized, event, mirror, existing, linkMethod },
+	{ normalized, event, mirror, existing, linkMethod, emailBridge = null },
 	dependencies
 ) {
 	const ReservationModel = dependencies.ReservationModel || Reservations;
@@ -1895,7 +1899,13 @@ async function applyCancellation(
 		};
 	}
 	const now = new Date();
+	const ownershipEvidenceBridge = hotelRunnerOwnershipEvidenceBridge(
+		existing,
+		normalized,
+		emailBridge
+	);
 	const set = {
+		...hotelRunnerOwnershipCommissionSet(existing, ownershipEvidenceBridge),
 		state: "cancelled",
 		reservation_status: "cancelled",
 		cancel_reason: normalized.cancelReason || "Cancelled by OTA through HotelRunner",
@@ -2026,6 +2036,10 @@ function sourceOwnedProjectionAfterUpdate({
 
 function staleEmailCommercialEvidenceSet({ preserveFinancialAmounts = false } = {}) {
 	const set = {
+		// `commission_ota` is valid only while the authenticated commercial
+		// evidence remains valid. It is not a settlement field, so never leave a
+		// stale amount visible even when protected finance amounts must be retained.
+		commission_ota: null,
 		"supplierData.hotelRunnerEmailCommercialEvidence": null,
 		"supplierData.otaPayoutFallbackReason":
 			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
@@ -2047,6 +2061,87 @@ function staleEmailCommercialEvidenceSet({ preserveFinancialAmounts = false } = 
 		set["ota_financial_summary.otaExpenseTotal"] = null;
 	}
 	return set;
+}
+
+function hotelRunnerOwnershipCommissionSet(existing = {}, emailBridge = null) {
+	const set = { commission: 0 };
+	const evidence = emailBridge?.ok === true ? emailBridge.evidence : null;
+	if (!evidence) {
+		set.commission_ota = null;
+		return set;
+	}
+	const otaCommission = round2(evidence.otaExpenseTotalSar);
+	if (!Number.isFinite(otaCommission) || otaCommission < 0) {
+		set.commission_ota = null;
+		return set;
+	}
+	set.commission_ota = otaCommission;
+	set["supplierData.hotelRunnerEmailCommercialEvidence"] = evidence;
+	set["supplierData.otaTotalPayoutSar"] = round2(evidence.payoutTotalSar);
+	set["supplierData.otaExpenseTotalSar"] = otaCommission;
+	set["supplierData.otaPayoutFallbackReason"] = "";
+	set["adminPricing.netAfterExpensesTotal"] = round2(evidence.payoutTotalSar);
+	set["adminPricing.otaExpenseTotal"] = otaCommission;
+	set["adminPricing.defaultDeductionApplied"] = false;
+	set["adminPricing.payoutFallbackReason"] = "";
+	set["adminPricing.commercialVerified"] = true;
+	set["ota_financial_summary.show"] = true;
+	set["ota_financial_summary.netAfterExpenses"] = round2(
+		evidence.payoutTotalSar
+	);
+	set["ota_financial_summary.netAfterOtaExpenses"] = round2(
+		evidence.payoutTotalSar
+	);
+	set["ota_financial_summary.otaExpenseTotal"] = otaCommission;
+	set["ota_financial_summary.commercialVerified"] = true;
+	set["ota_financial_summary.payoutFallbackReason"] = "";
+	return set;
+}
+
+function hotelRunnerOwnershipEvidenceBridge(existing = {}, normalized = {}, emailBridge = null) {
+	if (emailBridge?.ok === true && emailBridge.evidence) return emailBridge;
+	const evidence = verifiedHotelRunnerEmailCommercialEvidence(existing, {
+		provider: hotelRunnerCommercialProvider(normalized),
+	});
+	if (!evidence) return null;
+
+	const reportedCents = Number(normalized.totalCents);
+	const reportedAmount =
+		Number.isSafeInteger(reportedCents) && reportedCents > 0
+			? round2(reportedCents / 100)
+			: null;
+	// Minimal cancellation pushes legitimately omit commercial totals. They do
+	// not invalidate previously proven OTA evidence.
+	if (!reportedAmount && normalized.state === "canceled") {
+		return { ok: true, evidence };
+	}
+	if (!reportedAmount) return null;
+
+	const provider = hotelRunnerCommercialProvider(normalized);
+	const sourceCurrency = clean(normalized.currency).toUpperCase();
+	const storedPayment = existing?.supplierData?.otaPaymentSummary || {};
+	const storedSourceCurrency = clean(storedPayment.sourceCurrency).toUpperCase();
+	const candidateAmounts = [];
+	if (sourceCurrency === "SAR") {
+		candidateAmounts.push(Number(evidence.grossTotalSar));
+		if (provider === "agoda") {
+			candidateAmounts.push(Number(evidence.payoutTotalSar));
+		}
+	}
+	if (sourceCurrency && sourceCurrency === storedSourceCurrency) {
+		candidateAmounts.push(Number(storedPayment.sourceTotalGuestPaymentAmount));
+		if (provider === "agoda") {
+			candidateAmounts.push(Number(storedPayment.sourceTotalPayoutAmount));
+		}
+	}
+	return candidateAmounts.some(
+		(value) =>
+			Number.isFinite(value) &&
+			value > 0 &&
+			Math.abs(round2(value) - reportedAmount) <= 0.02
+	)
+		? { ok: true, evidence }
+		: null;
 }
 
 function availabilitySnapshotInventorySummary(snapshot = {}) {
@@ -2095,6 +2190,7 @@ async function applyActiveUpdate({
 	pricing,
 	linkMethod,
 	hotel,
+	emailBridge = null,
 	config = {},
 }, dependencies) {
 	const ReservationModel = dependencies.ReservationModel || Reservations;
@@ -2167,6 +2263,10 @@ async function applyActiveUpdate({
 			grossTotalSar: pricing.clientTotal,
 			currency: normalized.currency,
 		});
+	const incomingCommercialEvidence =
+		emailBridge?.ok === true && emailBridge.evidence
+			? emailBridge.evidence
+			: verifiedCommercialEvidence;
 	const hasPresentedCommercialEvidence = Boolean(
 		existingCommercialEvidence ||
 			existing?.adminPricing?.commercialVerified === true ||
@@ -2174,7 +2274,7 @@ async function applyActiveUpdate({
 	);
 	const commercialEvidenceStale = Boolean(
 		hasPresentedCommercialEvidence &&
-			(!verifiedCommercialEvidence || criticalChanged)
+			(!incomingCommercialEvidence || criticalChanged)
 	);
 	if (
 		criticalChanged &&
@@ -2223,7 +2323,15 @@ async function applyActiveUpdate({
 		};
 	}
 
-	const set = safeDescriptiveUpdates(existing, priorProjection, incomingProjection);
+	const ownershipEvidenceBridge = hotelRunnerOwnershipEvidenceBridge(
+		existing,
+		normalized,
+		emailBridge
+	);
+	const set = {
+		...safeDescriptiveUpdates(existing, priorProjection, incomingProjection),
+		...hotelRunnerOwnershipCommissionSet(existing, ownershipEvidenceBridge),
+	};
 	const guestCountsChanged = !same(
 		currentProjection.guestCounts,
 		incomingProjection.guestCounts
@@ -2250,7 +2358,7 @@ async function applyActiveUpdate({
 		set.pickedRoomsPricing = pricing.pickedRooms;
 	}
 	const preserveVerifiedEmailCommercial = Boolean(
-		verifiedCommercialEvidence && !criticalChanged
+		(emailBridge?.ok === true || incomingCommercialEvidence) && !criticalChanged
 	);
 	const commercialProtected =
 		commercialChanged &&
@@ -2829,6 +2937,21 @@ async function projectHotelRunnerReservation(
 			mirrorId: mirror._id,
 		};
 	}
+	const loadEmailBridge =
+		dependencies.loadEmailCommercialBridge ||
+		loadHotelRunnerEmailCommercialBridge;
+	const emailBridge = existing
+		? await loadEmailBridge(
+				{
+					existing,
+					normalized,
+					provider: hotelRunnerCommercialProvider(normalized),
+				},
+				dependencies.InboundEmailModel
+					? { InboundEmailModel: dependencies.InboundEmailModel }
+					: undefined
+			  )
+		: { ok: false, reason: "pms_reservation_not_created_yet", amountRole: "" };
 
 	if (normalized.state === "canceled") {
 		if (!existing) {
@@ -2847,7 +2970,14 @@ async function projectHotelRunnerReservation(
 			};
 		}
 		const result = await applyCancellation(
-			{ normalized, event, mirror, existing, linkMethod: linked.method },
+			{
+				normalized,
+				event,
+				mirror,
+				existing,
+				linkMethod: linked.method,
+				emailBridge,
+			},
 			dependencies
 		);
 		return { ...result, mirrorId: mirror._id };
@@ -2881,7 +3011,26 @@ async function projectHotelRunnerReservation(
 	}
 
 	const hotelCurrency = clean(hotel.currency || "SAR").toUpperCase();
-	if (normalized.currency !== hotelCurrency) {
+	const currencyBridgedByAuthenticatedEmail = emailBridge?.ok === true;
+	if (
+		normalized.currency !== hotelCurrency &&
+		!currencyBridgedByAuthenticatedEmail
+	) {
+		if (
+			!existing ||
+			[
+				"pms_reservation_not_created_yet",
+				"missing_inbound_email_reference",
+				"inbound_email_not_found",
+				"inbound_email_lookup_failed",
+			].includes(clean(emailBridge?.reason))
+		) {
+			return {
+				status: "retry",
+				code: "hotelrunner_currency_waiting_for_email_bridge",
+				mirrorId: mirror._id,
+			};
+		}
 		await markMirrorReview(
 			mirror,
 			"quarantined",
@@ -3010,11 +3159,12 @@ async function projectHotelRunnerReservation(
 					normalized,
 					event,
 					mirror,
-					existing,
-					pricing,
-					linkMethod: linked.method,
-					hotel,
-					config,
+				existing,
+				pricing,
+				linkMethod: linked.method,
+				hotel,
+				emailBridge,
+				config,
 				},
 				dependencies
 		  )

@@ -351,6 +351,13 @@ const reservationsSchema = new mongoose.Schema(
 			type: Number,
 			default: 0,
 		},
+		// OTA commission is commercially distinct from xHotelPro's legacy
+		// platform commission. `null` means that the OTA amount has not been
+		// proven by authenticated source evidence; it must not be guessed.
+		commission_ota: {
+			type: Number,
+			default: null,
+		},
 
 		commissionPaid: {
 			type: Boolean,

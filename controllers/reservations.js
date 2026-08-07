@@ -843,6 +843,7 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"otaIdentityKey",
 	"otaCrossTransportIdentityKey",
 	"otaPlatformReview",
+	"commission_ota",
 ];
 
 const stripServerManagedReservationUpdateFields = (payload = {}) => {
@@ -3104,6 +3105,7 @@ const DIRECT_HOTELRUNNER_SOURCE_FIELDS = Object.freeze([
 	"tax_total",
 	"item_total",
 	"currency",
+	"commission_ota",
 ]);
 
 const directHotelRunnerSourceValue = (field, value) => {
@@ -3125,6 +3127,7 @@ const directHotelRunnerSourceValue = (field, value) => {
 			"adjustments_total",
 			"tax_total",
 			"item_total",
+			"commission_ota",
 		].includes(field)
 	) {
 		const number = Number(value);

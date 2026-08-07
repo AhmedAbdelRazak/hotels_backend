@@ -9394,7 +9394,102 @@ function directHotelRunnerTopLevelPaymentStateProtected(existing = {}) {
 	return financeStatus !== "not paid" || payment !== reportedPayment;
 }
 
+function isPristineHotelRunnerOtaReview(existing = {}) {
+	if (!hasDirectHotelRunnerProjection(existing)) return false;
+	const states = [existing.state, existing.reservation_status].map((value) =>
+		normalizeComparable(value || "")
+	);
+	if (!states.every((value) => value === "ota platform review")) return false;
+	const review = existing.otaPlatformReview;
+	const visibility = existing.adminPricingVisibility;
+	if (
+		!review ||
+		typeof review !== "object" ||
+		Array.isArray(review) ||
+		!visibility ||
+		typeof visibility !== "object" ||
+		Array.isArray(visibility)
+	) {
+		return false;
+	}
+	const allowedReviewKeys = new Set([
+		"status",
+		"source",
+		"inboundEmailId",
+		"provider",
+		"providerLabel",
+		"confirmationNumber",
+		"createdAt",
+		"releasedAt",
+		"releasedBy",
+		"priceAtRelease",
+		"hotelRunnerManaged",
+		"hotelRunnerLinkedAt",
+		"lastHotelRunnerUpdatedAt",
+		"hotelAssignmentRequired",
+		"hotelAssignmentStatus",
+		"assignedHotelId",
+		"assignedHotelName",
+		"assignedAt",
+		"roomMappingStatus",
+		"roomMappingHotelId",
+		"lastUpdatedAt",
+	]);
+	const allowedVisibilityKeys = new Set([
+		"rootOnlyForHotelManagement",
+		"source",
+		"appliedAt",
+		"appliedBy",
+	]);
+	if (
+		Object.entries(review).some(
+			([key, value]) =>
+				!allowedReviewKeys.has(key) && hasMeaningfulProtectedValue(value)
+		) ||
+		Object.entries(visibility).some(
+			([key, value]) =>
+				!allowedVisibilityKeys.has(key) && hasMeaningfulProtectedValue(value)
+		)
+	) {
+		return false;
+	}
+	const hotelId = normalizeId(existing.hotelId);
+	const reviewProvider = normalizeOtaIdentityProvider(review.provider);
+	const supplierProvider = normalizeOtaIdentityProvider(
+		existing?.supplierData?.otaProvider
+	);
+	const reviewConfirmation = normalizeConfirmation(review.confirmationNumber);
+	const supplierConfirmation = normalizeConfirmation(
+		existing?.supplierData?.otaConfirmationNumber ||
+			existing?.supplierData?.platformConfirmationNumber ||
+			existing?.supplierData?.suppliedBookingNo
+	);
+	return !!(
+		hotelId &&
+		reviewProvider &&
+		reviewProvider === supplierProvider &&
+		reviewConfirmation &&
+		reviewConfirmation === supplierConfirmation &&
+		normalizeComparable(review.status || "") === "pending" &&
+		normalizeMarker(review.source) === "hotelrunner_api" &&
+		review.hotelRunnerManaged === true &&
+		review.hotelAssignmentRequired === false &&
+		normalizeComparable(review.hotelAssignmentStatus || "") === "assigned" &&
+		normalizeId(review.assignedHotelId) === hotelId &&
+		normalizeComparable(review.roomMappingStatus || "") === "mapped" &&
+		normalizeId(review.roomMappingHotelId) === hotelId &&
+		!hasMeaningfulProtectedValue(review.inboundEmailId) &&
+		!hasMeaningfulProtectedValue(review.releasedAt) &&
+		!hasMeaningfulProtectedValue(review.releasedBy) &&
+		!hasMeaningfulProtectedValue(review.priceAtRelease) &&
+		visibility.rootOnlyForHotelManagement === true &&
+		normalizeMarker(visibility.source) === "hotelrunner_api" &&
+		!hasMeaningfulProtectedValue(visibility.appliedBy)
+	);
+}
+
 function directHotelRunnerCommercialOperationalStateProtected(existing = {}) {
+	if (isPristineHotelRunnerOtaReview(existing)) return false;
 	if (
 		hasTerminalOtaReservationStatus(existing) ||
 		hasInhouseOtaReservationStatus(existing)
@@ -9436,6 +9531,7 @@ function directHotelRunnerCommercialEnrichmentProtectedState(existing = {}) {
 	const pricing = existing.adminPricing || {};
 	const summary = existing.ota_financial_summary || {};
 	const visibility = existing.adminPricingVisibility || {};
+	const pristineHotelRunnerReview = isPristineHotelRunnerOtaReview(existing);
 	const verifiedExistingEvidence = verifiedHotelRunnerEmailCommercialEvidence(
 		existing,
 		{
@@ -9475,8 +9571,9 @@ function directHotelRunnerCommercialEnrichmentProtectedState(existing = {}) {
 		directHotelRunnerTopLevelPaymentStateProtected(existing) ||
 		paidAmountBreakdownHasProtectedState(existing) ||
 		financialCycleHasProtectedState(existing) ||
-		adminPricingVisibilityHasProtectedState(existing) ||
-		otaReviewHasProtectedState(existing) ||
+		(adminPricingVisibilityHasProtectedState(existing) &&
+			!pristineHotelRunnerReview) ||
+		(otaReviewHasProtectedState(existing) && !pristineHotelRunnerReview) ||
 		roomArraysHaveProtectedState(existing) ||
 		supplierDataHasProtectedState(existing) ||
 		rootPricingDrift ||
@@ -9542,17 +9639,31 @@ function directHotelRunnerEmailCommercialGuard({
 	if (!directHotelRunnerEmailHotelMatches(normalized, existing, hotelDetails)) {
 		return reject("hotel");
 	}
-	const hotelRunnerGross = directHotelRunnerAuthoritativeGrossTotal(existing);
-	if (
-		!hotelRunnerGross ||
-		Math.abs(hotelRunnerGross - Number(evidence.grossTotalSar || 0)) > 0.02
-	) {
+	const hotelRunnerReportedTotal = directHotelRunnerAuthoritativeGrossTotal(existing);
+	const evidenceGross = Number(evidence.grossTotalSar || 0);
+	const evidencePayout = Number(evidence.payoutTotalSar || 0);
+	const provider = normalizeOtaIdentityProvider(evidence.provider);
+	const reportedTotalRole =
+		hotelRunnerReportedTotal > 0 &&
+		Math.abs(hotelRunnerReportedTotal - evidenceGross) <= 0.02
+			? "gross"
+			: provider === "agoda" &&
+			  hotelRunnerReportedTotal > 0 &&
+			  Math.abs(hotelRunnerReportedTotal - evidencePayout) <= 0.02
+				? "payout"
+				: "";
+	if (!reportedTotalRole) {
 		return reject("gross_total");
 	}
 	if (directHotelRunnerCommercialEnrichmentProtectedState(existing)) {
 		return reject("protected_state");
 	}
-	return { ok: true, evidence, hotelRunnerGross };
+	return {
+		ok: true,
+		evidence,
+		hotelRunnerReportedTotal,
+		reportedTotalRole,
+	};
 }
 
 function hasDirectCommercialEvidenceAttempt(normalized = {}) {
@@ -9563,9 +9674,17 @@ function hasDirectCommercialEvidenceAttempt(normalized = {}) {
 	);
 }
 
-function directHotelRunnerCommercialEnrichmentSet(normalized = {}, evidence = {}) {
+function directHotelRunnerCommercialEnrichmentSet(
+	normalized = {},
+	evidence = {},
+	{ reportedTotalRole = "gross" } = {}
+) {
 	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
-	return {
+	const set = {
+		// Keep xHotelPro/platform commission separate from the OTA's fee. The OTA
+		// amount is written only from the complete, authenticated evidence above.
+		commission: 0,
+		commission_ota: evidence.otaExpenseTotalSar,
 		"adminPricing.netAfterExpensesTotal": evidence.payoutTotalSar,
 		"adminPricing.otaExpenseTotal": evidence.otaExpenseTotalSar,
 		"adminPricing.defaultDeductionApplied": false,
@@ -9584,6 +9703,15 @@ function directHotelRunnerCommercialEnrichmentSet(normalized = {}, evidence = {}
 		"supplierData.otaPayoutFallbackReason": "",
 		"supplierData.hotelRunnerEmailCommercialEvidence": evidence,
 	};
+	if (reportedTotalRole === "payout") {
+		// Agoda production pushes can report the hotel's payout in `total`.
+		// Correct only the PMS guest-facing gross fields from authenticated email
+		// evidence; supplierData.hotelRunner.pricing remains the immutable API view.
+		set.total_amount = evidence.grossTotalSar;
+		set["adminPricing.clientTotal"] = evidence.grossTotalSar;
+		set["ota_financial_summary.clientTotal"] = evidence.grossTotalSar;
+	}
+	return set;
 }
 
 function applyHotelRunnerEmailCommercialEvidenceToDocument(
@@ -9621,7 +9749,7 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 }
 
 function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
-	return {
+	const filter = {
 		...buildReservationSnapshotFilter(existing, { includeHotel: true }),
 		belongsTo: existing.belongsTo,
 		state: existing.state,
@@ -9629,6 +9757,7 @@ function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
 		total_rooms: existing.total_rooms,
 		total_amount: existing.total_amount,
 		currency: existing.currency,
+		commission: existing.commission,
 		"adminPricing.mode": existing.adminPricing?.mode,
 		"adminPricing.source": existing.adminPricing?.source,
 		"adminPricing.clientTotal": existing.adminPricing?.clientTotal,
@@ -9644,6 +9773,10 @@ function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
 		"supplierData.otaSourceAuthority":
 			existing.supplierData?.otaSourceAuthority,
 	};
+	// MongoDB's equality-to-null matches both the new explicit null and legacy
+	// documents where this newly introduced field does not exist yet.
+	filter.commission_ota = existing.commission_ota ?? null;
+	return filter;
 }
 
 async function loadReservationForCommercialEvidence(reservationId) {
@@ -9742,7 +9875,9 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 			matchedReservationBy,
 		};
 	}
-	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence);
+	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence, {
+		reportedTotalRole: guard.reportedTotalRole,
+	});
 	const updateResult = await Reservations.updateOne(
 		{
 			...directHotelRunnerCommercialSnapshotFilter(existing),
