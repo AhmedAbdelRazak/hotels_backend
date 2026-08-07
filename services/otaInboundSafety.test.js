@@ -5379,6 +5379,8 @@ test("the production Agoda six-person template keeps exact identity, room, and p
 	assert.equal(built.document.total_amount, 93);
 	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 67.08);
 	assert.equal(built.document.sub_total, 75);
+	assert.equal(built.document.pickedRoomsType[0].pricingByDay[0].rootPrice, 75);
+	assert.equal(built.document.commission, 0);
 });
 
 test("multi-room or multi-rate Agoda payloads require manual review", () => {
@@ -5731,6 +5733,162 @@ test("Airbnb two-column stay dates and guest totals remain source-backed", () =>
 		),
 		false
 	);
+});
+
+test("authenticated standalone AJYAD HOTEL Airbnb bookings map to Zad Ajyad with explicit OTA commission and PMS root pricing", () => {
+	const hotel = {
+		_id: "6a40b6a1a6efe70450536038",
+		belongsTo: "zad-owner",
+		roomCountDetails: [
+			{
+				_id: "triple-config",
+				roomType: "tripleRooms",
+				displayName: "Triple Room - Premium Comfort",
+				activeRoom: true,
+				pricingRate: ["09", "10", "11", "12", "13"].map((day) => ({
+					calendarDate: `2026-08-${day}`,
+					rootPrice: 75,
+					price: 75,
+				})),
+			},
+			{
+				_id: "six-bed-config",
+				roomType: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				activeRoom: true,
+				pricingRate: ["06", "07"].map((day) => ({
+					calendarDate: `2026-08-${day}`,
+					rootPrice: 0.00001,
+					price: 75,
+				})),
+			},
+		],
+	};
+	const cases = [
+		{
+			confirmationNumber: "HMZDMHQQRE",
+			guestName: "Safwan",
+			listingTitle: "COMFORT TRIPLE ROOM - AJYAD HOTEL - FREE BUS",
+			stayLine: "Sun, Aug 9 Fri, Aug 14",
+			occupancy: "1 adult",
+			guestTotal: 370.01,
+			payout: 271.88,
+			otaCommission: 49.87,
+			expectedRoomId: "triple-config",
+			expectedRootTotal: 375,
+		},
+		{
+			confirmationNumber: "HMPB4A4EW5",
+			guestName: "Imran Qaisar",
+			listingTitle: "COMFY FAMILY 6 BEDS ROOM - AJYAD HOTEL - FREE BUS",
+			stayLine: "Thu, Aug 6 Sat, Aug 8",
+			occupancy: "2 adults, 4 children",
+			guestTotal: 170.78,
+			payout: 125.48,
+			otaCommission: 23.02,
+			expectedRoomId: "six-bed-config",
+			expectedRootTotal: 0,
+		},
+	];
+
+	for (const fixture of cases) {
+		const normalized = extractNormalizedReservation({
+			from: "automated@airbnb.com",
+			receivedAt: "2026-08-07T15:53:15Z",
+			senderAuthentication: {
+				authenticatedAligned: true,
+				trustedProvider: "airbnb",
+				method: "dkim",
+			},
+			subject: `Reservation confirmed - ${fixture.guestName}`,
+			text: [
+				fixture.guestName,
+				"Identity verified",
+				fixture.listingTitle,
+				"Room",
+				"Check-in Checkout",
+				fixture.stayLine,
+				"Guests",
+				fixture.occupancy,
+				"Confirmation code",
+				fixture.confirmationNumber,
+				`TOTAL (SAR) SR ${fixture.guestTotal}`,
+				`Host service fee (15.5%) -SR ${fixture.otaCommission}`,
+				`YOU EARN SR ${fixture.payout}`,
+			].join("\n"),
+		});
+
+		assert.equal(normalized.hotelId, hotel._id);
+		assert.equal(normalized.hotelIdMatchedBy, "standalone ajyad hotel segment");
+		assert.equal(normalized.otaCommissionSar, fixture.otaCommission);
+		assert.equal(normalized.otaCommissionSource, "airbnb_host_service_fee");
+		assert.equal(normalized.sourcePresence.otaCommission, true);
+		const built = buildReservationDocument(normalized, hotel);
+		assert.equal(built.ok, true);
+		assert.equal(
+			String(built.document.pickedRoomsType[0].hotelRoomConfigId),
+			fixture.expectedRoomId
+		);
+		assert.equal(built.document.sub_total, fixture.expectedRootTotal);
+		assert.equal(built.document.adminPricing.rootTotal, fixture.expectedRootTotal);
+		assert.equal(
+			built.document.ota_financial_summary.hotelVisibleAmount,
+			fixture.expectedRootTotal
+		);
+		assert.equal(built.document.commission, 0);
+		assert.equal(built.document.commission_ota, fixture.otaCommission);
+		assert.equal(built.document.adminPricing.commissionAmount, 0);
+		assert.equal(built.document.ota_financial_summary.commissionAmount, 0);
+		assert.equal(built.document.financial_cycle.commissionValue, 0);
+		assert.equal(built.document.financial_cycle.commissionAmount, 0);
+		assert.equal(
+			built.document.financial_cycle.hotelPayoutDue,
+			fixture.expectedRootTotal
+		);
+		assert.equal(
+			built.document.supplierData.otaCommissionSource,
+			"airbnb_host_service_fee"
+		);
+		assert.equal(built.document.supplierData.otaCommissionSourceBacked, true);
+		for (const day of built.document.pickedRoomsType[0].pricingByDay) {
+			assert.equal(day.commissionRate, 0);
+			if (fixture.expectedRootTotal === 0) assert.equal(day.rootPrice, 0);
+		}
+	}
+});
+
+test("Airbnb OTA commission remains unset when Host service fee evidence is conflicting or unauthenticated", () => {
+	const base = {
+		from: "automated@airbnb.com",
+		receivedAt: "2026-08-07T15:53:15Z",
+		subject: "Reservation confirmed - Safe Guest",
+		text: [
+			"SAFE ROOM - AJYAD HOTEL - FREE BUS",
+			"Check-in Checkout",
+			"Sun, Aug 9 Mon, Aug 10",
+			"Guests 1 adult",
+			"Confirmation code HMSAFEFEE1",
+			"TOTAL (SAR) SR 100.00",
+			"Host service fee (15.5%) -SR 15.50",
+			"YOU EARN SR 80.00",
+		].join("\n"),
+	};
+	const unauthenticated = extractNormalizedReservation(base);
+	assert.equal(unauthenticated.otaCommissionSar, null);
+	assert.equal(unauthenticated.sourcePresence.otaCommission, false);
+
+	const conflicting = extractNormalizedReservation({
+		...base,
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "airbnb",
+			method: "dkim",
+		},
+		text: `${base.text}\nHost service fee (15.5%) -SR 16.50`,
+	});
+	assert.equal(conflicting.otaCommissionSar, null);
+	assert.equal(conflicting.sourcePresence.otaCommission, false);
+	assert.ok(conflicting.warnings.some((warning) => /conflicting Host service fee/i.test(warning)));
 });
 
 test("Airbnb genuinely conflicting repeated check-in dates still require review", () => {
@@ -8344,7 +8502,7 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 			clientPrice: 56.39,
 			mainPrice: 56.39,
 			rootPrice: 51,
-			commissionRate: 20,
+			commissionRate: 0,
 			totalPriceWithCommission: 56.39,
 			totalPriceWithoutCommission: 51,
 			netAfterExpenses: 45.11,
@@ -8377,7 +8535,7 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 		adults: 6,
 		children: 0,
 		sub_total: 102,
-		commission: 20.4,
+		commission: 0,
 		total_amount: 112.78,
 		financeStatus: "paid online",
 		payment: "paid online",
@@ -8403,7 +8561,7 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 			netAfterExpensesTotal: 90.22,
 			otaExpenseTotal: 22.56,
 			platformMarginTotal: -11.78,
-			commissionAmount: 20.4,
+			commissionAmount: 0,
 			defaultDeductionRate: 0.2,
 			defaultDeductionApplied: true,
 			source: "ota_email_create",
@@ -8420,8 +8578,8 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 			collectionModel: "pms_collected",
 			status: "open",
 			commissionType: "amount",
-			commissionValue: 20.4,
-			commissionAmount: 20.4,
+			commissionValue: 0,
+			commissionAmount: 0,
 			commissionAssigned: false,
 			commissionAssignedAt: null,
 			commissionAssignedBy: null,
