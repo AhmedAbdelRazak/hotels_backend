@@ -193,17 +193,49 @@ test("timing-safe text equality supports unequal lengths without throwing", () =
 	assert.equal(timingSafeTextEqual("", ""), true);
 });
 
-test("callback envelope accepts only a bounded non-empty reservations array", () => {
+test("callback envelope accepts bounded documented and safe form-serialization variants", () => {
+	const one = {
+		reservation_id: 123,
+		hr_number: "R123",
+		message_uid: "one",
+	};
 	const accepted = parseCallbackEnvelope(
-		JSON.stringify({ reservations: [{ message_uid: "one" }, { message_uid: "two" }] }),
+		JSON.stringify({ reservations: [one, { ...one, message_uid: "two" }] }),
 		2
 	);
 	assert.equal(accepted.reservations.length, 2);
+	assert.deepEqual(
+		parseCallbackEnvelope(JSON.stringify(JSON.stringify({ reservations: [one] })), 2)
+			.reservations,
+		[one]
+	);
+	assert.deepEqual(
+		parseCallbackEnvelope(`\uFEFF${JSON.stringify({ reservations: [one] })}`, 2)
+			.reservations,
+		[one]
+	);
+	assert.deepEqual(
+		parseCallbackEnvelope(encodeURIComponent(JSON.stringify({ reservations: [one] })), 2)
+			.reservations,
+		[one]
+	);
+	assert.deepEqual(
+		parseCallbackEnvelope(JSON.stringify({ reservations: JSON.stringify([one]) }), 2)
+			.reservations,
+		[one]
+	);
+	assert.deepEqual(parseCallbackEnvelope(JSON.stringify([one]), 2).reservations, [one]);
+	assert.deepEqual(parseCallbackEnvelope(JSON.stringify(one), 2).reservations, [one]);
+	assert.deepEqual(
+		parseCallbackEnvelope(JSON.stringify({ reservation: one }), 2).reservations,
+		[one]
+	);
 
 	for (const [data, max, code] of [
 		["not json", 2, "HOTELRUNNER_INVALID_JSON"],
 		["null", 2, "HOTELRUNNER_INVALID_ENVELOPE"],
-		["[]", 2, "HOTELRUNNER_INVALID_ENVELOPE"],
+		["[]", 2, "HOTELRUNNER_INVALID_RESERVATIONS"],
+		[JSON.stringify([{ arbitrary: "object" }]), 2, "HOTELRUNNER_INVALID_ENVELOPE"],
 		[JSON.stringify({}), 2, "HOTELRUNNER_INVALID_RESERVATIONS"],
 		[JSON.stringify({ reservations: [] }), 2, "HOTELRUNNER_INVALID_RESERVATIONS"],
 		[
