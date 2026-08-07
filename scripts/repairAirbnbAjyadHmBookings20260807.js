@@ -181,6 +181,18 @@ function assertExpectedProjection(reservation, code, target) {
 	assert.equal(reservation.supplierData?.otaCommissionSourceBacked, true);
 }
 
+function assertPendingOtaReview(reservation) {
+	assert.equal(
+		String(reservation.state || "").trim().toLowerCase(),
+		"ota platform review"
+	);
+	assert.equal(
+		String(reservation.reservation_status || "").trim().toLowerCase(),
+		"ota platform review"
+	);
+	assert.equal(reservation.otaPlatformReview?.status, "pending");
+}
+
 async function exactReservations(code) {
 	return Reservations.find(buildOtaConfirmationLookup(code, "airbnb")).lean().exec();
 }
@@ -468,9 +480,7 @@ async function applyHmP(plan, appliedAt) {
 	assert.equal(matches.length, 1, "HMP recovery did not leave exactly one reservation.");
 	const reservation = matches[0];
 	assertExpectedProjection(reservation, "hmpb4a4ew5", target);
-	assert.equal(reservation.state, "OTA Platform Review");
-	assert.equal(reservation.reservation_status, "OTA Platform Review");
-	assert.equal(reservation.otaPlatformReview?.status, "pending");
+	assertPendingOtaReview(reservation);
 
 	const audit = await InboundEmail.findById(target.auditId).lean();
 	if (audit.reconciliation?.repairId !== REPAIR_ID) {
@@ -587,6 +597,7 @@ module.exports = {
 	HOTEL_ID,
 	REPAIR_ID,
 	TARGETS,
+	assertPendingOtaReview,
 	assertExpectedProjection,
 	emailFromAudit,
 	hmzCorrectionSet,
