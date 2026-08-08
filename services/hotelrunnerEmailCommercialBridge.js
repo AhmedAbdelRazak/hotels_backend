@@ -38,6 +38,14 @@ const HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION = [
 	"normalizedReservation.currency",
 	"normalizedReservation.totalPayoutSar",
 	"normalizedReservation.netAfterExpensesTotal",
+	"normalizedReservation.otaCommissionSar",
+	"normalizedReservation.otaCommissionCurrency",
+	"normalizedReservation.otaCommissionSource",
+	"normalizedReservation.otaDeductionConflict",
+	"normalizedReservation.otaDeductionComponents",
+	"normalizedReservation.targetedPromotionsLabelPresent",
+	"normalizedReservation.nightlyPricingSource",
+	"normalizedReservation.nightlyPricingSar",
 	"normalizedReservation.sourceExchangeRateToSar",
 	"normalizedReservation.sourceExchangeRateSource",
 	"normalizedReservation.exchangeRateToSar",
@@ -63,6 +71,7 @@ const HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION = [
 	"normalizedReservation.sourcePresence.paymentCollectionModel",
 	"normalizedReservation.sourcePresence.paymentInstructions",
 	"normalizedReservation.source.receivedAt",
+	"normalizedReservation.source.textHash",
 ].join(" ");
 
 const clean = (value = "") => String(value == null ? "" : value).trim();

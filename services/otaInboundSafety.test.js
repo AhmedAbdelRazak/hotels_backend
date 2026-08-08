@@ -17,6 +17,7 @@ const {
 	MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS,
 	buildExistingReservationUpdateSet,
 	buildHotelRunnerEmailCommercialEvidence,
+	buildDirectHotelRunnerCommercialPricing,
 	buildLegacyRedactedTripConflictLookup,
 	buildOtaCrossTransportIdentityKey,
 	buildOtaConfirmationLookup,
@@ -5292,6 +5293,275 @@ test("occupancy, tax, and nightly rates cannot masquerade as a guest total", () 
 	);
 });
 
+const authenticatedAgodaCommercialVoucher = ({
+	bookingId,
+	checkin,
+	checkout,
+	roomName,
+	adults,
+	nightly,
+	gross,
+	net,
+	commission,
+	growthProgram,
+	taxOnCommission,
+	authenticated = true,
+}) => {
+	const deductions = [
+		commission === null ? "" : `Commission SAR -${commission}`,
+		`Agoda Growth Program SAR -${growthProgram}`,
+		`Tax on Commission SAR -${taxOnCommission}`,
+		"Targeted promotions",
+	]
+		.filter(Boolean)
+		.join(" ");
+	return {
+		from: '"agoda.com" <no-reply@agoda.com>',
+		to: "reservations@example.com",
+		subject: `Agoda Booking ID ${bookingId} - CONFIRMED Hotel Country: Saudi Arabia Check-in ${checkin} / Language_English`,
+		messageId: `agoda-${bookingId}@mail.agoda.com`,
+		sourceReceivedAt: "2026-08-07T10:00:00.000Z",
+		senderAuthentication: authenticated
+			? {
+					authenticatedAligned: true,
+					trustedProvider: "agoda",
+					method: "dkim",
+			  }
+			: {},
+		text: [
+			`Booking ID ${bookingId} Reservation Information`,
+			"PREPAID Booking confirmation",
+			"Zad Ajyad",
+			`Customer First Name SAFE Customer Last Name GUEST Country of Residence Saudi Arabia Check-in ${checkin} Check-out ${checkout} Other Guests [RmNo.1]`,
+			`Room Type No. of Rooms Occupancy No. of Extra Bed ${roomName} 1 ${adults} Adults 0`,
+			`From - To Rates ${nightly
+				.map(([date, amount]) => `${date} SAR ${amount}`)
+				.join(" ")} Reference sell rate (incl. taxes & fees) SAR ${gross} Compensation ${deductions}`,
+			`Net rate (incl. taxes & fees) SAR ${net}`,
+		].join("\n"),
+	};
+};
+
+test("authenticated production Agoda vouchers preserve gross, net, named deductions, and exact nightly allocation", () => {
+	const cases = [
+		{
+			bookingId: "687715051",
+			checkin: "August 9, 2026",
+			checkout: "August 11, 2026",
+			roomName: "Quadruple Room",
+			adults: 4,
+			nightly: [
+				["August 9, 2026", "53.37"],
+				["August 10, 2026", "53.37"],
+			],
+			gross: "172.48",
+			net: "106.74",
+			commission: "25.88",
+			growthProgram: "17.24",
+			taxOnCommission: "6.46",
+			expectedDates: ["2026-08-09", "2026-08-11"],
+			expectedNightlyGross: [86.24, 86.24],
+			expectedNightlyNet: [53.37, 53.37],
+			expectedExpense: 65.74,
+			expectedCommission: 25.88,
+			expectedComponents: [25.88, 17.24, 6.46],
+			expectedUnclassified: 16.16,
+		},
+		{
+			bookingId: "687702587",
+			checkin: "August 8, 2026",
+			checkout: "August 9, 2026",
+			roomName: "Triple Room",
+			adults: 3,
+			nightly: [["August 8, 2026", "49.50"]],
+			gross: "80.00",
+			net: "49.50",
+			commission: "12.00",
+			growthProgram: "8.00",
+			taxOnCommission: "3.00",
+			expectedDates: ["2026-08-08", "2026-08-09"],
+			expectedNightlyGross: [80],
+			expectedNightlyNet: [49.5],
+			expectedExpense: 30.5,
+			expectedCommission: 12,
+			expectedComponents: [12, 8, 3],
+			expectedUnclassified: 7.5,
+		},
+	];
+
+	for (const fixture of cases) {
+		const normalized = {
+			...extractNormalizedReservation(
+				authenticatedAgodaCommercialVoucher(fixture)
+			),
+			inboundEmailId: `audit-${fixture.bookingId}`,
+		};
+		assert.equal(normalized.confirmationNumber, fixture.bookingId);
+		assert.deepEqual(
+			[normalized.checkinDate, normalized.checkoutDate],
+			fixture.expectedDates
+		);
+		assert.equal(normalized.requiresManualReview, false);
+		assert.equal(normalized.totalAmountSar, Number(fixture.gross));
+		assert.equal(normalized.totalPayoutSar, Number(fixture.net));
+		assert.equal(normalized.otaCommissionSar, fixture.expectedCommission);
+		assert.deepEqual(
+			normalized.otaDeductionComponents.map((component) => component.amountSar),
+			fixture.expectedComponents
+		);
+		assert.deepEqual(
+			normalized.nightlyPricingSar.map((row) => row.clientAmountSar),
+			fixture.expectedNightlyGross
+		);
+		assert.deepEqual(
+			normalized.nightlyPricingSar.map((row) => row.payoutAmountSar),
+			fixture.expectedNightlyNet
+		);
+
+		const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+			appliedAt: new Date("2026-08-08T00:00:00.000Z"),
+		});
+		assert.equal(evidence.version, 2);
+		assert.equal(evidence.otaExpenseTotalSar, fixture.expectedExpense);
+		assert.equal(evidence.otaCommissionSar, fixture.expectedCommission);
+		assert.equal(
+			evidence.unclassifiedDeductionSar,
+			fixture.expectedUnclassified
+		);
+		assert.deepEqual(evidence.unpricedDeductionLabels, ["Targeted promotions"]);
+		assert.equal(evidence.inboundEmailId, `audit-${fixture.bookingId}`);
+		assert.match(evidence.sourceTextHash, /^[a-f0-9]{64}$/);
+	}
+});
+
+test("unequal Agoda nightly values use cent-exact weighted allocation instead of equal division", () => {
+	const normalized = {
+		...extractNormalizedReservation(
+			authenticatedAgodaCommercialVoucher({
+				bookingId: "687700001",
+				checkin: "August 20, 2026",
+				checkout: "August 22, 2026",
+				roomName: "Double Room",
+				adults: 2,
+				nightly: [
+					["August 20, 2026", "33.33"],
+					["August 21, 2026", "66.67"],
+				],
+				gross: "123.45",
+				net: "100.00",
+				commission: "12.00",
+				growthProgram: "5.00",
+				taxOnCommission: "1.00",
+			})
+		),
+		inboundEmailId: "audit-unequal-nightly",
+	};
+	assert.deepEqual(
+		normalized.nightlyPricingSar.map((row) => row.clientAmountSar),
+		[41.15, 82.3]
+	);
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized);
+	const pricing = buildDirectHotelRunnerCommercialPricing(
+		{
+			pickedRoomsPricing: [
+				{
+					count: 1,
+					pricingByDay: [
+						{
+							date: "2026-08-20",
+							clientPrice: 33.33,
+							rootPrice: 30,
+							hotelRunnerSourcePrice: 33.33,
+						},
+						{
+							date: "2026-08-21",
+							clientPrice: 66.67,
+							rootPrice: 50,
+							hotelRunnerSourcePrice: 66.67,
+						},
+					],
+				},
+			],
+		},
+		normalized,
+		evidence,
+		{ reportedTotalRole: "payout" }
+	);
+	assert.deepEqual(
+		pricing.rooms[0].pricingByDay.map((day) => ({
+			client: day.clientPrice,
+			net: day.netAfterExpenses,
+			expense: day.otaExpenseAmount,
+			margin: day.platformMargin,
+		})),
+		[
+			{ client: 41.15, net: 33.33, expense: 7.82, margin: 3.33 },
+			{ client: 82.3, net: 66.67, expense: 15.63, margin: 16.67 },
+		]
+	);
+	assert.deepEqual(
+		{
+			client: pricing.clientTotal,
+			root: pricing.rootTotal,
+			net: pricing.netAfterExpensesTotal,
+			expense: pricing.otaExpenseTotal,
+			margin: pricing.platformMarginTotal,
+		},
+		{ client: 123.45, root: 80, net: 100, expense: 23.45, margin: 20 }
+	);
+});
+
+test("Agoda commercial parsing keeps missing commission nullable and genuine stay conflicts closed", () => {
+	const withoutCommission = authenticatedAgodaCommercialVoucher({
+		bookingId: "687702587",
+		checkin: "August 8, 2026",
+		checkout: "August 9, 2026",
+		roomName: "Triple Room",
+		adults: 3,
+		nightly: [["August 8, 2026", "49.50"]],
+		gross: "80.00",
+		net: "49.50",
+		commission: null,
+		growthProgram: "8.00",
+		taxOnCommission: "3.00",
+	});
+	const normalized = {
+		...extractNormalizedReservation(withoutCommission),
+		inboundEmailId: "audit-no-explicit-commission",
+	};
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(normalized.otaCommissionSar, null);
+	assert.equal(normalized.sourcePresence.otaCommission, false);
+	assert.deepEqual(
+		normalized.otaDeductionComponents.map((component) => component.type),
+		["growth_program", "tax_on_commission"]
+	);
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized);
+	assert.equal(evidence.otaCommissionSar, null);
+	assert.equal(evidence.unclassifiedDeductionSar, 19.5);
+
+	const unauthenticated = extractNormalizedReservation({
+		...withoutCommission,
+		text: withoutCommission.text.replace(
+			"Compensation Agoda Growth Program",
+			"Compensation Commission SAR -12.00 Agoda Growth Program"
+		),
+		senderAuthentication: {},
+	});
+	assert.equal(unauthenticated.otaCommissionSar, null);
+	assert.deepEqual(unauthenticated.otaDeductionComponents, []);
+	assert.equal(buildHotelRunnerEmailCommercialEvidence(unauthenticated), null);
+
+	const conflict = extractNormalizedReservation({
+		...withoutCommission,
+		text: `${withoutCommission.text}\nCheck-in date: August 8, 2026\nCheck-in date: August 10, 2026`,
+	});
+	assert.equal(conflict.requiresManualReview, true);
+	assert.ok(
+		conflict.manualReviewReasons.some((reason) => /conflicting repeated explicit check-in/i.test(reason))
+	);
+});
+
 test("flattened Agoda vouchers keep bounded guest, room, occupancy, and gross pricing fields", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"agoda.com" <no-reply@agoda.com>',
@@ -7596,6 +7866,15 @@ const makeDirectHotelRunnerCommercialReservation = (overrides = {}) => ({
 			hotelRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
 			localRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
 			count: 1,
+			pricingByDay: ["2026-09-10", "2026-09-11"].map((date) => ({
+				date,
+				price: 50,
+				clientPrice: 50,
+				mainPrice: 50,
+				rootPrice: 35,
+				totalPriceWithCommission: 50,
+				hotelRunnerSourcePrice: 50,
+			})),
 		},
 	],
 	pickedRoomsPricing: [
@@ -7606,6 +7885,15 @@ const makeDirectHotelRunnerCommercialReservation = (overrides = {}) => ({
 			hotelRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
 			localRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
 			count: 1,
+			pricingByDay: ["2026-09-10", "2026-09-11"].map((date) => ({
+				date,
+				price: 50,
+				clientPrice: 50,
+				mainPrice: 50,
+				rootPrice: 35,
+				totalPriceWithCommission: 50,
+				hotelRunnerSourcePrice: 50,
+			})),
 		},
 	],
 	adminChangeLog: [],
@@ -7674,7 +7962,7 @@ const applyDottedCommercialSet = (reservation, set = {}) => {
 	return next;
 };
 
-test("a direct-owned reservation accepts only verified OTA net and expense enrichment", async () => {
+test("a direct-owned reservation accepts verified gross, net, and daily commercial enrichment", async () => {
 	const originalReservationFind = Reservations.find;
 	const originalReservationUpdateOne = Reservations.updateOne;
 	const originalHotelFind = HotelDetails.find;
@@ -7730,9 +8018,26 @@ test("a direct-owned reservation accepts only verified OTA net and expense enric
 		);
 		assert.equal(writtenUpdate.$inc.__v, 1);
 		assert.equal(writtenUpdate.$set.commission, 0);
-		assert.equal(writtenUpdate.$set.commission_ota, 20);
+		assert.equal(
+			writtenUpdate.$set.commission_ota,
+			null,
+			"gross minus payout is not an OTA commission estimate"
+		);
 		assert.equal(writtenUpdate.$set["adminPricing.netAfterExpensesTotal"], 80);
 		assert.equal(writtenUpdate.$set["adminPricing.otaExpenseTotal"], 20);
+		assert.deepEqual(
+			writtenUpdate.$set.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+				client: day.clientPrice,
+				root: day.rootPrice,
+				net: day.netAfterExpenses,
+				expense: day.otaExpenseAmount,
+				margin: day.platformMargin,
+			})),
+			[
+				{ client: 50, root: 35, net: 40, expense: 10, margin: 5 },
+				{ client: 50, root: 35, net: 40, expense: 10, margin: 5 },
+			]
+		);
 		assert.equal(
 			writtenUpdate.$set["ota_financial_summary.netAfterOtaExpenses"],
 			80
@@ -7758,8 +8063,6 @@ test("a direct-owned reservation accepts only verified OTA net and expense enric
 			"total_rooms",
 			"total_amount",
 			"sub_total",
-			"pickedRoomsType",
-			"pickedRoomsPricing",
 			"payment",
 			"financeStatus",
 			"paid_amount",
@@ -7927,6 +8230,19 @@ test("only canonical Agoda may treat HotelRunner reported total as verified payo
 		bookingSource: "Agoda",
 		commissionOta: 999,
 	});
+	const payoutRooms = makeDirectHotelRunnerCommercialReservation().pickedRoomsPricing.map(
+		(room) => ({
+			...room,
+			pricingByDay: room.pricingByDay.map((day) => ({
+				...day,
+				price: 40,
+				clientPrice: 40,
+				mainPrice: 40,
+				totalPriceWithCommission: 40,
+				hotelRunnerSourcePrice: 40,
+			})),
+		})
+	);
 	const existing = makeDirectHotelRunnerCommercialReservation({
 		otaIdentityKey: `agoda:${HOTELRUNNER_COMMERCIAL_CONFIRMATION}`,
 		booking_source: "Agoda",
@@ -7939,6 +8255,8 @@ test("only canonical Agoda may treat HotelRunner reported total as verified payo
 			...makeDirectHotelRunnerCommercialReservation().ota_financial_summary,
 			clientTotal: 80,
 		},
+		pickedRoomsType: structuredClone(payoutRooms),
+		pickedRoomsPricing: structuredClone(payoutRooms),
 		supplierData: {
 			...makeDirectHotelRunnerCommercialReservation().supplierData,
 			supplierName: "Agoda",
@@ -7981,8 +8299,8 @@ test("only canonical Agoda may treat HotelRunner reported total as verified payo
 		assert.equal(writtenUpdate.$set.commission, 0);
 		assert.equal(
 			writtenUpdate.$set.commission_ota,
-			20,
-			"OTA commission must come from verified gross minus payout, not an untrusted input field"
+			null,
+			"an untrusted input field and gross-minus-payout must not invent OTA commission"
 		);
 		assert.equal(
 			Object.keys(writtenUpdate.$set).some((path) =>
@@ -8021,6 +8339,351 @@ test("only canonical Agoda may treat HotelRunner reported total as verified payo
 	} finally {
 		Reservations.find = originalReservationFind;
 		Reservations.updateOne = originalReservationUpdateOne;
+		HotelDetails.find = originalHotelFind;
+	}
+});
+
+test("production-shaped Agoda 687715051 enriches the same HotelRunner reservation with explicit commission and reconciled daily pricing", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalReservationCreate = Reservations.create;
+	const originalHotelFind = HotelDetails.find;
+	const quadRoomId = "64b0000000000000000000f3";
+	const sourceRooms = [
+		{
+			room_type: "quadRooms",
+			displayName: "Quadruple Room – Comfort & Privacy",
+			sourceRoomName:
+				"Deluxe Family Room 2 - Non-Refundable - 2 Occupancy - NR",
+			hotelRoomConfigId: quadRoomId,
+			localRoomConfigId: quadRoomId,
+			count: 1,
+			pricingByDay: ["2026-08-09", "2026-08-10"].map((date) => ({
+				date,
+				price: 53.37,
+				clientPrice: 53.37,
+				mainPrice: 53.37,
+				rootPrice: 75,
+				totalPriceWithCommission: 53.37,
+				hotelRunnerSourcePrice: 53.37,
+			})),
+		},
+	];
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		_id: "6a77a0ebde7b4b5990aba1ac",
+		__v: 0,
+		confirmation_number: "4097979349",
+		reservation_id: "687715051",
+		otaIdentityKey: "agoda:687715051",
+		booking_source: "Agoda",
+		customer_details: {
+			...base.customer_details,
+			confirmation_number2: "687715051",
+			booking_source: "Agoda",
+		},
+		checkin_date: "2026-08-09",
+		checkout_date: "2026-08-11",
+		total_amount: 106.74,
+		sub_total: 150,
+		pickedRoomsType: structuredClone(sourceRooms),
+		pickedRoomsPricing: structuredClone(sourceRooms),
+		adminPricing: {
+			...base.adminPricing,
+			clientTotal: 106.74,
+			rootTotal: 150,
+			platformMarginTotal: -43.26,
+		},
+		ota_financial_summary: {
+			...base.ota_financial_summary,
+			clientTotal: 106.74,
+			hotelVisibleAmount: 150,
+		},
+		supplierData: {
+			...base.supplierData,
+			supplierName: "Agoda",
+			suppliedBookingNo: "687715051",
+			otaConfirmationNumber: "687715051",
+			platformConfirmationNumber: "687715051",
+			otaProvider: "agoda",
+			hotelRunner: {
+				...base.supplierData.hotelRunner,
+				reservationId: "40369350",
+				pricing: { total: 106.74, currency: "SAR" },
+			},
+		},
+	});
+	const normalized = {
+		...extractNormalizedReservation(
+			authenticatedAgodaCommercialVoucher({
+				bookingId: "687715051",
+				checkin: "August 9, 2026",
+				checkout: "August 11, 2026",
+				roomName: "Deluxe Family Room 2",
+				adults: 4,
+				nightly: [
+					["August 9, 2026", "53.37"],
+					["August 10, 2026", "53.37"],
+				],
+				gross: "172.48",
+				net: "106.74",
+				commission: "25.88",
+				growthProgram: "17.24",
+				taxOnCommission: "6.46",
+			})
+		),
+		inboundEmailId: "6a77a0e3bf632980ba061c1f",
+	};
+	let writtenFilter = null;
+	let writtenUpdate = null;
+	let creates = 0;
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return [existing];
+		},
+	});
+	Reservations.updateOne = async (filter, update) => {
+		writtenFilter = filter;
+		writtenUpdate = update;
+		return { matchedCount: 1 };
+	};
+	Reservations.create = async () => {
+		creates += 1;
+		throw new Error("commercial enrichment must not create another reservation");
+	};
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [hotelRunnerCommercialHotel()];
+		},
+	});
+
+	try {
+		const result = await reconcileOtaReservation(normalized);
+		assert.equal(result.status, "updated");
+		assert.equal(result.actionTaken, "commercial_enrichment");
+		assert.equal(String(result.reservationId), existing._id);
+		assert.equal(creates, 0);
+		assert.equal(writtenFilter._id, existing._id);
+		assert.equal(writtenFilter.__v, 0);
+		assert.equal(writtenFilter.total_amount, 106.74);
+		assert.deepEqual(writtenFilter.pickedRoomsPricing, sourceRooms);
+		assert.equal(writtenUpdate.$set.total_amount, 172.48);
+		assert.equal(writtenUpdate.$set.commission, 0);
+		assert.equal(writtenUpdate.$set.commission_ota, 25.88);
+		assert.equal(writtenUpdate.$set["adminPricing.clientTotal"], 172.48);
+		assert.equal(writtenUpdate.$set["adminPricing.netAfterExpensesTotal"], 106.74);
+		assert.equal(writtenUpdate.$set["adminPricing.otaExpenseTotal"], 65.74);
+		assert.equal(writtenUpdate.$set["adminPricing.platformMarginTotal"], -43.26);
+		assert.equal(writtenUpdate.$set["ota_financial_summary.otaCommissionAmount"], 25.88);
+		assert.equal(writtenUpdate.$set["ota_financial_summary.unclassifiedOtaDeduction"], 16.16);
+		assert.deepEqual(
+			writtenUpdate.$set["ota_financial_summary.otaDeductionBreakdown"].map(
+				(component) => [component.type, component.amountSar]
+			),
+			[
+				["commission", 25.88],
+				["growth_program", 17.24],
+				["tax_on_commission", 6.46],
+			]
+		);
+		assert.deepEqual(
+			writtenUpdate.$set.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+				date: day.date,
+				client: day.clientPrice,
+				root: day.rootPrice,
+				net: day.netAfterExpenses,
+				expense: day.otaExpenseAmount,
+				margin: day.platformMargin,
+				source: day.hotelRunnerSourcePrice,
+			})),
+			[
+				{
+					date: "2026-08-09",
+					client: 86.24,
+					root: 75,
+					net: 53.37,
+					expense: 32.87,
+					margin: -21.63,
+					source: 53.37,
+				},
+				{
+					date: "2026-08-10",
+					client: 86.24,
+					root: 75,
+					net: 53.37,
+					expense: 32.87,
+					margin: -21.63,
+					source: 53.37,
+				},
+			]
+		);
+		assert.deepEqual(
+			writtenUpdate.$set.pickedRoomsType,
+			writtenUpdate.$set.pickedRoomsPricing
+		);
+		for (const protectedPath of [
+			"sub_total",
+			"state",
+			"reservation_status",
+			"checkin_date",
+			"checkout_date",
+			"customer_details",
+			"roomId",
+			"payment",
+			"payment_details",
+			"financeStatus",
+			"supplierData.hotelRunner",
+		]) {
+			assert.equal(
+				Object.prototype.hasOwnProperty.call(writtenUpdate.$set, protectedPath),
+				false,
+				protectedPath
+			);
+		}
+		const materialized = applyDottedCommercialSet(existing, writtenUpdate.$set);
+		assert.ok(
+			verifiedHotelRunnerEmailCommercialEvidence(materialized, {
+				provider: "agoda",
+				grossTotalSar: 172.48,
+				currency: "SAR",
+			})
+		);
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		Reservations.create = originalReservationCreate;
+		HotelDetails.find = originalHotelFind;
+	}
+});
+
+test("a HotelRunner row that appears at the pre-create recheck is enriched in place instead of returned as a bare duplicate", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalReservationCreate = Reservations.create;
+	const originalHotelFind = HotelDetails.find;
+	const bookingId = "687700002";
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const payoutRooms = base.pickedRoomsPricing.map((room) => ({
+		...room,
+		pricingByDay: room.pricingByDay.map((day) => ({
+			...day,
+			price: 40,
+			clientPrice: 40,
+			mainPrice: 40,
+			totalPriceWithCommission: 40,
+			hotelRunnerSourcePrice: 40,
+		})),
+	}));
+	const appearedHotelRunnerReservation = makeDirectHotelRunnerCommercialReservation({
+		reservation_id: bookingId,
+		otaIdentityKey: `agoda:${bookingId}`,
+		booking_source: "Agoda",
+		customer_details: {
+			...base.customer_details,
+			confirmation_number2: bookingId,
+			booking_source: "Agoda",
+		},
+		total_amount: 80,
+		pickedRoomsType: structuredClone(payoutRooms),
+		pickedRoomsPricing: structuredClone(payoutRooms),
+		adminPricing: { ...base.adminPricing, clientTotal: 80 },
+		ota_financial_summary: {
+			...base.ota_financial_summary,
+			clientTotal: 80,
+		},
+		supplierData: {
+			...base.supplierData,
+			supplierName: "Agoda",
+			suppliedBookingNo: bookingId,
+			otaConfirmationNumber: bookingId,
+			platformConfirmationNumber: bookingId,
+			otaProvider: "agoda",
+		},
+	});
+	const normalized = {
+		...extractNormalizedReservation(
+			authenticatedAgodaCommercialVoucher({
+				bookingId,
+				checkin: "September 10, 2026",
+				checkout: "September 12, 2026",
+				roomName: "Double Room",
+				adults: 2,
+				nightly: [
+					["September 10, 2026", "40.00"],
+					["September 11, 2026", "40.00"],
+				],
+				gross: "100.00",
+				net: "80.00",
+				commission: "15.00",
+				growthProgram: "3.00",
+				taxOnCommission: "2.00",
+			})
+		),
+		inboundEmailId: "audit-pre-create-race",
+	};
+	let lookupCount = 0;
+	let creates = 0;
+	let writtenUpdate = null;
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			lookupCount += 1;
+			return lookupCount === 1 ? [] : [appearedHotelRunnerReservation];
+		},
+	});
+	Reservations.updateOne = async (_filter, update) => {
+		writtenUpdate = update;
+		return { matchedCount: 1 };
+	};
+	Reservations.create = async () => {
+		creates += 1;
+		throw new Error("the raced HotelRunner reservation must not be recreated");
+	};
+	const hotel = hotelRunnerCommercialHotel();
+	hotel.roomCountDetails = hotel.roomCountDetails.map((room, index) =>
+		index === 0
+			? {
+					...room,
+					pricingRate: ["2026-09-10", "2026-09-11"].map(
+						(calendarDate) => ({ calendarDate, rootPrice: 35 })
+					),
+			  }
+			: room
+	);
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [hotel];
+		},
+	});
+
+	try {
+		const result = await reconcileOtaReservation(normalized);
+		assert.equal(result.status, "updated");
+		assert.equal(result.actionTaken, "commercial_enrichment");
+		assert.equal(result.reservationId, appearedHotelRunnerReservation._id);
+		assert.equal(lookupCount, 2);
+		assert.equal(creates, 0);
+		assert.equal(writtenUpdate.$set.total_amount, 100);
+		assert.equal(writtenUpdate.$set.commission_ota, 15);
+		assert.equal(
+			writtenUpdate.$set["supplierData.hotelRunnerEmailCommercialEvidence"].inboundEmailId,
+			"audit-pre-create-race"
+		);
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		Reservations.create = originalReservationCreate;
 		HotelDetails.find = originalHotelFind;
 	}
 });
@@ -8104,7 +8767,7 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 				roomCountDetails: [
 					...hotelRunnerCommercialHotel().roomCountDetails,
 					{
-						_id: "64b0000000000000000000ff",
+						_id: HOTELRUNNER_COMMERCIAL_ROOM_ID,
 						roomType: "doubleRooms",
 						displayName: "Double Room",
 						activeRoom: true,
@@ -8113,7 +8776,7 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 			},
 		}).reason,
 		"room_identity",
-		"an email label must select exactly one active PMS room configuration"
+		"the projected PMS room id must select exactly one active configuration"
 	);
 	assert.equal(
 		directHotelRunnerEmailCommercialGuard({

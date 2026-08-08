@@ -2041,6 +2041,9 @@ function staleEmailCommercialEvidenceSet({ preserveFinancialAmounts = false } = 
 		// stale amount visible even when protected finance amounts must be retained.
 		commission_ota: null,
 		"supplierData.hotelRunnerEmailCommercialEvidence": null,
+		"supplierData.otaCommissionSar": null,
+		"supplierData.otaCommissionSource": "",
+		"supplierData.otaCommissionSourceBacked": false,
 		"supplierData.otaPayoutFallbackReason":
 			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
 		"adminPricing.commercialVerified": false,
@@ -2048,6 +2051,9 @@ function staleEmailCommercialEvidenceSet({ preserveFinancialAmounts = false } = 
 			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
 		"ota_financial_summary.show": false,
 		"ota_financial_summary.commercialVerified": false,
+		"ota_financial_summary.otaCommissionAmount": null,
+		"ota_financial_summary.otaDeductionBreakdown": [],
+		"ota_financial_summary.unclassifiedOtaDeduction": null,
 		"ota_financial_summary.payoutFallbackReason":
 			HOTELRUNNER_COMMERCIAL_EVIDENCE_STALE,
 	};
@@ -2070,18 +2076,34 @@ function hotelRunnerOwnershipCommissionSet(existing = {}, emailBridge = null) {
 		set.commission_ota = null;
 		return set;
 	}
-	const otaCommission = round2(evidence.otaExpenseTotalSar);
-	if (!Number.isFinite(otaCommission) || otaCommission < 0) {
+	const otaExpense = round2(evidence.otaExpenseTotalSar);
+	if (!Number.isFinite(otaExpense) || otaExpense < 0) {
+		set.commission_ota = null;
+		return set;
+	}
+	const otaCommission =
+		evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
+			? null
+			: round2(evidence.otaCommissionSar);
+	if (otaCommission !== null && (!Number.isFinite(otaCommission) || otaCommission < 0)) {
 		set.commission_ota = null;
 		return set;
 	}
 	set.commission_ota = otaCommission;
 	set["supplierData.hotelRunnerEmailCommercialEvidence"] = evidence;
 	set["supplierData.otaTotalPayoutSar"] = round2(evidence.payoutTotalSar);
-	set["supplierData.otaExpenseTotalSar"] = otaCommission;
+	set["supplierData.otaExpenseTotalSar"] = otaExpense;
+	set["supplierData.otaCommissionSar"] = otaCommission;
+	set["supplierData.otaCommissionSource"] =
+		otaCommission === null
+			? ""
+			: evidence.provider === "agoda"
+				? "agoda_commission"
+				: clean(existing?.supplierData?.otaCommissionSource || "");
+	set["supplierData.otaCommissionSourceBacked"] = otaCommission !== null;
 	set["supplierData.otaPayoutFallbackReason"] = "";
 	set["adminPricing.netAfterExpensesTotal"] = round2(evidence.payoutTotalSar);
-	set["adminPricing.otaExpenseTotal"] = otaCommission;
+	set["adminPricing.otaExpenseTotal"] = otaExpense;
 	set["adminPricing.defaultDeductionApplied"] = false;
 	set["adminPricing.payoutFallbackReason"] = "";
 	set["adminPricing.commercialVerified"] = true;
@@ -2092,7 +2114,12 @@ function hotelRunnerOwnershipCommissionSet(existing = {}, emailBridge = null) {
 	set["ota_financial_summary.netAfterOtaExpenses"] = round2(
 		evidence.payoutTotalSar
 	);
-	set["ota_financial_summary.otaExpenseTotal"] = otaCommission;
+	set["ota_financial_summary.otaExpenseTotal"] = otaExpense;
+	set["ota_financial_summary.otaCommissionAmount"] = otaCommission;
+	set["ota_financial_summary.otaDeductionBreakdown"] =
+		evidence.deductionComponents || [];
+	set["ota_financial_summary.unclassifiedOtaDeduction"] =
+		evidence.unclassifiedDeductionSar;
 	set["ota_financial_summary.commercialVerified"] = true;
 	set["ota_financial_summary.payoutFallbackReason"] = "";
 	return set;
