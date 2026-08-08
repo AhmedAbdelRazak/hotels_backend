@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { ObjectId } = require("bson");
 
 const {
 	EXACT_TARGETS,
@@ -527,6 +528,36 @@ test("the two exact stored Agoda shapes produce only the approved commercial upd
 			)
 		);
 	}
+});
+
+test("protected dry-run simulation preserves production BSON ObjectIds", () => {
+	const item = fixture(EXACT_TARGETS[0]);
+	const reservation = item.reservation;
+	reservation._id = new ObjectId(item.target.reservationMongoId);
+	reservation.hotelId = new ObjectId(EXPECTED_HOTEL_ID);
+	reservation.belongsTo = new ObjectId(OWNER_ID);
+	reservation.pickedRoomsType[0].hotelRoomConfigId = new ObjectId(
+		item.target.roomConfigId
+	);
+	reservation.pickedRoomsType[0].localRoomConfigId = new ObjectId(
+		item.target.roomConfigId
+	);
+	reservation.pickedRoomsPricing[0].hotelRoomConfigId = new ObjectId(
+		item.target.roomConfigId
+	);
+	reservation.pickedRoomsPricing[0].localRoomConfigId = new ObjectId(
+		item.target.roomConfigId
+	);
+	const projected = applyDottedSet(reservation, {
+		total_amount: item.target.grossTotalSar,
+		"adminPricing.clientTotal": item.target.grossTotalSar,
+	});
+	assert.equal(projected._id instanceof ObjectId, true);
+	assert.equal(String(projected._id), item.target.reservationMongoId);
+	assert.equal(
+		hashObject(protectedReservationSnapshot(projected)),
+		hashObject(protectedReservationSnapshot(reservation))
+	);
 });
 
 test("one proof-gated transaction repairs exactly two reservations and leaves all envelopes untouched", async () => {
