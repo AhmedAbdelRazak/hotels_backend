@@ -20,6 +20,12 @@ const HotelRunnerReservation = require("../models/hotelrunner_reservation");
 const InboundEmail = require("../models/inbound_email");
 const Reservations = require("../models/reservations");
 const {
+	applyUpdateToDocument,
+	buildExactCasFilter,
+	canonicalEjsonSha256,
+	cloneBson,
+} = require("../services/recentOtaInboundRecovery20260805");
+const {
 	buildHotelRunnerEmailCommercialEvidence,
 	directHotelRunnerCommercialEnrichmentSet,
 	directHotelRunnerEmailCommercialGuard,
@@ -32,6 +38,12 @@ const REPAIR_ID = "agoda-commercial-enrichment-20260808-v1";
 const EXPECTED_HOTEL_ID = "6a40b6a1a6efe70450536038";
 const EXPECTED_HOTEL_NAME_KEY = "zadajyad";
 const PROOF_MAX_AGE_MS = 30 * 60 * 1000;
+const TRANSACTION_APPLY_STRATEGY = "snapshot_transaction";
+const STANDALONE_APPLY_STRATEGY = "serialized_full_document_cas";
+const APPLY_STRATEGIES = new Set([
+	TRANSACTION_APPLY_STRATEGY,
+	STANDALONE_APPLY_STRATEGY,
+]);
 
 const EXACT_TARGETS = Object.freeze(
 	[
@@ -196,6 +208,19 @@ function assertRelease(expected, actual) {
 	if (!/^[a-f0-9]{40}$/.test(lower(actual)) || lower(actual) !== lower(expected)) {
 		fail("The deployed checkout does not equal the explicitly approved merge SHA.", "AGODA_REPAIR_RELEASE_MISMATCH");
 	}
+}
+
+async function resolveApplyStrategy(admin = mongoose.connection.db?.admin()) {
+	if (!admin || typeof admin.command !== "function") {
+		fail("MongoDB topology could not be inspected before planning.", "AGODA_REPAIR_TOPOLOGY_UNKNOWN");
+	}
+	const hello = await admin.command({ hello: 1 });
+	if (hello?.isWritablePrimary !== true && hello?.ismaster !== true) {
+		fail("The repair must be connected to the writable primary.", "AGODA_REPAIR_PRIMARY_REQUIRED");
+	}
+	return hello?.setName || hello?.msg === "isdbgrid"
+		? TRANSACTION_APPLY_STRATEGY
+		: STANDALONE_APPLY_STRATEGY;
 }
 
 function parseProof(proof, now = new Date()) {
@@ -661,10 +686,14 @@ function immutableScopeEntry(scope) {
 async function loadPlan({
 	evidenceAppliedAt,
 	releaseSha,
+	applyStrategy = TRANSACTION_APPLY_STRATEGY,
 	session = null,
 	models = {},
 	targets = EXACT_TARGETS,
 } = {}) {
+	if (!APPLY_STRATEGIES.has(applyStrategy)) {
+		fail("The database apply strategy is not supported.", "AGODA_REPAIR_STRATEGY_INVALID");
+	}
 	const HotelModel = models.HotelModel || HotelDetails;
 	const hotel = await leanOne(
 		HotelModel,
@@ -692,6 +721,7 @@ async function loadPlan({
 		version: 1,
 		repairId: REPAIR_ID,
 		releaseSha: lower(releaseSha),
+		applyStrategy,
 		evidenceAppliedAt: new Date(evidenceAppliedAt).toISOString(),
 		hotelId: EXPECTED_HOTEL_ID,
 		immutableScope,
@@ -699,6 +729,7 @@ async function loadPlan({
 	return {
 		repairId: REPAIR_ID,
 		releaseSha: lower(releaseSha),
+		applyStrategy,
 		evidenceAppliedAt: new Date(evidenceAppliedAt),
 		state: [...states][0],
 		scopes,
@@ -758,13 +789,14 @@ function repairAuditEntry(scope, plan) {
 		warnings: [],
 		repairId: REPAIR_ID,
 		releaseSha: plan.releaseSha,
+		applyStrategy: plan.applyStrategy,
 		inboundEmailId: scope.target.inboundEmailId,
 		evidenceHash: scope.evidence.evidenceHash,
 		vendorApiCalls: 0,
 	};
 }
 
-async function applyPlan(
+async function applyPlanInTransaction(
 	plan,
 	{
 		startSession = () => mongoose.startSession(),
@@ -788,6 +820,7 @@ async function applyPlan(
 				const livePlan = await loadPlan({
 					evidenceAppliedAt: plan.evidenceAppliedAt,
 					releaseSha: plan.releaseSha,
+					applyStrategy: plan.applyStrategy,
 					session,
 					models,
 					targets,
@@ -832,6 +865,7 @@ async function applyPlan(
 	const verified = await loadPlan({
 		evidenceAppliedAt: plan.evidenceAppliedAt,
 		releaseSha: plan.releaseSha,
+		applyStrategy: plan.applyStrategy,
 		models,
 		targets,
 	});
@@ -845,6 +879,228 @@ async function applyPlan(
 		}
 	}
 	return { state: "applied", changed, verified, vendorApiCalls: 0 };
+}
+
+function standaloneDocumentPlan(scope, plan) {
+	const update = {
+		$set: {
+			...scope.set,
+			updatedAt: plan.evidenceAppliedAt,
+		},
+		$push: { reservationAuditLog: repairAuditEntry(scope, plan) },
+		$inc: { __v: 1 },
+	};
+	const originalDocument = cloneBson(scope.reservation);
+	const expectedDocument = applyUpdateToDocument(originalDocument, update);
+	assertReservationBoundary(scope.target, expectedDocument);
+	if (!isApplied({ ...scope, reservation: expectedDocument }, plan.releaseSha)) {
+		fail(`${scope.target.key} standalone expected document is not an exact applied repair.`);
+	}
+	if (
+		hashObject(protectedReservationSnapshot(expectedDocument)) !==
+		hashObject(protectedReservationSnapshot(originalDocument))
+	) {
+		fail(`${scope.target.key} standalone replacement changes protected data.`);
+	}
+	return {
+		target: scope.target,
+		originalDocument,
+		expectedDocument,
+		originalHash: canonicalEjsonSha256(originalDocument),
+		expectedHash: canonicalEjsonSha256(expectedDocument),
+		casFilter: buildExactCasFilter(originalDocument),
+	};
+}
+
+function standaloneReservationCollection(models, ReservationModel) {
+	const collection = models.ReservationCollection || ReservationModel?.collection;
+	if (
+		!collection ||
+		typeof collection.findOne !== "function" ||
+		typeof collection.replaceOne !== "function"
+	) {
+		fail("The raw reservation collection is required for full-document standalone CAS.");
+	}
+	return collection;
+}
+
+async function readStandaloneReservation(collection, documentPlan) {
+	return collection.findOne(
+		{ _id: cloneBson(documentPlan.originalDocument._id) },
+		{
+			readPreference: "primary",
+			readConcern: { level: "majority" },
+		}
+	);
+}
+
+async function replaceWithHashReadback({
+	collection,
+	documentPlan,
+	beforeDocument,
+	afterDocument,
+	beforeHash,
+	afterHash,
+}) {
+	let acknowledgementError = null;
+	try {
+		const result = await collection.replaceOne(
+			buildExactCasFilter(beforeDocument),
+			cloneBson(afterDocument),
+			{ writeConcern: { w: "majority" } }
+		);
+		const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+		const modified = Number(result?.modifiedCount ?? result?.nModified ?? 0);
+		if (result?.acknowledged === false || matched !== 1 || modified !== 1) {
+			throw new Error(`${documentPlan.target.key} full-document CAS did not replace exactly one reservation.`);
+		}
+	} catch (error) {
+		acknowledgementError = error;
+	}
+	// One primary/majority read resolves a lost acknowledgement. There is no
+	// reservation write retry anywhere in the standalone path.
+	const observed = await readStandaloneReservation(collection, documentPlan);
+	const observedHash = observed ? canonicalEjsonSha256(observed) : "";
+	if (observedHash === afterHash) {
+		return {
+			document: observed,
+			acknowledgementLost: Boolean(acknowledgementError),
+		};
+	}
+	if (observedHash === beforeHash) {
+		const error = new Error(
+			`${documentPlan.target.key} standalone CAS did not commit${
+				acknowledgementError ? `: ${acknowledgementError.message}` : "."
+			}`
+		);
+		error.writeResolution = "before";
+		throw error;
+	}
+	const error = new Error(
+		`${documentPlan.target.key} standalone CAS is ambiguous; the live document is neither exact before nor exact after.`
+	);
+	error.writeResolution = "changed_or_missing";
+	error.observedHash = observedHash;
+	throw error;
+}
+
+async function classifyStandaloneDocuments(collection, documentPlans) {
+	const classifications = [];
+	for (const documentPlan of documentPlans) {
+		const observed = await readStandaloneReservation(collection, documentPlan);
+		const observedHash = observed ? canonicalEjsonSha256(observed) : "";
+		classifications.push({
+			documentPlan,
+			state:
+				observedHash === documentPlan.originalHash
+					? "original"
+					: observedHash === documentPlan.expectedHash
+					? "repaired"
+					: "changed_or_missing",
+		});
+	}
+	return classifications;
+}
+
+async function compensateStandaloneApply({ collection, documentPlans, cause }) {
+	const initial = await classifyStandaloneDocuments(collection, documentPlans);
+	for (const classification of [...initial].reverse()) {
+		if (classification.state !== "repaired") continue;
+		const documentPlan = classification.documentPlan;
+		await replaceWithHashReadback({
+			collection,
+			documentPlan,
+			beforeDocument: documentPlan.expectedDocument,
+			afterDocument: documentPlan.originalDocument,
+			beforeHash: documentPlan.expectedHash,
+			afterHash: documentPlan.originalHash,
+		});
+	}
+	const final = await classifyStandaloneDocuments(collection, documentPlans);
+	if (final.some((entry) => entry.state === "changed_or_missing")) {
+		fail(
+			`Standalone compensation preserved a concurrent third state and stopped: ${cause.message}`,
+			"AGODA_REPAIR_MANUAL_INTERVENTION_REQUIRED"
+		);
+	}
+	if (!final.every((entry) => entry.state === "original")) {
+		fail(
+			`Standalone compensation could not restore both exact originals: ${cause.message}`,
+			"AGODA_REPAIR_COMPENSATION_FAILED"
+		);
+	}
+	const error = new Error(
+		`Standalone apply failed and both exact originals were verified restored: ${cause.message}`
+	);
+	error.code = "AGODA_REPAIR_COMPENSATED";
+	throw error;
+}
+
+async function applyPlanStandalone(
+	plan,
+	{ models = {}, targets = EXACT_TARGETS } = {}
+) {
+	if (plan.state === "already_applied") {
+		return { state: "already_applied", changed: 0, vendorApiCalls: 0 };
+	}
+	const ReservationModel = models.ReservationModel || Reservations;
+	const collection = standaloneReservationCollection(models, ReservationModel);
+	const documentPlans = plan.scopes.map((scope) =>
+		standaloneDocumentPlan(scope, plan)
+	);
+	let acknowledgementsRecovered = 0;
+	try {
+		for (const documentPlan of documentPlans) {
+			const resolution = await replaceWithHashReadback({
+				collection,
+				documentPlan,
+				beforeDocument: documentPlan.originalDocument,
+				afterDocument: documentPlan.expectedDocument,
+				beforeHash: documentPlan.originalHash,
+				afterHash: documentPlan.expectedHash,
+			});
+			if (resolution.acknowledgementLost) acknowledgementsRecovered += 1;
+		}
+	} catch (error) {
+		return compensateStandaloneApply({
+			collection,
+			documentPlans,
+			cause: error,
+		});
+	}
+	const verified = await loadPlan({
+		evidenceAppliedAt: plan.evidenceAppliedAt,
+		releaseSha: plan.releaseSha,
+		applyStrategy: plan.applyStrategy,
+		models,
+		targets,
+	});
+	if (verified.state !== "already_applied") {
+		fail("Standalone post-write verification did not prove both exact repairs.");
+	}
+	for (const scope of verified.scopes) {
+		const before = plan.scopes.find((item) => item.target.key === scope.target.key);
+		if (scope.protectedHash !== before.protectedHash) {
+			fail(`${scope.target.key} standalone protected post-write hash changed.`);
+		}
+	}
+	return {
+		state: "applied",
+		changed: documentPlans.length,
+		verified,
+		acknowledgementsRecovered,
+		vendorApiCalls: 0,
+	};
+}
+
+async function applyPlan(plan, options = {}) {
+	if (plan.applyStrategy === TRANSACTION_APPLY_STRATEGY) {
+		return applyPlanInTransaction(plan, options);
+	}
+	if (plan.applyStrategy === STANDALONE_APPLY_STRATEGY) {
+		return applyPlanStandalone(plan, options);
+	}
+	fail("The planned database apply strategy is unsupported.");
 }
 
 function targetSummary(scope) {
@@ -898,6 +1154,7 @@ function sanitizedOutput(plan, mode, proof = "") {
 		mode,
 		repairId: REPAIR_ID,
 		releaseSha: plan.releaseSha,
+		applyStrategy: plan.applyStrategy,
 		proof: mode === "dry_run" && plan.state === "ready" ? proof : undefined,
 		proofExpiresInMinutes:
 			mode === "dry_run" && plan.state === "ready"
@@ -909,6 +1166,14 @@ function sanitizedOutput(plan, mode, proof = "") {
 		createsReservations: false,
 		mutatesLifecycleGuestStayRoomAssignmentOrPayment: false,
 		mutatesHotelRunnerEventMirrorOrInboundAudit: false,
+		standaloneSafety:
+			plan.applyStrategy === STANDALONE_APPLY_STRATEGY
+				? {
+						writes: "serialized full-document BSON-aware CAS with majority acknowledgement",
+						lostAcknowledgement: "one primary/majority hash readback and no write retry",
+						failure: "reverse exact-CAS compensation of every completed repair write",
+				  }
+				: undefined,
 		vendorApiCalls: 0,
 	};
 }
@@ -930,6 +1195,7 @@ async function main(
 		connect = connectDatabase,
 		disconnect = async () => mongoose.disconnect(),
 		resolveReleaseSha = currentReleaseSha,
+		resolveDatabaseApplyStrategy = resolveApplyStrategy,
 		models = {},
 		startSession,
 	} = {}
@@ -948,9 +1214,12 @@ async function main(
 			await connect(database);
 			connectedHere = true;
 		}
+		const applyStrategy =
+			models.applyStrategy || (await resolveDatabaseApplyStrategy());
 		const plan = await loadPlan({
 			evidenceAppliedAt,
 			releaseSha: options.releaseSha,
+			applyStrategy,
 			models,
 		});
 		const generatedProof = proofToken(plan);
@@ -975,7 +1244,10 @@ async function main(
 					state: result.state,
 					repairId: REPAIR_ID,
 					releaseSha: plan.releaseSha,
+					applyStrategy: plan.applyStrategy,
 					changed: result.changed,
+					acknowledgementsRecovered:
+						Number(result.acknowledgementsRecovered || 0),
 					targetCount: EXACT_TARGETS.length,
 					vendorApiCalls: 0,
 				},
@@ -1004,8 +1276,12 @@ module.exports = {
 	EXPECTED_HOTEL_ID,
 	PROOF_MAX_AGE_MS,
 	REPAIR_ID,
+	STANDALONE_APPLY_STRATEGY,
+	TRANSACTION_APPLY_STRATEGY,
 	applyDottedSet,
 	applyPlan,
+	applyPlanInTransaction,
+	applyPlanStandalone,
 	assertEnvelope,
 	assertParsedEvidence,
 	assertPlannedCommercialSet,
@@ -1024,6 +1300,8 @@ module.exports = {
 	repairAuditEntry,
 	reservationCasFilter,
 	reservationLookup,
+	resolveApplyStrategy,
 	sanitizedOutput,
 	sha256,
+	standaloneDocumentPlan,
 };
