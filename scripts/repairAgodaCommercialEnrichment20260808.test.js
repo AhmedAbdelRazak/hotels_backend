@@ -13,6 +13,8 @@ const {
 	EXACT_TARGETS,
 	EXPECTED_HOTEL_ID,
 	REPAIR_ID,
+	STANDALONE_APPLY_STRATEGY,
+	TRANSACTION_APPLY_STRATEGY,
 	applyDottedSet,
 	applyPlan,
 	loadPlan,
@@ -21,6 +23,7 @@ const {
 	parseProof,
 	proofToken,
 	protectedReservationSnapshot,
+	resolveApplyStrategy,
 	sha256,
 } = require("./repairAgodaCommercialEnrichment20260808");
 const { hashObject } = require("../services/hotelrunnerPayload");
@@ -54,8 +57,17 @@ function valuesEqual(left, right) {
 
 function matches(document, filter = {}) {
 	for (const [pathText, expected] of Object.entries(filter)) {
+		if (pathText === "$and") {
+			if (!expected.every((branch) => matches(document, branch))) return false;
+			continue;
+		}
 		if (pathText === "$or") {
 			if (!expected.some((branch) => matches(document, branch))) return false;
+			continue;
+		}
+		if (pathText === "$expr") {
+			const expectedRootKeys = expected?.$eq?.[1];
+			if (Object.keys(document || {}).length !== expectedRootKeys) return false;
 			continue;
 		}
 		const actual = getPath(document, pathText);
@@ -72,8 +84,12 @@ function matches(document, filter = {}) {
 	return true;
 }
 
-function memoryModel(documents = [], { mutable = false } = {}) {
-	return {
+function memoryModel(
+	documents = [],
+	{ mutable = false, replaceHook = null } = {}
+) {
+	let replaceCalls = 0;
+	const model = {
 		documents,
 		find(filter) {
 			const query = {
@@ -125,6 +141,29 @@ function memoryModel(documents = [], { mutable = false } = {}) {
 			return { matchedCount: 1, modifiedCount: 1 };
 		},
 	};
+	model.collection = {
+		async findOne(filter) {
+			const found = documents.find((candidate) => matches(candidate, filter));
+			return found ? clone(found) : null;
+		},
+		async replaceOne(filter, replacement) {
+			if (!mutable) throw new Error("unexpected immutable-model replacement");
+			replaceCalls += 1;
+			const index = documents.findIndex((candidate) => matches(candidate, filter));
+			const commit = () => {
+				if (index < 0) {
+					return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
+				}
+				documents[index] = clone(replacement);
+				return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+			};
+			if (replaceHook) {
+				return replaceHook({ call: replaceCalls, commit, filter, replacement });
+			}
+			return commit();
+		},
+	};
+	return model;
 }
 
 function longDate(ymd) {
@@ -391,13 +430,13 @@ function fixture(targetInput) {
 	return { target, reservation, event, mirror, audit, hotel };
 }
 
-function fixtureModels(fixtures) {
+function fixtureModels(fixtures, { replaceHook = null } = {}) {
 	const hotel = clone(fixtures[0].hotel);
 	hotel.roomCountDetails = fixtures.flatMap((item) => item.hotel.roomCountDetails);
 	return {
 		ReservationModel: memoryModel(
 			fixtures.map((item) => item.reservation),
-			{ mutable: true }
+			{ mutable: true, replaceHook }
 		),
 		EventModel: memoryModel(fixtures.map((item) => item.event)),
 		MirrorModel: memoryModel(fixtures.map((item) => item.mirror)),
@@ -440,6 +479,28 @@ test("repair arguments require the exact release, repair id, and dry-run proof",
 	assert.throws(
 		() => parseProof(token, new Date(PLANNED_AT.getTime() + 31 * 60_000)),
 		/expired/
+	);
+});
+
+test("database topology selects a transaction only when the server supports one", async () => {
+	assert.equal(
+		await resolveApplyStrategy({
+			command: async () => ({ isWritablePrimary: true, setName: "rs0" }),
+		}),
+		TRANSACTION_APPLY_STRATEGY
+	);
+	assert.equal(
+		await resolveApplyStrategy({
+			command: async () => ({ isWritablePrimary: true }),
+		}),
+		STANDALONE_APPLY_STRATEGY
+	);
+	await assert.rejects(
+		() =>
+			resolveApplyStrategy({
+				command: async () => ({ isWritablePrimary: false }),
+			}),
+		/writable primary/
 	);
 });
 
@@ -521,6 +582,97 @@ test("one proof-gated transaction repairs exactly two reservations and leaves al
 		}),
 		beforeEnvelopes
 	);
+});
+
+test("a standalone primary repairs both reservations with serialized full-document CAS", async () => {
+	const fixtures = EXACT_TARGETS.map(fixture);
+	const targets = fixtures.map((item) => item.target);
+	const models = fixtureModels(fixtures);
+	const beforeEnvelopes = hashObject({
+		events: models.EventModel.documents,
+		mirrors: models.MirrorModel.documents,
+		audits: models.InboundModel.documents,
+	});
+	const plan = await loadPlan({
+		evidenceAppliedAt: PLANNED_AT,
+		releaseSha: RELEASE_SHA,
+		applyStrategy: STANDALONE_APPLY_STRATEGY,
+		models,
+		targets,
+	});
+	const result = await applyPlan(plan, { models, targets });
+	assert.equal(result.state, "applied");
+	assert.equal(result.changed, 2);
+	assert.equal(result.acknowledgementsRecovered, 0);
+	for (const reservation of models.ReservationModel.documents) {
+		const target = targets.find(
+			(item) => item.reservationMongoId === reservation._id
+		);
+		assert.equal(reservation.__v, 1);
+		assert.equal(reservation.total_amount, target.grossTotalSar);
+		assert.equal(reservation.commission_ota, target.otaCommissionSar);
+		assert.equal(
+			reservation.reservationAuditLog.at(-1).applyStrategy,
+			STANDALONE_APPLY_STRATEGY
+		);
+	}
+	assert.equal(
+		hashObject({
+			events: models.EventModel.documents,
+			mirrors: models.MirrorModel.documents,
+			audits: models.InboundModel.documents,
+		}),
+		beforeEnvelopes
+	);
+});
+
+test("standalone CAS resolves a committed write whose acknowledgement was lost", async () => {
+	const fixtures = EXACT_TARGETS.map(fixture);
+	const targets = fixtures.map((item) => item.target);
+	const models = fixtureModels(fixtures, {
+		replaceHook: ({ call, commit }) => {
+			const result = commit();
+			if (call === 1) throw new Error("simulated lost acknowledgement");
+			return result;
+		},
+	});
+	const plan = await loadPlan({
+		evidenceAppliedAt: PLANNED_AT,
+		releaseSha: RELEASE_SHA,
+		applyStrategy: STANDALONE_APPLY_STRATEGY,
+		models,
+		targets,
+	});
+	const result = await applyPlan(plan, { models, targets });
+	assert.equal(result.state, "applied");
+	assert.equal(result.changed, 2);
+	assert.equal(result.acknowledgementsRecovered, 1);
+});
+
+test("standalone second-write rejection compensates the first exact reservation", async () => {
+	const fixtures = EXACT_TARGETS.map(fixture);
+	const targets = fixtures.map((item) => item.target);
+	const originalHash = hashObject(fixtures.map((item) => item.reservation));
+	const models = fixtureModels(fixtures, {
+		replaceHook: ({ call, commit }) =>
+			call === 2
+				? { acknowledged: true, matchedCount: 0, modifiedCount: 0 }
+				: commit(),
+	});
+	const plan = await loadPlan({
+		evidenceAppliedAt: PLANNED_AT,
+		releaseSha: RELEASE_SHA,
+		applyStrategy: STANDALONE_APPLY_STRATEGY,
+		models,
+		targets,
+	});
+	await assert.rejects(
+		() => applyPlan(plan, { models, targets }),
+		(error) =>
+			error?.code === "AGODA_REPAIR_COMPENSATED" &&
+			/both exact originals/.test(error.message)
+	);
+	assert.equal(hashObject(models.ReservationModel.documents), originalHash);
 });
 
 test("scope is permanently two targets and the script has no vendor or reservation-create path", () => {
