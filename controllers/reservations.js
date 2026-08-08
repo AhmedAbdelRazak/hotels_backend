@@ -1598,6 +1598,12 @@ const RESERVATION_DATE_UPDATE_INTENT_FIELDS = [
 	"dateUpdateIntent",
 ];
 
+const RESERVATION_HOUSING_UPDATE_INTENT_FIELDS = [
+	"__roomAssignmentUpdateIntent",
+	"__housingUpdateIntent",
+	"roomAssignmentUpdateIntent",
+];
+
 const ADMIN_MANAGED_DERIVED_PRICING_FIELDS = [
 	"pickedRoomsType",
 	"pickedRoomsPricing",
@@ -1720,6 +1726,71 @@ const protectReservationDateUpdate = ({
 	}
 
 	return { allowed: true, changedFields };
+};
+
+const housingRoomIds = (value) =>
+	(Array.isArray(value) ? value : value ? [value] : [])
+		.map((room) => normalizeId(room?._id || room))
+		.filter(Boolean);
+
+const housingValueIsEmpty = (value) => {
+	if (value === null || value === undefined || value === "") return true;
+	if (Array.isArray(value)) return value.length === 0;
+	if (typeof value === "object") return Object.keys(value).length === 0;
+	return false;
+};
+
+/**
+ * Full reservation forms can echo an empty room selector even when they are
+ * editing only guest details or pricing. An empty echo must not unhouse an
+ * already assigned reservation. Clearing housing remains possible, but only
+ * through an explicit room-assignment action.
+ */
+const protectExistingReservationHousingUpdate = ({
+	updates = {},
+	reservation = {},
+	hasExplicitHousingIntent = false,
+} = {}) => {
+	if (hasExplicitHousingIntent) return { allowed: true, explicit: true };
+
+	const existingRoomIds = housingRoomIds(reservation.roomId);
+	if (!existingRoomIds.length) return { allowed: true };
+
+	const roomIdWasSent = Object.prototype.hasOwnProperty.call(updates, "roomId");
+	const incomingRoomIds = roomIdWasSent ? housingRoomIds(updates.roomId) : [];
+	if (incomingRoomIds.length > 0) {
+		const existingKey = [...new Set(existingRoomIds)].sort().join("|");
+		const incomingKey = [...new Set(incomingRoomIds)].sort().join("|");
+		if (existingKey === incomingKey) return { allowed: true };
+		return {
+			allowed: false,
+			status: 409,
+			code: "room_reassignment_requires_explicit_intent",
+			error:
+				"Changing an assigned physical room requires an explicit room-assignment action.",
+		};
+	}
+
+	let preserved = false;
+	if (roomIdWasSent) {
+		delete updates.roomId;
+		preserved = true;
+	}
+	for (const field of ["bedNumber", "housedBy", "inhouse_date"]) {
+		if (
+			Object.prototype.hasOwnProperty.call(updates, field) &&
+			housingValueIsEmpty(updates[field])
+		) {
+			delete updates[field];
+			preserved = true;
+		}
+	}
+
+	return {
+		allowed: true,
+		preserved,
+		code: preserved ? "existing_housing_preserved" : undefined,
+	};
 };
 
 const protectAdminManagedPricingUpdate = ({
@@ -3108,6 +3179,20 @@ const DIRECT_HOTELRUNNER_SOURCE_FIELDS = Object.freeze([
 	"commission_ota",
 ]);
 
+const DIRECT_HOTELRUNNER_ADMIN_PRICING_FIELDS = new Set([
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"total_rooms",
+	"total_amount",
+	"sub_total",
+]);
+
+const DIRECT_HOTELRUNNER_ADMIN_STAY_FIELDS = new Set([
+	"checkin_date",
+	"checkout_date",
+	"days_of_residence",
+]);
+
 const directHotelRunnerSourceValue = (field, value) => {
 	if (["hotelId", "belongsTo"].includes(field)) return normalizeId(value);
 	if (["checkin_date", "checkout_date"].includes(field)) {
@@ -3139,7 +3224,11 @@ const directHotelRunnerSourceValue = (field, value) => {
 
 const protectDirectHotelRunnerSourceUpdate = (
 	update = {},
-	existingReservation = {}
+	existingReservation = {},
+	{
+		allowAuthorizedAdminPricing = false,
+		allowAuthorizedAdminStayChange = false,
+	} = {},
 ) => {
 	if (!hasDirectHotelRunnerProjection(existingReservation)) {
 		return { allowed: true };
@@ -3147,6 +3236,14 @@ const protectDirectHotelRunnerSourceUpdate = (
 	const existing = reservationSourcePlainObject(existingReservation);
 	for (const field of DIRECT_HOTELRUNNER_SOURCE_FIELDS) {
 		if (!Object.prototype.hasOwnProperty.call(update, field)) continue;
+		if (
+			(allowAuthorizedAdminPricing &&
+				DIRECT_HOTELRUNNER_ADMIN_PRICING_FIELDS.has(field)) ||
+			(allowAuthorizedAdminStayChange &&
+				DIRECT_HOTELRUNNER_ADMIN_STAY_FIELDS.has(field))
+		) {
+			continue;
+		}
 		const unchanged =
 			directHotelRunnerSourceValue(field, update[field]) ===
 			directHotelRunnerSourceValue(field, existing[field]);
@@ -3280,19 +3377,6 @@ const protectDirectHotelRunnerCommercialUpdate = (
 		return { allowed: true };
 	}
 
-	if (
-		Object.prototype.hasOwnProperty.call(update, "commission") &&
-		!isConfiguredSuperAdmin(actor)
-	) {
-		return {
-			allowed: false,
-			status: 403,
-			field: "commission",
-			code: "hotelrunner_platform_commission_superadmin_only",
-			error:
-				"Only the configured super administrator can explicitly review a HotelRunner platform commission through this route.",
-		};
-	}
 	if (Object.prototype.hasOwnProperty.call(update, "commission")) {
 		const normalizedCommission = normalizeExplicitHotelRunnerCommission(
 			update.commission
@@ -3307,7 +3391,24 @@ const protectDirectHotelRunnerCommercialUpdate = (
 					"HotelRunner platform commission must be an explicit non-negative amount with no more than two decimal places.",
 			};
 		}
-		update.commission = normalizedCommission;
+		if (!isConfiguredSuperAdmin(actor)) {
+			const existingCommission = n2(existingReservation.commission);
+			if (normalizedCommission !== existingCommission) {
+				return {
+					allowed: false,
+					status: 403,
+					field: "commission",
+					code: "hotelrunner_platform_commission_superadmin_only",
+					error:
+						"Only the configured super administrator can explicitly review a HotelRunner platform commission through this route.",
+				};
+			}
+			// Full edit forms may echo the current value. Treat an exact echo as
+			// a no-op; it is not commission-review authority.
+			delete update.commission;
+		} else {
+			update.commission = normalizedCommission;
+		}
 	}
 
 	Object.keys(update || {}).forEach((field) => {
@@ -3505,6 +3606,7 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		normalizeSupplierDataUpdateFields,
 		payloadHasHotelRunnerCommissionEvidence,
 		protectAdminManagedPricingUpdate,
+		protectExistingReservationHousingUpdate,
 		protectDirectHotelRunnerCommercialUpdate,
 		protectDirectHotelRunnerCommissionEvidenceActor,
 		protectDirectHotelRunnerIdentityUpdate,
@@ -7762,6 +7864,14 @@ exports.updateReservation = async (req, res) => {
 		RESERVATION_DATE_UPDATE_INTENT_FIELDS.forEach((field) => {
 			delete normalizedUpdateData[field];
 		});
+		const hasExplicitHousingUpdateIntent =
+			RESERVATION_HOUSING_UPDATE_INTENT_FIELDS.some((field) => {
+				const value = normalizedUpdateData[field];
+				return value === true || value === "true";
+			});
+		RESERVATION_HOUSING_UPDATE_INTENT_FIELDS.forEach((field) => {
+			delete normalizedUpdateData[field];
+		});
 		const hasExplicitGuestCountUpdateIntent =
 			AI_GUEST_COUNT_UPDATE_INTENT_FIELDS.some((field) => {
 				const value = normalizedUpdateData[field];
@@ -7861,6 +7971,16 @@ exports.updateReservation = async (req, res) => {
 		if (!existingReservation) {
 			return res.status(404).json({ error: "Reservation not found" });
 		}
+		const housingUpdateProtection = protectExistingReservationHousingUpdate({
+			updates: normalizedUpdateData,
+			reservation: existingReservation,
+			hasExplicitHousingIntent: hasExplicitHousingUpdateIntent,
+		});
+		if (!housingUpdateProtection.allowed) {
+			return res
+				.status(housingUpdateProtection.status || 409)
+				.json(housingUpdateProtection);
+		}
 		const auditActor = await resolveReservationAuditActor(
 			requestingUserId,
 			updateData,
@@ -7902,6 +8022,51 @@ exports.updateReservation = async (req, res) => {
 				code: "reservation_update_hotel_scope_forbidden",
 			});
 		}
+		if (
+			hasExplicitHousingUpdateIntent &&
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "roomId")
+		) {
+			const requestedRoomIds = normalizePhysicalRoomIds(
+				normalizedUpdateData.roomId,
+			);
+			if (requestedRoomIds.length > 0) {
+				const existingPlain =
+					typeof existingReservation.toObject === "function"
+						? existingReservation.toObject()
+						: existingReservation;
+				const candidate = { ...existingPlain, ...normalizedUpdateData };
+				const physicalRoomValidation =
+					await validatePhysicalRoomAssignmentsForUpdate(candidate, {
+						excludeReservationId: reservationId,
+						stayDates: buildStayDateKeys(
+							candidate.checkin_date,
+							candidate.checkout_date,
+						),
+						validateRoomScope: true,
+					});
+				if (!physicalRoomValidation.allowed) {
+					const invalidRoomScope =
+						physicalRoomValidation.code ===
+						"hotel_reservation_physical_room_invalid";
+					return res.status(invalidRoomScope ? 400 : 409).json({
+						error: invalidRoomScope
+							? "A selected physical room is inactive or does not belong to this hotel."
+							: "A selected physical room is already assigned to another reservation for these stay dates.",
+						code: physicalRoomValidation.code,
+						physicalRooms: physicalRoomValidation,
+					});
+				}
+			}
+		}
+		const authorizedPlatformAdminPricingOverride = Boolean(
+			req.hotelManagementReservationUpdate !== true &&
+				hasExplicitAdminPricingIntent &&
+				canPlatformStaffOverrideReservationInventory(requestingActor || {}),
+		);
+		const authorizedPlatformAdminStayOverride = Boolean(
+			authorizedPlatformAdminPricingOverride &&
+				hasExplicitReservationDateIntent,
+		);
 		const hotelRunnerIdentityProtection =
 			protectDirectHotelRunnerIdentityUpdate(
 				normalizedUpdateData,
@@ -7914,7 +8079,13 @@ exports.updateReservation = async (req, res) => {
 		}
 		const hotelRunnerSourceProtection = protectDirectHotelRunnerSourceUpdate(
 			normalizedUpdateData,
-			existingReservation
+			existingReservation,
+			{
+				allowAuthorizedAdminPricing:
+					authorizedPlatformAdminPricingOverride,
+				allowAuthorizedAdminStayChange:
+					authorizedPlatformAdminStayOverride,
+			},
 		);
 		if (!hotelRunnerSourceProtection.allowed) {
 			return res
@@ -8435,6 +8606,10 @@ exports.updateReservation = async (req, res) => {
 				allowBlockedCalendar: superAdminUpdateActor,
 				hasExplicitAdminPricingIntent,
 				keepExplicitCommission: hasExplicitSuperAdminCommission,
+				preserveReviewedRoomPricing:
+					authorizedPlatformAdminPricingOverride,
+				allowAuthorizedHotelRunnerPricingOverride:
+					authorizedPlatformAdminPricingOverride,
 			}
 		);
 		if (

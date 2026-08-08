@@ -307,6 +307,70 @@ test("OTA pricing remains protected from OrderTakers and incomplete admin payloa
 	);
 });
 
+test("partial admin edits preserve an existing physical-room assignment", () => {
+	const existingRoomId = "6a40e0981a6d1850eb25c27c";
+	const updates = {
+		comment: "Guest requested a later checkout",
+		roomId: [],
+		bedNumber: [],
+		housedBy: {},
+		inhouse_date: null,
+	};
+
+	const result =
+		reservationAccess.protectExistingReservationHousingUpdate({
+			updates,
+			reservation: {
+				roomId: [existingRoomId],
+				bedNumber: [2],
+				housedBy: { _id: "6553f1c6d06c5cea2f98a838" },
+				inhouse_date: new Date("2026-08-08T07:18:54.755Z"),
+			},
+		});
+
+	assert.equal(result.allowed, true);
+	assert.equal(result.preserved, true);
+	assert.deepEqual(updates, {
+		comment: "Guest requested a later checkout",
+	});
+});
+
+test("an explicit housing action may clear or replace an assigned room", () => {
+	const existing = { roomId: ["6a40e0981a6d1850eb25c27c"] };
+	const clearUpdate = { roomId: [], bedNumber: [] };
+	assert.deepEqual(
+		reservationAccess.protectExistingReservationHousingUpdate({
+			updates: clearUpdate,
+			reservation: existing,
+			hasExplicitHousingIntent: true,
+		}),
+		{ allowed: true, explicit: true },
+	);
+	assert.deepEqual(clearUpdate, { roomId: [], bedNumber: [] });
+
+	const replacement = { roomId: ["6a40e0981a6d1850eb25c999"] };
+	const deniedReplacement =
+		reservationAccess.protectExistingReservationHousingUpdate({
+			updates: replacement,
+			reservation: existing,
+		});
+	assert.equal(deniedReplacement.allowed, false);
+	assert.equal(
+		deniedReplacement.code,
+		"room_reassignment_requires_explicit_intent",
+	);
+
+	assert.deepEqual(
+		reservationAccess.protectExistingReservationHousingUpdate({
+			updates: replacement,
+			reservation: existing,
+			hasExplicitHousingIntent: true,
+		}),
+		{ allowed: true, explicit: true },
+	);
+	assert.deepEqual(replacement.roomId, ["6a40e0981a6d1850eb25c999"]);
+});
+
 test("the employee creation route stays authenticated and admin-access scoped", () => {
 	const routeSource = fs.readFileSync(
 		require.resolve("../routes/janat"),

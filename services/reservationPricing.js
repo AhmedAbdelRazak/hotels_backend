@@ -585,6 +585,134 @@ const roomIdentitiesAreSame = (left = [], right = []) => {
 	);
 };
 
+const roomConfigurationIdentity = (room = {}) =>
+	`${roomIdentity(room)}|${normalizeId(room?.hotelRoomConfigId)}`;
+
+const roomConfigurationsAreSame = (left = [], right = []) => {
+	const leftRooms = Array.isArray(left) ? left : [];
+	const rightRooms = Array.isArray(right) ? right : [];
+	if (leftRooms.length !== rightRooms.length) return false;
+	return leftRooms.every(
+		(room, index) =>
+			roomConfigurationIdentity(room) ===
+				roomConfigurationIdentity(rightRooms[index]) &&
+			normalizeRoomCount(room?.count) ===
+				normalizeRoomCount(rightRooms[index]?.count),
+	);
+};
+
+const HOTELRUNNER_PRESERVED_ROOM_PRICING_FIELDS = new Set([
+	"chosenPrice",
+	"pricingByDay",
+	"price",
+	"clientPrice",
+	"mainPrice",
+	"rootPrice",
+	"commissionRate",
+	"totalPriceWithCommission",
+	"totalPriceWithoutCommission",
+	"hotelShouldGet",
+	"subTotal",
+	"adminPricing",
+]);
+
+const mergeRoomConfigurationWithPreservedPricing = (
+	preservedRoom = {},
+	incomingRoom = {},
+) => {
+	const safeConfiguration = Object.entries(
+		incomingRoom && typeof incomingRoom === "object" ? incomingRoom : {},
+	).reduce((result, [field, value]) => {
+		if (!HOTELRUNNER_PRESERVED_ROOM_PRICING_FIELDS.has(field)) {
+			result[field] = value;
+		}
+		return result;
+	}, {});
+	return {
+		...preservedRoom,
+		...safeConfiguration,
+		count: normalizeRoomCount(preservedRoom.count),
+		pricingByDay: preservedRoom.pricingByDay,
+	};
+};
+
+const syncLocalOtaFinancialSummary = (updates = {}, existing = {}) => {
+	const current = toPlainObject(existing.ota_financial_summary);
+	if (!current || !Object.keys(current).length) return updates;
+	updates.ota_financial_summary = {
+		...current,
+		clientTotal: n2(updates.total_amount),
+		hotelVisibleAmount: n2(updates.sub_total),
+	};
+	return updates;
+};
+
+const preserveHotelRunnerPricingForOperationalChange = ({
+	existing = {},
+	updates = {},
+	existingRooms = [],
+	incomingRooms = [],
+	stayDates = [],
+	dateChanged = false,
+} = {}) => {
+	if (
+		!Array.isArray(existingRooms) ||
+		!existingRooms.length ||
+		!Array.isArray(incomingRooms) ||
+		existingRooms.length !== incomingRooms.length
+	) {
+		throw new ReservationPricingError(
+			"Changing the number of HotelRunner room selections requires a dedicated inventory workflow.",
+			409,
+			"hotelrunner_admin_room_count_change_locked",
+		);
+	}
+
+	for (let index = 0; index < existingRooms.length; index += 1) {
+		if (
+			normalizeRoomCount(existingRooms[index]?.count) !==
+			normalizeRoomCount(incomingRooms[index]?.count)
+		) {
+			throw new ReservationPricingError(
+				"Changing the HotelRunner room count requires a dedicated inventory workflow.",
+				409,
+				"hotelrunner_admin_room_count_change_locked",
+			);
+		}
+	}
+
+	const projectedExisting = dateChanged
+		? projectAdminManagedRoomsToStayDates(existingRooms, stayDates)
+		: existingRooms.map((room) => toPlainObject(room));
+	const nextRooms = projectedExisting.map((room, index) =>
+		mergeRoomConfigurationWithPreservedPricing(room, incomingRooms[index]),
+	);
+	const totals = summarizeRooms(nextRooms);
+
+	updates.pickedRoomsType = nextRooms;
+	updates.pickedRoomsPricing = nextRooms;
+	updates.total_rooms = nextRooms.reduce(
+		(sum, room) => sum + normalizeRoomCount(room.count),
+		0,
+	);
+	updates.days_of_residence = stayDates.length;
+	if (dateChanged) {
+		updates.total_amount = totals.total_amount;
+		updates.sub_total = totals.sub_total;
+		updates.adminPricing = {
+			...toPlainObject(existing.adminPricing),
+			...totals.adminPricing,
+		};
+	} else {
+		updates.total_amount = n2(existing.total_amount);
+		updates.sub_total = n2(existing.sub_total);
+		updates.adminPricing = toPlainObject(existing.adminPricing);
+	}
+	resetCommissionAssignmentForPricingChange(updates, existing);
+	syncLocalOtaFinancialSummary(updates, existing);
+	return updates;
+};
+
 const roomSelectionsAreSame = (left = [], right = []) => {
 	const leftRooms = Array.isArray(left) ? left : [];
 	const rightRooms = Array.isArray(right) ? right : [];
@@ -1077,6 +1205,12 @@ const normalizeReservationStayPricing = async (
 			options.hasExplicitPricingIntent ||
 			options.adminPricingUpdateIntent
 	);
+	// This option is set only by the authenticated platform-admin update
+	// controller after it has verified both the actor and the explicit pricing
+	// intent. It must never be inferred from fields supplied by the client.
+	const allowAuthorizedHotelRunnerPricingOverride = Boolean(
+		options.allowAuthorizedHotelRunnerPricingOverride,
+	);
 	const checkinTouched = hasOwn(updates, "checkin_date");
 	const checkoutTouched = hasOwn(updates, "checkout_date");
 	const dateTouched = checkinTouched || checkoutTouched;
@@ -1120,7 +1254,11 @@ const normalizeReservationStayPricing = async (
 		);
 	}
 
-	if (dateChanged && hasDirectHotelRunnerProjection(existing)) {
+	if (
+		dateChanged &&
+		hasDirectHotelRunnerProjection(existing) &&
+		!allowAuthorizedHotelRunnerPricingOverride
+	) {
 		throw new ReservationPricingError(
 			"HotelRunner-owned stay dates can only be changed by the HotelRunner projection.",
 			409,
@@ -1197,9 +1335,27 @@ const normalizeReservationStayPricing = async (
 			!roomIdentitiesAreSame(rooms, existingRooms)) ||
 		(hasOwn(updates, "pickedRoomsPricing") &&
 			!roomIdentitiesAreSame(pricingRooms, existingPricingRooms));
+	const roomConfigurationChanged =
+		roomFieldsSent &&
+		!roomConfigurationsAreSame(primaryRooms, existingPrimaryRooms);
+	if (
+		allowAuthorizedHotelRunnerPricingOverride &&
+		hasDirectHotelRunnerProjection(existing) &&
+		(dateChanged || roomConfigurationChanged)
+	) {
+		return preserveHotelRunnerPricingForOperationalChange({
+			existing,
+			updates,
+			existingRooms: existingPrimaryRooms,
+			incomingRooms: roomFieldsSent ? primaryRooms : existingPrimaryRooms,
+			stayDates,
+			dateChanged,
+		});
+	}
 	if (
 		hasDirectHotelRunnerProjection(existing) &&
-		(dateChanged || hotelChanged || roomFieldsSent)
+		(dateChanged || hotelChanged || roomFieldsSent) &&
+		!allowAuthorizedHotelRunnerPricingOverride
 	) {
 		return preserveHotelRunnerSourcePricingForOrdinaryEdit({
 			existing,
@@ -1372,6 +1528,12 @@ const normalizeReservationStayPricing = async (
 	updates.sub_total = totals.sub_total;
 	updates.adminPricing = totals.adminPricing;
 	resetCommissionAssignmentForPricingChange(updates, existing);
+	if (
+		allowAuthorizedHotelRunnerPricingOverride &&
+		hasDirectHotelRunnerProjection(existing)
+	) {
+		syncLocalOtaFinancialSummary(updates, existing);
+	}
 
 	return updates;
 };
