@@ -44,6 +44,7 @@ const {
 	generateDateRange,
 	getManualOtaHotelAssignmentReason,
 	hasAmbiguousMultiRoomEvidence,
+	hasCaptureOrSettlementActivity,
 	isAuthoritativeSourceUpgrade,
 	lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi,
 	isStaleOtaLifecycleEvent,
@@ -7858,6 +7859,30 @@ const makeDirectHotelRunnerCommercialReservation = (overrides = {}) => ({
 	financeStatus: "not paid",
 	payment: "",
 	payment_details: { captured: false, onsite_paid_amount: 0 },
+	bofa_payment: {
+		secure_acceptance: {
+			status: "not_started",
+			last_signed_at: null,
+			last_reference_number: "",
+			last_transaction_uuid: "",
+			amount_usd: 0,
+			currency: "USD",
+			transaction_type: "sale",
+			expires_at: null,
+			created_by: "",
+			last_callback_at: null,
+			last_callback_source: "",
+			last_response_signature_valid: null,
+			last_request_id: "",
+			last_transaction_id: "",
+			last_reason_code: "",
+			last_decision: "",
+			last_response_payload: {},
+			request_context: {},
+			outbound_metadata: {},
+			callbacks: [],
+		},
+	},
 	pickedRoomsType: [
 		{
 			room_type: "doubleRooms",
@@ -7961,6 +7986,39 @@ const applyDottedCommercialSet = (reservation, set = {}) => {
 	}
 	return next;
 };
+
+test("dormant BofA Secure Acceptance defaults are not payment activity", () => {
+	const dormant = makeDirectHotelRunnerCommercialReservation();
+	assert.equal(hasCaptureOrSettlementActivity(dormant), false);
+	for (const mutate of [
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.status = "pending";
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.last_request_id = "request-1";
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.callbacks.push({ event: "callback" });
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.amount_usd = 1;
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.amount_usd = "invalid";
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.callbacks = {};
+		},
+		(reservation) => {
+			reservation.bofa_payment.secure_acceptance.last_response_signature_valid =
+				false;
+		},
+	]) {
+		const active = structuredClone(dormant);
+		mutate(active);
+		assert.equal(hasCaptureOrSettlementActivity(active), true);
+	}
+});
 
 test("a direct-owned reservation accepts verified gross, net, and daily commercial enrichment", async () => {
 	const originalReservationFind = Reservations.find;

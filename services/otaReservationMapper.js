@@ -9262,6 +9262,75 @@ function authoritativeExistingRefreshProtectedStateGuard(existing = {}) {
 	return { ok: true };
 }
 
+function secureAcceptanceHasActivity(secureAcceptance = {}) {
+	if (!secureAcceptance || typeof secureAcceptance !== "object") return false;
+	const allowedKeys = new Set([
+		"status",
+		"last_signed_at",
+		"last_reference_number",
+		"last_transaction_uuid",
+		"amount_usd",
+		"currency",
+		"transaction_type",
+		"expires_at",
+		"created_by",
+		"last_callback_at",
+		"last_callback_source",
+		"last_response_signature_valid",
+		"last_request_id",
+		"last_transaction_id",
+		"last_reason_code",
+		"last_decision",
+		"last_response_payload",
+		"request_context",
+		"outbound_metadata",
+		"callbacks",
+	]);
+	if (
+		Object.entries(secureAcceptance).some(
+			([key, value]) =>
+				!allowedKeys.has(key) && hasMeaningfulProtectedValue(value)
+		)
+	) {
+		return true;
+	}
+	const status = normalizeComparable(secureAcceptance.status || "");
+	if (status && status !== "not started") return true;
+	if (Object.prototype.hasOwnProperty.call(secureAcceptance, "amount_usd")) {
+		const amountUsd = Number(secureAcceptance.amount_usd);
+		if (!Number.isFinite(amountUsd) || Math.abs(amountUsd) > 0.0001) {
+			return true;
+		}
+	}
+	const currency = normalizeComparable(secureAcceptance.currency || "");
+	if (currency && currency !== "usd") return true;
+	const transactionType = normalizeComparable(
+		secureAcceptance.transaction_type || ""
+	);
+	if (transactionType && transactionType !== "sale") return true;
+	if (Object.prototype.hasOwnProperty.call(secureAcceptance, "callbacks")) {
+		if (!Array.isArray(secureAcceptance.callbacks)) return true;
+		if (secureAcceptance.callbacks.length > 0) return true;
+	}
+	if (secureAcceptance.last_response_signature_valid != null) return true;
+	return [
+		secureAcceptance.last_signed_at,
+		secureAcceptance.last_reference_number,
+		secureAcceptance.last_transaction_uuid,
+		secureAcceptance.expires_at,
+		secureAcceptance.created_by,
+		secureAcceptance.last_callback_at,
+		secureAcceptance.last_callback_source,
+		secureAcceptance.last_request_id,
+		secureAcceptance.last_transaction_id,
+		secureAcceptance.last_reason_code,
+		secureAcceptance.last_decision,
+		secureAcceptance.last_response_payload,
+		secureAcceptance.request_context,
+		secureAcceptance.outbound_metadata,
+	].some(hasMeaningfulProtectedValue);
+}
+
 function hasCaptureOrSettlementActivity(existing = {}) {
 	const commissionStatus = normalizeComparable(existing.commissionStatus || "");
 	if (
@@ -9299,37 +9368,25 @@ function hasCaptureOrSettlementActivity(existing = {}) {
 	) {
 		return true;
 	}
+	const bofaPayment =
+		existing.bofa_payment && typeof existing.bofa_payment === "object"
+			? existing.bofa_payment
+			: {};
+	const {
+		secure_acceptance: secureAcceptance = {},
+		...bofaWithoutSecureAcceptance
+	} = bofaPayment;
 	if (
 		paymentProcessorHasActivity(existing.vcc_payment) ||
 		paymentProcessorHasActivity(existing.braintree_payment) ||
-		paymentProcessorHasActivity(existing?.bofa_payment?.vcc) ||
+		paymentProcessorHasActivity(bofaPayment.vcc) ||
 		objectHasTransactionOrSettlementEvidence(existing.vcc_payment) ||
 		objectHasTransactionOrSettlementEvidence(existing.braintree_payment) ||
-		objectHasTransactionOrSettlementEvidence(existing.bofa_payment)
+		objectHasTransactionOrSettlementEvidence(bofaWithoutSecureAcceptance)
 	) {
 		return true;
 	}
-	const secureAcceptance = existing?.bofa_payment?.secure_acceptance || {};
-	const secureStatus = normalizeComparable(secureAcceptance.status || "");
-	if (secureStatus && secureStatus !== "not started") return true;
-	if (
-		Array.isArray(secureAcceptance.callbacks) &&
-		secureAcceptance.callbacks.length > 0
-	) {
-		return true;
-	}
-	if (
-		[
-			secureAcceptance.last_signed_at,
-			secureAcceptance.last_reference_number,
-			secureAcceptance.last_transaction_uuid,
-			secureAcceptance.last_callback_at,
-			secureAcceptance.last_transaction_id,
-			secureAcceptance.last_decision,
-		].some((value) => value !== undefined && value !== null && value !== "")
-	) {
-		return true;
-	}
+	if (secureAcceptanceHasActivity(secureAcceptance)) return true;
 	return !!(
 		existing.paypal_details &&
 		typeof existing.paypal_details === "object" &&
