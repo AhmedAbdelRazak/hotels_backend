@@ -1326,7 +1326,7 @@ test("verified Agoda email pricing enriches the one API-owned reservation and ke
 	delete existing.supplierData.hotelRunner;
 	system.reservations.push(existing);
 	const evidenceWithoutHash = {
-		version: 1,
+		version: 2,
 		verified: true,
 		source: "authenticated_ota_email",
 		provider: "agoda",
@@ -1334,7 +1334,35 @@ test("verified Agoda email pricing enriches the one API-owned reservation and ke
 		grossTotalSar: 95.06,
 		payoutTotalSar: 58.82,
 		otaExpenseTotalSar: 36.24,
+		otaCommissionSar: 14.26,
+		deductionComponents: [
+			{
+				type: "commission",
+				label: "Commission",
+				amountSar: 14.26,
+				currency: "SAR",
+				source: "authenticated_agoda_email",
+			},
+			{
+				type: "growth_program",
+				label: "Agoda Growth Program",
+				amountSar: 9.51,
+				currency: "SAR",
+				source: "authenticated_agoda_email",
+			},
+			{
+				type: "tax_on_commission",
+				label: "Tax on Commission",
+				amountSar: 3.57,
+				currency: "SAR",
+				source: "authenticated_agoda_email",
+			},
+		],
+		unclassifiedDeductionSar: 8.9,
+		unpricedDeductionLabels: ["Targeted promotions"],
 		currency: "SAR",
+		inboundEmailId: "64b000000000000000000098",
+		sourceTextHash: "a".repeat(64),
 		sourceReceivedAt: "2026-08-06T11:55:00.000Z",
 		appliedAt: new Date("2026-08-06T11:56:00.000Z"),
 	};
@@ -1367,7 +1395,13 @@ test("verified Agoda email pricing enriches the one API-owned reservation and ke
 	assert.equal(system.reservations.length, 1);
 	assert.equal(system.reservations[0].total_amount, 95.06);
 	assert.equal(system.reservations[0].commission, 0);
-	assert.equal(system.reservations[0].commission_ota, 36.24);
+	assert.equal(system.reservations[0].commission_ota, 14.26);
+	assert.equal(system.reservations[0].supplierData.otaExpenseTotalSar, 36.24);
+	assert.equal(system.reservations[0].supplierData.otaCommissionSar, 14.26);
+	assert.equal(
+		system.reservations[0].ota_financial_summary.unclassifiedOtaDeduction,
+		8.9
+	);
 	assert.equal(system.reservations[0].adminPricing.commercialVerified, true);
 	assert.equal(
 		system.reservations[0].supplierData.hotelRunner.pricing.grandTotal,
@@ -2400,7 +2434,11 @@ test("HotelRunner preserves verified email payout evidence until provider or gro
 	assert.equal(reservation.adminPricing.netAfterExpensesTotal, 85.01);
 	assert.equal(reservation.adminPricing.otaExpenseTotal, 15);
 	assert.equal(reservation.adminPricing.commercialVerified, true);
-	assert.equal(reservation.commission_ota, 15);
+	assert.equal(
+		reservation.commission_ota,
+		null,
+		"legacy gross-to-net expense evidence must not be relabeled as OTA commission"
+	);
 	assert.deepEqual(
 		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
 		evidence
