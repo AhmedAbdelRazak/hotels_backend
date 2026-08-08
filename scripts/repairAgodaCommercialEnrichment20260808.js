@@ -389,7 +389,7 @@ function protectedReservationSnapshot(reservation = {}) {
 }
 
 function applyDottedSet(document, set = {}) {
-	const next = structuredClone(document);
+	const next = cloneBson(document);
 	for (const [pathText, value] of Object.entries(set)) {
 		const parts = pathText.split(".");
 		let current = next;
@@ -397,7 +397,7 @@ function applyDottedSet(document, set = {}) {
 			current[part] ||= {};
 			current = current[part];
 		}
-		current[parts.at(-1)] = structuredClone(value);
+		current[parts.at(-1)] = cloneBson(value);
 	}
 	return next;
 }
