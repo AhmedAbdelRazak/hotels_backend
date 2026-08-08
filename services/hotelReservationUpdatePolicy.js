@@ -95,6 +95,7 @@ const HOTEL_RESERVATION_UPDATE_FIELDS = new Set([
 	"checkin_date",
 	"checkout_date",
 	"__reservationDateUpdateIntent",
+	"__roomAssignmentUpdateIntent",
 	"days_of_residence",
 	"total_guests",
 	"adults",

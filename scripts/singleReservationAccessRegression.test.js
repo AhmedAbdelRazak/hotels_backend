@@ -788,6 +788,51 @@ test("direct HotelRunner source changes fail closed", () => {
 	}
 });
 
+test("authorized admin pricing intent can pass only HotelRunner pricing and explicit stay fields", () => {
+	const existing = directHotelRunnerSourceFixture();
+	const nextPricing = [{ room_type: "Double", totalPrice: 925 }];
+	const update = {
+		checkin_date: "2026-08-10",
+		checkout_date: "2026-08-13",
+		days_of_residence: 3,
+		pickedRoomsType: [{ room_type: "Double", count: 1 }],
+		pickedRoomsPricing: nextPricing,
+		total_rooms: 1,
+		total_amount: 925,
+		sub_total: 750,
+	};
+
+	const result = reservationAccess.protectDirectHotelRunnerSourceUpdate(
+		update,
+		existing,
+		{
+			allowAuthorizedAdminPricing: true,
+			allowAuthorizedAdminStayChange: true,
+		},
+	);
+
+	assert.deepEqual(result, { allowed: true });
+	assert.deepEqual(update.pickedRoomsPricing, nextPricing);
+	assert.equal(update.checkout_date, "2026-08-13");
+	assert.equal(update.total_amount, 925);
+});
+
+test("authorized admin pricing intent does not authorize HotelRunner property or OTA commission changes", () => {
+	const existing = directHotelRunnerSourceFixture();
+	for (const [payload, expectedField] of [
+		[{ hotelId: new mongoose.Types.ObjectId().toString() }, "hotelId"],
+		[{ commission_ota: 1 }, "commission_ota"],
+	]) {
+		const result = reservationAccess.protectDirectHotelRunnerSourceUpdate(
+			payload,
+			existing,
+			{ allowAuthorizedAdminPricing: true },
+		);
+		assert.equal(result.allowed, false);
+		assert.equal(result.field, expectedField);
+	}
+});
+
 test("direct HotelRunner commercial evidence is server-owned and explicit commission is configured-super-admin only", () => {
 	const existing = directHotelRunnerSourceFixture();
 	const denied = reservationAccess.protectDirectHotelRunnerCommercialUpdate(
@@ -798,6 +843,17 @@ test("direct HotelRunner commercial evidence is server-owned and explicit commis
 	assert.equal(denied.allowed, false);
 	assert.equal(denied.status, 403);
 	assert.equal(denied.code, "hotelrunner_platform_commission_superadmin_only");
+
+	const noOpEcho = { commission: 0, comment: "pricing form echo" };
+	assert.deepEqual(
+		reservationAccess.protectDirectHotelRunnerCommercialUpdate(
+			noOpEcho,
+			existing,
+			{ _id: new mongoose.Types.ObjectId(), role: 1000 },
+		),
+		{ allowed: true },
+	);
+	assert.deepEqual(noOpEcho, { comment: "pricing form echo" });
 
 	const evidenceOnly = {
 		commissionData: { assigned: true, amount: 125 },

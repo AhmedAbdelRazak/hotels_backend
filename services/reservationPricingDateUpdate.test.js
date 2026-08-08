@@ -49,6 +49,13 @@ const directHotelRunnerReservation = () => {
 			rootTotal: 150,
 			commercialVerified: false,
 		},
+		ota_financial_summary: {
+			show: true,
+			clientTotal: 1000,
+			hotelVisibleAmount: 150,
+			netAfterExpenses: 56.39,
+			otaExpenseTotal: 34.75,
+		},
 		pickedRoomsType: [room],
 		pickedRoomsPricing: [room],
 		supplierData: {
@@ -261,6 +268,142 @@ test("ordinary HotelRunner room-count changes fail closed before repricing", asy
 			assert.equal(error.statusCode, 409);
 			return true;
 		}
+	);
+});
+
+test("authorized platform-admin pricing replaces complete HotelRunner pricing without changing source commission", async () => {
+	const existing = directHotelRunnerReservation();
+	existing.commission_ota = 34.75;
+	const room = {
+		...existing.pickedRoomsPricing[0],
+		chosenPrice: 91.14,
+		pricingByDay: existing.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+			...day,
+			price: 91.14,
+			clientPrice: 91.14,
+			mainPrice: 91.14,
+			totalPriceWithCommission: 91.14,
+			rootPrice: 75,
+			totalPriceWithoutCommission: 75,
+			netAfterExpenses: 56.39,
+			otaExpenseAmount: 34.75,
+		})),
+	};
+
+	const updates = await normalizeReservationStayPricing(
+		existing,
+		{
+			pickedRoomsType: [room],
+			pickedRoomsPricing: [room],
+		},
+		{
+			hasExplicitAdminPricingIntent: true,
+			allowAuthorizedHotelRunnerPricingOverride: true,
+		},
+	);
+
+	assert.equal(updates.total_amount, 182.28);
+	assert.equal(updates.sub_total, 150);
+	assert.equal(updates.commission, 0);
+	assert.equal(updates.commission_ota, undefined);
+	assert.equal(existing.commission_ota, 34.75);
+	assert.equal(updates.ota_financial_summary.clientTotal, 182.28);
+	assert.equal(updates.ota_financial_summary.hotelVisibleAmount, 150);
+	assert.equal(updates.ota_financial_summary.netAfterExpenses, 56.39);
+	assert.equal(updates.ota_financial_summary.otaExpenseTotal, 34.75);
+	assert.deepEqual(
+		updates.pickedRoomsPricing[0].pricingByDay.map((day) => day.price),
+		[91.14, 91.14],
+	);
+});
+
+test("authorized platform-admin extension accepts complete HotelRunner nightly pricing", async () => {
+	const existing = directHotelRunnerReservation();
+	const room = {
+		...existing.pickedRoomsPricing[0],
+		pricingByDay: [
+			...existing.pickedRoomsPricing[0].pricingByDay,
+			{
+				date: "2026-07-26",
+				price: 91.14,
+				clientPrice: 91.14,
+				totalPriceWithCommission: 91.14,
+				rootPrice: 75,
+				totalPriceWithoutCommission: 75,
+			},
+		],
+	};
+	const updates = await normalizeReservationStayPricing(
+		existing,
+		{
+			checkout_date: "2026-07-27",
+			pickedRoomsType: [room],
+			pickedRoomsPricing: [room],
+		},
+		{
+			hasExplicitAdminPricingIntent: true,
+			allowAuthorizedHotelRunnerPricingOverride: true,
+		},
+	);
+
+	assert.equal(updates.days_of_residence, 3);
+	assert.equal(updates.total_amount, 171);
+	assert.equal(updates.sub_total, 225);
+	assert.equal(updates.ota_financial_summary.clientTotal, 171);
+	assert.equal(updates.ota_financial_summary.hotelVisibleAmount, 225);
+	assert.equal(updates.ota_financial_summary.otaExpenseTotal, 34.75);
+	assert.deepEqual(
+		updates.pickedRoomsPricing[0].pricingByDay.map((day) => day.date),
+		["2026-07-24", "2026-07-25", "2026-07-26"],
+	);
+	assert.deepEqual(
+		updates.pickedRoomsPricing[0].pricingByDay.map((day) => day.price),
+		[57, 57, 57],
+	);
+});
+
+test("authorized HotelRunner room configuration change preserves saved nightly rows and exact total", async () => {
+	const existing = directHotelRunnerReservation();
+	const changedRoom = {
+		...existing.pickedRoomsPricing[0],
+		room_type: "familyRooms",
+		displayName: "Spacious Six-Bed Room",
+		hotelRoomConfigId: "6a4a84216022cd7f31729011",
+		chosenPrice: 999,
+		pricingByDay: existing.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+			...day,
+			price: 999,
+			totalPriceWithCommission: 999,
+			rootPrice: 888,
+		})),
+	};
+	const beforeRows = JSON.parse(
+		JSON.stringify(existing.pickedRoomsPricing[0].pricingByDay),
+	);
+
+	const updates = await normalizeReservationStayPricing(
+		existing,
+		{
+			pickedRoomsType: [changedRoom],
+			pickedRoomsPricing: [changedRoom],
+		},
+		{
+			hasExplicitAdminPricingIntent: true,
+			allowAuthorizedHotelRunnerPricingOverride: true,
+		},
+	);
+
+	assert.equal(updates.pickedRoomsPricing[0].room_type, "familyRooms");
+	assert.equal(
+		updates.pickedRoomsPricing[0].hotelRoomConfigId,
+		"6a4a84216022cd7f31729011",
+	);
+	assert.deepEqual(updates.pickedRoomsPricing[0].pricingByDay, beforeRows);
+	assert.equal(updates.total_amount, existing.total_amount);
+	assert.equal(updates.sub_total, existing.sub_total);
+	assert.deepEqual(
+		updates.ota_financial_summary,
+		existing.ota_financial_summary,
 	);
 });
 
