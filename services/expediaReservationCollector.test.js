@@ -8,6 +8,280 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { __private } = require("./expediaReservationCollector");
 
+const RELEASE_SHA = "a".repeat(40);
+const TREE_SHA = "b".repeat(40);
+const CAPTURED_AT = "2026-08-09T06:30:00.000Z";
+
+const releaseAttestationGit = ({ status = "", unavailable = false } = {}) => {
+	const calls = [];
+	const execFile = (command, args, options) => {
+		calls.push({ command, args, options });
+		if (unavailable) {
+			throw new Error("private/repository/path and credential must not escape");
+		}
+		const operation = args.join(" ");
+		if (operation === "rev-parse --verify HEAD") return RELEASE_SHA.toUpperCase();
+		if (operation === "rev-parse --verify HEAD^{tree}") {
+			return TREE_SHA.toUpperCase();
+		}
+		if (operation === "status --porcelain=v1 --untracked-files=no") {
+			return status;
+		}
+		throw new Error("unexpected git operation");
+	};
+	return { calls, execFile };
+};
+
+test("Expedia collector captures an exact clean producer release attestation", () => {
+	const git = releaseAttestationGit();
+	const attestation = __private.captureProducerReleaseAttestation({
+		execFile: git.execFile,
+		repoRoot: "private/repository/path",
+		now: () => CAPTURED_AT,
+	});
+
+	assert.deepEqual(attestation, {
+		schemaVersion: 1,
+		source: "git",
+		releaseSha: RELEASE_SHA,
+		treeSha: TREE_SHA,
+		trackedWorktreeClean: true,
+		evidenceEligible: true,
+		status: "verified_clean",
+		capturedAt: CAPTURED_AT,
+	});
+	assert.equal(Object.isFrozen(attestation), true);
+	assert.deepEqual(
+		git.calls.map((call) => call.args),
+		[
+			["rev-parse", "--verify", "HEAD"],
+			["rev-parse", "--verify", "HEAD^{tree}"],
+			["status", "--porcelain=v1", "--untracked-files=no"],
+		],
+		"untracked files must not affect release eligibility"
+	);
+	for (const call of git.calls) {
+		assert.equal(call.command, "git");
+		assert.deepEqual(call.options.stdio, ["ignore", "pipe", "ignore"]);
+	}
+	assert.doesNotMatch(JSON.stringify(attestation), /private\/repository\/path/);
+});
+
+test("Expedia collector freezes producer provenance once for the process lifetime", () => {
+	let releaseSha = RELEASE_SHA;
+	let treeSha = TREE_SHA;
+	let gitCalls = 0;
+	const provider =
+		__private.createProcessProducerReleaseAttestationProvider({
+			execFile: (_command, args) => {
+				gitCalls += 1;
+				const operation = args.join(" ");
+				if (operation === "rev-parse --verify HEAD") return releaseSha;
+				if (operation === "rev-parse --verify HEAD^{tree}") return treeSha;
+				if (operation === "status --porcelain=v1 --untracked-files=no") {
+					return "";
+				}
+				throw new Error("unexpected git operation");
+			},
+			now: () => CAPTURED_AT,
+		});
+
+	const firstJob = provider();
+	releaseSha = "c".repeat(40);
+	treeSha = "d".repeat(40);
+	const laterJob = provider();
+
+	assert.notEqual(firstJob, laterJob);
+	assert.deepEqual(firstJob, laterJob);
+	assert.equal(firstJob.releaseSha, RELEASE_SHA);
+	assert.equal(firstJob.treeSha, TREE_SHA);
+	assert.equal(firstJob.capturedAt, CAPTURED_AT);
+	assert.equal(gitCalls, 3, "git must never be re-read for later jobs");
+	assert.equal(Object.isFrozen(firstJob), true);
+	assert.equal(Object.isFrozen(laterJob), true);
+});
+
+test("Expedia collector records tracked dirty state without leaking status paths", () => {
+	const git = releaseAttestationGit({
+		status: " M private/tracked/file.js credential-sentinel",
+	});
+	const attestation = __private.captureProducerReleaseAttestation({
+		execFile: git.execFile,
+		now: () => CAPTURED_AT,
+	});
+
+	assert.equal(attestation.releaseSha, RELEASE_SHA);
+	assert.equal(attestation.treeSha, TREE_SHA);
+	assert.equal(attestation.trackedWorktreeClean, false);
+	assert.equal(attestation.evidenceEligible, false);
+	assert.equal(attestation.status, "tracked_worktree_dirty");
+	assert.doesNotMatch(
+		JSON.stringify(attestation),
+		/private\/tracked\/file|credential-sentinel/
+	);
+});
+
+test("Expedia collector marks unavailable git provenance ineligible without faking hashes", () => {
+	const git = releaseAttestationGit({ unavailable: true });
+	const attestation = __private.captureProducerReleaseAttestation({
+		execFile: git.execFile,
+		now: () => CAPTURED_AT,
+	});
+
+	assert.deepEqual(attestation, {
+		schemaVersion: 1,
+		source: "git",
+		releaseSha: "",
+		treeSha: "",
+		trackedWorktreeClean: false,
+		evidenceEligible: false,
+		status: "unavailable",
+		capturedAt: CAPTURED_AT,
+	});
+	assert.doesNotMatch(
+		JSON.stringify(attestation),
+		/private\/repository\/path|credential/
+	);
+});
+
+test("queued and finished audit projections preserve one immutable attestation", () => {
+	const git = releaseAttestationGit();
+	const attestation = __private.captureProducerReleaseAttestation({
+		execFile: git.execFile,
+		now: () => CAPTURED_AT,
+	});
+	const queued = __private.withProducerReleaseAttestation(
+		{ action: "collector_queued", readOnly: true },
+		attestation
+	);
+	const finished = __private.withProducerReleaseAttestation(
+		{ action: "collector_finished", readOnly: true },
+		attestation
+	);
+	const jobCopy = __private.cloneProducerReleaseAttestation(attestation);
+
+	assert.notEqual(
+		queued.producerReleaseAttestation,
+		finished.producerReleaseAttestation
+	);
+	assert.deepEqual(queued.producerReleaseAttestation, jobCopy);
+	assert.deepEqual(finished.producerReleaseAttestation, jobCopy);
+	assert.equal(Object.isFrozen(queued.producerReleaseAttestation), true);
+	assert.equal(Object.isFrozen(finished.producerReleaseAttestation), true);
+});
+
+test("collector scheduling waits for the queued state and leaves no active start on failure", async () => {
+	const events = [];
+	let releaseQueuedState;
+	const queuedStateGate = new Promise((resolve) => {
+		releaseQueuedState = resolve;
+	});
+	const queued = __private.persistQueuedStateBeforeScheduling({
+		persistQueuedState: async () => {
+			events.push("queue_write_started");
+			await queuedStateGate;
+			events.push("queue_write_committed");
+			return { status: "queued" };
+		},
+		activateCollector: () => events.push("collector_activated"),
+		scheduleCollector: () => events.push("collector_scheduled"),
+		deactivateCollector: () => events.push("collector_deactivated"),
+	});
+
+	await Promise.resolve();
+	assert.deepEqual(events, ["queue_write_started"]);
+	releaseQueuedState();
+	assert.deepEqual(await queued, { status: "queued" });
+	assert.deepEqual(events, [
+		"queue_write_started",
+		"queue_write_committed",
+		"collector_activated",
+		"collector_scheduled",
+	]);
+
+	const failedEvents = [];
+	await assert.rejects(
+		__private.persistQueuedStateBeforeScheduling({
+			persistQueuedState: async () => {
+				failedEvents.push("queue_write_failed");
+				throw new Error("queue write failed");
+			},
+			activateCollector: () => failedEvents.push("collector_activated"),
+			scheduleCollector: () => failedEvents.push("collector_scheduled"),
+			deactivateCollector: () => failedEvents.push("collector_deactivated"),
+		}),
+		/queue write failed/
+	);
+	assert.deepEqual(failedEvents, ["queue_write_failed"]);
+
+	const missingEvents = [];
+	await assert.rejects(
+		__private.persistQueuedStateBeforeScheduling({
+			persistQueuedState: async () => null,
+			activateCollector: () => missingEvents.push("collector_activated"),
+			scheduleCollector: () => missingEvents.push("collector_scheduled"),
+			deactivateCollector: () => missingEvents.push("collector_deactivated"),
+		}),
+		/queued state was not persisted/
+	);
+	assert.deepEqual(missingEvents, []);
+});
+
+test("payment evidence projection carries the exact trusted property conversion", () => {
+	const evidence = {
+		trusted: true,
+		verified: true,
+		sourceCurrency: "USD",
+		propertyCurrency: "SAR",
+		rate: 3.75,
+		provenance: {
+			provider: "exchange_rate_api",
+			sourceType: "trusted_exchange_evidence",
+			sourceHash: "c".repeat(64),
+			sourceTimestamp: "2026-08-09T00:00:00.000Z",
+			sourceId: "exchange-rate-api-usd-sar-" + "c".repeat(24),
+		},
+		privateCredential: "must-not-copy",
+	};
+	const projection = __private.paymentSignalProjection({
+		confirmationNumber: "2530158461",
+		reservationId: "reservation-id",
+		paymentCollectionModel: "expedia_collect",
+		currency: "SAR",
+		propertyCurrency: "SAR",
+		propertyConversionVerified: true,
+		sourceCurrency: "USD",
+		sourceAmount: 146.46,
+		exchangeRateToSar: 3.75,
+		exchangeRateSource: "exchange_rate_api",
+		amountConvertedAt: "2026-08-09T06:00:00.000Z",
+		currencyConversionEvidence: evidence,
+		paymentSummary: {
+			propertyCurrency: "SAR",
+			propertyConversionVerified: true,
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: 146.46,
+			sourceTotalPayoutAmount: 112.92,
+			sourceTotalPayoutCurrency: "USD",
+			totalGuestPaymentAmount: 549.23,
+			totalPayoutAmount: 423.45,
+		},
+	});
+
+	assert.equal(projection.propertyCurrency, "SAR");
+	assert.equal(projection.propertyConversionVerified, true);
+	assert.equal(projection.sourceTotalPayoutCurrency, "USD");
+	assert.deepEqual(projection.currencyConversionEvidence, {
+		trusted: true,
+		verified: true,
+		sourceCurrency: "USD",
+		propertyCurrency: "SAR",
+		rate: 3.75,
+		provenance: evidence.provenance,
+	});
+	assert.doesNotMatch(JSON.stringify(projection), /must-not-copy/);
+});
+
 test("Expedia collector reads commercial detail for an existing PMS match", () => {
 	assert.equal(
 		__private.shouldFetchExpediaReservationDetails({

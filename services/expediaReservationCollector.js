@@ -3,6 +3,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { execFileSync } = require("node:child_process");
 const puppeteer = require("puppeteer");
 const OtaReservationSyncJob = require("../models/ota_reservation_sync_job");
 const {
@@ -43,9 +44,123 @@ const DEFAULT_PROFILE_DIR = path.join(
 	".jannatbooking",
 	"expedia-reservation-sync-profile"
 );
+const COLLECTOR_REPO_ROOT = path.resolve(__dirname, "..");
+const PRODUCER_RELEASE_ATTESTATION_SCHEMA_VERSION = 1;
+const GIT_OBJECT_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const KEEP_AUDIT_SCREENSHOTS = /^(1|true|yes)$/i.test(
 	process.env.OTA_EXPEDIA_KEEP_AUDIT_SCREENSHOTS || ""
 );
+
+const cloneProducerReleaseAttestation = (value = {}) =>
+	Object.freeze({
+		schemaVersion: value.schemaVersion,
+		source: value.source,
+		releaseSha: value.releaseSha,
+		treeSha: value.treeSha,
+		trackedWorktreeClean: value.trackedWorktreeClean,
+		evidenceEligible: value.evidenceEligible,
+		status: value.status,
+		capturedAt: value.capturedAt,
+	});
+
+const withProducerReleaseAttestation = (value = {}, attestation = {}) => ({
+	...value,
+	producerReleaseAttestation: cloneProducerReleaseAttestation(attestation),
+});
+
+const cloneCurrencyConversionEvidence = (value) =>
+	value && typeof value === "object" && !Array.isArray(value)
+		? {
+				trusted: value.trusted,
+				verified: value.verified,
+				sourceCurrency: value.sourceCurrency,
+				propertyCurrency: value.propertyCurrency,
+				rate: value.rate,
+				provenance: {
+					provider: value.provenance?.provider,
+					sourceType: value.provenance?.sourceType,
+					sourceHash: value.provenance?.sourceHash,
+					sourceTimestamp: value.provenance?.sourceTimestamp,
+					sourceId: value.provenance?.sourceId,
+				},
+		  }
+		: null;
+
+const captureProducerReleaseAttestation = ({
+	execFile = execFileSync,
+	repoRoot = COLLECTOR_REPO_ROOT,
+	now = () => new Date(),
+} = {}) => {
+	const capturedAt = new Date(now()).toISOString();
+	const build = ({
+		releaseSha = "",
+		treeSha = "",
+		trackedWorktreeClean = false,
+		evidenceEligible = false,
+		status = "unavailable",
+	} = {}) =>
+		cloneProducerReleaseAttestation({
+			schemaVersion: PRODUCER_RELEASE_ATTESTATION_SCHEMA_VERSION,
+			source: "git",
+			releaseSha,
+			treeSha,
+			trackedWorktreeClean,
+			evidenceEligible,
+			status,
+			capturedAt,
+		});
+	const readGit = (args) =>
+		String(
+			execFile("git", args, {
+				cwd: repoRoot,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}) || ""
+		).trim();
+
+	try {
+		const releaseSha = readGit(["rev-parse", "--verify", "HEAD"])
+			.toLowerCase();
+		const treeSha = readGit(["rev-parse", "--verify", "HEAD^{tree}"])
+			.toLowerCase();
+		const trackedStatus = readGit([
+			"status",
+			"--porcelain=v1",
+			"--untracked-files=no",
+		]);
+		if (
+			!GIT_OBJECT_SHA_PATTERN.test(releaseSha) ||
+			!GIT_OBJECT_SHA_PATTERN.test(treeSha)
+		) {
+			return build();
+		}
+		const trackedWorktreeClean = trackedStatus === "";
+		return build({
+			releaseSha,
+			treeSha,
+			trackedWorktreeClean,
+			evidenceEligible: trackedWorktreeClean,
+			status: trackedWorktreeClean
+				? "verified_clean"
+				: "tracked_worktree_dirty",
+		});
+	} catch (_error) {
+		return build();
+	}
+};
+
+const createProcessProducerReleaseAttestationProvider = (captureOptions = {}) => {
+	const processAttestation = captureProducerReleaseAttestation(captureOptions);
+	return Object.freeze(() =>
+		cloneProducerReleaseAttestation(processAttestation)
+	);
+};
+
+// Capture once while this module is loaded. A long-lived process must never
+// re-attest a newer checkout while it is still executing this in-memory code.
+const getProcessProducerReleaseAttestation =
+	createProcessProducerReleaseAttestationProvider();
+
 const readPositiveMs = (value, fallback) => {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -115,6 +230,7 @@ const MFA_SESSION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_MFA_TIMEOUT_MS || 10 * 60 * 1000
 );
 const activeCollectors = new Map();
+const pendingCollectorStarts = new Set();
 const activeMfaSessions = new Map();
 
 const EMAIL_INPUT_SELECTORS = [
@@ -3543,6 +3659,65 @@ const summarizeBuckets = (buckets = emptyBuckets()) => ({
 	appliedWrites: 0,
 });
 
+const paymentSignalProjection = (candidate = {}) => ({
+	hotelId: candidate.hotelId,
+	hotelName: candidate.hotelName,
+	expediaPropertyId: candidate.expediaPropertyId,
+	expediaPropertyName: candidate.expediaPropertyName,
+	confirmationNumber: candidate.confirmationNumber,
+	reservationId: candidate.reservationId,
+	hotelConfirmationNumber: candidate.hotelConfirmationNumber,
+	paymentCollectionModel: candidate.paymentCollectionModel || "unknown",
+	currency: candidate.currency || candidate.paymentSummary?.currency || "",
+	propertyCurrency:
+		candidate.propertyCurrency ||
+		candidate.paymentSummary?.propertyCurrency ||
+		"",
+	propertyConversionVerified:
+		candidate.propertyConversionVerified === true &&
+		candidate.paymentSummary?.propertyConversionVerified === true,
+	sourceCurrency:
+		candidate.sourceCurrency || candidate.paymentSummary?.sourceCurrency || "",
+	sourceAmount:
+		candidate.sourceAmount ??
+		candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+		null,
+	exchangeRateToSar:
+		candidate.exchangeRateToSar ||
+		candidate.paymentSummary?.exchangeRateToSar ||
+		0,
+	exchangeRateSource:
+		candidate.exchangeRateSource ||
+		candidate.paymentSummary?.exchangeRateSource ||
+		"",
+	amountConvertedAt:
+		candidate.amountConvertedAt ||
+		candidate.paymentSummary?.amountConvertedAt ||
+		"",
+	currencyConversionEvidence: cloneCurrencyConversionEvidence(
+		candidate.currencyConversionEvidence
+	),
+	totalGuestPaymentAmount:
+		candidate.paymentSummary?.totalGuestPaymentAmount ??
+		candidate.amount ??
+		null,
+	sourceTotalGuestPaymentAmount:
+		candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+		candidate.sourceAmount ??
+		null,
+	totalPayoutAmount: candidate.paymentSummary?.totalPayoutAmount ?? null,
+	sourceTotalPayoutAmount:
+		candidate.paymentSummary?.sourceTotalPayoutAmount ?? null,
+	sourceTotalPayoutCurrency:
+		candidate.paymentSummary?.sourceTotalPayoutCurrency ||
+		candidate.sourcePayoutCurrency ||
+		"",
+	hasVirtualCardSignal:
+		candidate.paymentSignals?.hasVirtualCardSignal || false,
+	rawCardStored: false,
+	actionPreview: "payment_signal_no_card_data_stored",
+});
+
 const appendAudit = async (jobId, entry = {}) =>
 	OtaReservationSyncJob.updateOne(
 		{ _id: jobId },
@@ -3943,7 +4118,12 @@ const attemptExpediaLogin = async ({
 	};
 };
 
-const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
+const runCollector = async ({
+	jobId,
+	actorId,
+	selectedHotelIds = [],
+	producerReleaseAttestation,
+}) => {
 	const startedAt = Date.now();
 	const maxRunMs = resolveCollectorMaxRunMs(selectedHotelIds.length);
 	const hardTimeoutMs = resolveCollectorHardTimeoutMs(maxRunMs);
@@ -3962,6 +4142,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		updateJob(jobId, {
 			$set: {
 				status: "collector_failed",
+				"collectorPlan.producerReleaseAttestation":
+					cloneProducerReleaseAttestation(producerReleaseAttestation),
 				previewBuckets: buckets,
 				collectorArtifacts: artifacts,
 				resultSummary: summarizeBuckets(buckets),
@@ -3984,6 +4166,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					action: "collector_hard_timeout",
 					by: actorId,
 					readOnly: true,
+					producerReleaseAttestation:
+						cloneProducerReleaseAttestation(producerReleaseAttestation),
 					timeoutMs: hardTimeoutMs,
 					runBudgetMs: maxRunMs,
 				},
@@ -4012,6 +4196,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		await updateJob(jobId, {
 			$set: {
 				status: "running",
+				"collectorPlan.producerReleaseAttestation":
+					cloneProducerReleaseAttestation(producerReleaseAttestation),
 				collectorState: {
 					status: "running",
 					startedAt: new Date(),
@@ -4032,6 +4218,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			action: "collector_started",
 			by: actorId,
 			readOnly: true,
+			producerReleaseAttestation:
+				cloneProducerReleaseAttestation(producerReleaseAttestation),
 			mode: "single_browser_sequential",
 			runBudgetMs: maxRunMs,
 			hardTimeoutMs,
@@ -4420,51 +4608,9 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					Number(candidate.paymentSummary?.totalPayoutAmount || 0) > 0 ||
 					Number(candidate.paymentSummary?.totalGuestPaymentAmount || 0) > 0;
 				if (hasPaymentSignal) {
-					buckets.paymentOrVccAvailable.push({
-						hotelId: candidate.hotelId,
-						hotelName: candidate.hotelName,
-						expediaPropertyId: candidate.expediaPropertyId,
-						expediaPropertyName: candidate.expediaPropertyName,
-						confirmationNumber: candidate.confirmationNumber,
-						reservationId: candidate.reservationId,
-						hotelConfirmationNumber: candidate.hotelConfirmationNumber,
-						paymentCollectionModel:
-							candidate.paymentCollectionModel || "unknown",
-						currency:
-							candidate.currency || candidate.paymentSummary?.currency || "",
-						sourceCurrency:
-							candidate.sourceCurrency ||
-							candidate.paymentSummary?.sourceCurrency ||
-							"",
-						sourceAmount:
-							candidate.sourceAmount ??
-							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
-							null,
-						exchangeRateToSar:
-							candidate.exchangeRateToSar ||
-							candidate.paymentSummary?.exchangeRateToSar ||
-							0,
-						exchangeRateSource:
-							candidate.exchangeRateSource ||
-							candidate.paymentSummary?.exchangeRateSource ||
-							"",
-						totalGuestPaymentAmount:
-							candidate.paymentSummary?.totalGuestPaymentAmount ??
-							candidate.amount ??
-							null,
-						sourceTotalGuestPaymentAmount:
-							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
-							candidate.sourceAmount ??
-							null,
-						totalPayoutAmount:
-							candidate.paymentSummary?.totalPayoutAmount ?? null,
-						sourceTotalPayoutAmount:
-							candidate.paymentSummary?.sourceTotalPayoutAmount ?? null,
-						hasVirtualCardSignal:
-							candidate.paymentSignals?.hasVirtualCardSignal || false,
-						rawCardStored: false,
-						actionPreview: "payment_signal_no_card_data_stored",
-					});
+					buckets.paymentOrVccAvailable.push(
+						paymentSignalProjection(candidate)
+					);
 				}
 				buckets[classification.bucket].push(classification.item);
 			}
@@ -4489,6 +4635,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		await updateJob(jobId, {
 			$set: {
 				status: finalStatus,
+				"collectorPlan.producerReleaseAttestation":
+					cloneProducerReleaseAttestation(producerReleaseAttestation),
 				previewBuckets: buckets,
 				collectorArtifacts: artifacts,
 				resultSummary: summarizeBuckets(buckets),
@@ -4510,6 +4658,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			action: "collector_finished",
 			by: actorId,
 			readOnly: true,
+			producerReleaseAttestation:
+				cloneProducerReleaseAttestation(producerReleaseAttestation),
 			summary: summarizeBuckets(buckets),
 		});
 	} catch (error) {
@@ -4517,6 +4667,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		await updateJob(jobId, {
 			$set: {
 				status: "collector_failed",
+				"collectorPlan.producerReleaseAttestation":
+					cloneProducerReleaseAttestation(producerReleaseAttestation),
 				previewBuckets: buckets,
 				collectorArtifacts: artifacts,
 				resultSummary: summarizeBuckets(buckets),
@@ -4533,6 +4685,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			action: "collector_failed",
 			by: actorId,
 			readOnly: true,
+			producerReleaseAttestation:
+				cloneProducerReleaseAttestation(producerReleaseAttestation),
 			error: error?.message || String(error),
 		}).catch(() => {});
 	} finally {
@@ -4545,6 +4699,26 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 	}
 };
 
+const persistQueuedStateBeforeScheduling = async ({
+	persistQueuedState,
+	activateCollector,
+	scheduleCollector,
+	deactivateCollector,
+}) => {
+	const updated = await persistQueuedState();
+	if (!updated) {
+		throw new Error("The Expedia collector queued state was not persisted.");
+	}
+	activateCollector();
+	try {
+		scheduleCollector();
+	} catch (error) {
+		deactivateCollector();
+		throw error;
+	}
+	return updated;
+};
+
 const startExpediaReservationCollectorJob = async ({
 	jobId,
 	actor,
@@ -4555,75 +4729,108 @@ const startExpediaReservationCollectorJob = async ({
 		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
 		return { ok: true, statusCode: 202, job, alreadyRunning: true };
 	}
-	if (activeCollectors.size > 0) {
+	if (pendingCollectorStarts.has(key)) {
+		return {
+			ok: false,
+			statusCode: 409,
+			error: "This OTA reservation collector is already being queued.",
+		};
+	}
+	if (activeCollectors.size > 0 || pendingCollectorStarts.size > 0) {
 		return {
 			ok: false,
 			statusCode: 409,
 			error: "Another OTA reservation collector is already running.",
 		};
 	}
-	const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
-	if (!job) {
-		return { ok: false, statusCode: 404, error: "OTA reservation sync job not found." };
-	}
-	if (job.provider !== "expedia") {
-		return {
-			ok: false,
-			statusCode: 400,
-			error: "The browser collector currently supports Expedia only.",
-		};
-	}
-	if (job.credentialSummary?.missing?.length) {
-		return {
-			ok: false,
-			statusCode: 409,
-			error: `Missing server env: ${job.credentialSummary.missing.join(", ")}`,
-		};
-	}
-	const selection = resolveSelectedTargets(job, selectedHotelIds);
-	if (!selection.ok) {
-		return selection;
-	}
-	const maxRunMs = resolveCollectorMaxRunMs(selection.targetHotels.length);
-	const hardTimeoutMs = resolveCollectorHardTimeoutMs(maxRunMs);
+	pendingCollectorStarts.add(key);
+	try {
+		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+		if (!job) {
+			return {
+				ok: false,
+				statusCode: 404,
+				error: "OTA reservation sync job not found.",
+			};
+		}
+		if (job.provider !== "expedia") {
+			return {
+				ok: false,
+				statusCode: 400,
+				error: "The browser collector currently supports Expedia only.",
+			};
+		}
+		if (job.credentialSummary?.missing?.length) {
+			return {
+				ok: false,
+				statusCode: 409,
+				error: `Missing server env: ${job.credentialSummary.missing.join(", ")}`,
+			};
+		}
+		const selection = resolveSelectedTargets(job, selectedHotelIds);
+		if (!selection.ok) {
+			return selection;
+		}
+		const maxRunMs = resolveCollectorMaxRunMs(selection.targetHotels.length);
+		const hardTimeoutMs = resolveCollectorHardTimeoutMs(maxRunMs);
+		const producerReleaseAttestation =
+			getProcessProducerReleaseAttestation();
 
-	activeCollectors.set(key, true);
-	setImmediate(() =>
-		runCollector({
-			jobId,
-			actorId: actor?._id || actor?.id || "",
-			selectedHotelIds: selection.selectedHotelIds,
-		})
-	);
-	const updated = await updateJob(jobId, {
-		$set: {
-			status: "queued",
-			collectorState: {
-				status: "queued",
-				queuedAt: new Date(),
-				mode: "single_browser_sequential",
-				readOnly: true,
-				selectedHotelIds: selection.selectedHotelIds,
-				selectedHotelCount: selection.targetHotels.length,
-				runBudgetMs: maxRunMs,
-				hardTimeoutMs,
-			},
-			"collectorArtifacts.selectedHotelCount": selection.targetHotels.length,
-		},
-		$push: {
-			auditLog: {
-				at: new Date(),
-				action: "collector_queued",
-				by: actor?._id || actor?.id || "",
-				readOnly: true,
-				selectedHotelIds: selection.selectedHotelIds,
-				selectedHotelCount: selection.targetHotels.length,
-				runBudgetMs: maxRunMs,
-				hardTimeoutMs,
-			},
-		},
-	});
-	return { ok: true, statusCode: 202, job: updated };
+		const updated = await persistQueuedStateBeforeScheduling({
+			persistQueuedState: () =>
+				updateJob(jobId, {
+					$set: {
+						status: "queued",
+						"collectorPlan.producerReleaseAttestation":
+							cloneProducerReleaseAttestation(
+								producerReleaseAttestation
+							),
+						collectorState: {
+							status: "queued",
+							queuedAt: new Date(),
+							mode: "single_browser_sequential",
+							readOnly: true,
+							selectedHotelIds: selection.selectedHotelIds,
+							selectedHotelCount: selection.targetHotels.length,
+							runBudgetMs: maxRunMs,
+							hardTimeoutMs,
+						},
+						"collectorArtifacts.selectedHotelCount":
+							selection.targetHotels.length,
+					},
+					$push: {
+						auditLog: {
+							at: new Date(),
+							action: "collector_queued",
+							by: actor?._id || actor?.id || "",
+							readOnly: true,
+							producerReleaseAttestation:
+								cloneProducerReleaseAttestation(
+									producerReleaseAttestation
+								),
+							selectedHotelIds: selection.selectedHotelIds,
+							selectedHotelCount: selection.targetHotels.length,
+							runBudgetMs: maxRunMs,
+							hardTimeoutMs,
+						},
+					},
+				}),
+			activateCollector: () => activeCollectors.set(key, true),
+			deactivateCollector: () => activeCollectors.delete(key),
+			scheduleCollector: () =>
+				setImmediate(() =>
+					runCollector({
+						jobId,
+						actorId: actor?._id || actor?.id || "",
+						selectedHotelIds: selection.selectedHotelIds,
+						producerReleaseAttestation,
+					})
+				),
+		});
+		return { ok: true, statusCode: 202, job: updated };
+	} finally {
+		pendingCollectorStarts.delete(key);
+	}
 };
 
 const submitExpediaReservationMfaCode = async ({ jobId, actor, code }) => {
@@ -4681,6 +4888,14 @@ module.exports = {
 		mergeDetailCandidate,
 		hasTrustedExpediaDetailGross,
 		applyTrustedCandidateSarConversion,
+		captureProducerReleaseAttestation,
+		createProcessProducerReleaseAttestationProvider,
+		getProcessProducerReleaseAttestation,
+		cloneProducerReleaseAttestation,
+		withProducerReleaseAttestation,
+		persistQueuedStateBeforeScheduling,
+		cloneCurrencyConversionEvidence,
+		paymentSignalProjection,
 		lineConfirmationValueAfter,
 		classifyCandidate,
 		shouldFetchExpediaReservationDetails,
