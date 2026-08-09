@@ -15,6 +15,7 @@ const {
 	detectConfirmationMatchFields,
 	normalizeConfirmation,
 	getSarConversionMeta,
+	applyLiveSarConversion,
 } = require("./otaReservationMapper");
 const {
 	getExpediaCandidateLookupValues,
@@ -1527,6 +1528,40 @@ const normalizeCandidateMoneyToSar = (candidate = {}) => {
 	};
 };
 
+const applyTrustedCandidateSarConversion = async (
+	candidate = {},
+	conversionOptions = {}
+) => {
+	const sourceOnly = normalizeCandidateMoneyToSar(candidate);
+	try {
+		return await applyLiveSarConversion(sourceOnly, conversionOptions);
+	} catch (_error) {
+		const failed = {
+			...sourceOnly,
+			propertyCurrency: "SAR",
+			propertyConversionVerified: false,
+			totalAmountSar: null,
+			amount: null,
+			currency: sourceOnly.sourceCurrency || sourceOnly.currency || "",
+			amountConvertedAt: "",
+			totalPayoutSar: null,
+			netAfterExpensesTotal: null,
+			paymentSummary: {
+				...(sourceOnly.paymentSummary || {}),
+				totalGuestPaymentAmount: null,
+				totalPayoutAmount: null,
+				currency: null,
+				propertyCurrency: "SAR",
+				propertyConversionVerified: false,
+				amountConvertedAt: "",
+			},
+			fxConversionError: "trusted_fx_lookup_failed",
+		};
+		delete failed.currencyConversionEvidence;
+		return failed;
+	}
+};
+
 const parseExpediaStatusToApply = (value = "") => {
 	const text = normalizeLine(value).toLowerCase();
 	if (/cancelled|canceled/.test(text)) return "cancelled";
@@ -2030,7 +2065,9 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		.map(normalizeLine)
 		.filter(Boolean);
 	const fallbackCurrency =
-		detectCurrency(rawText) || detectCurrency(candidate.amountHint) || candidate.currency;
+		detectCurrency(rawText) ||
+		detectCurrency(candidate.amountHint) ||
+		candidate.currency;
 	const reservationId =
 		normalizeConfirmation(
 			String(rawText || "").match(/Reservation\s*#\s*([A-Z0-9-]+)/i)?.[1] ||
@@ -2049,7 +2086,9 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		? normalizeConfirmation(candidate.hotelConfirmationNumber)
 		: "";
 	const hotelConfirmationNumber =
-		normalizeConfirmation(confirmationCandidatesFromText(hotelConfirmationRaw)[0]) ||
+		normalizeConfirmation(
+			confirmationCandidatesFromText(hotelConfirmationRaw)[0]
+		) ||
 		candidateHotelConfirmationNumber ||
 		"";
 	const itineraryNumber = normalizeConfirmation(
@@ -2065,7 +2104,9 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const arrivalTime = lineValueAfter(lines, /^Estimated arrival time$/i, 3);
 	const roomName =
 		lineValueAfter(lines, /^Room Type$/i, 3) || candidate.roomName || "";
-	const guestCount = parseGuestCount(lineValueAfter(lines, /^Guest count$/i, 3));
+	const guestCount = parseGuestCount(
+		lineValueAfter(lines, /^Guest count$/i, 3)
+	);
 	const nationality =
 		cleanExpediaGuestMetadataValue(
 			lineValueAfterAnyLabel(lines, EXPEDIA_NATIONALITY_LABELS, 4)
@@ -2088,7 +2129,8 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const allDates = extractExpediaDates(rawText);
 	const parsedCheckinDate = parseExpediaDate(dateRangeMatch?.[1]);
 	const parsedCheckoutDate = parseExpediaDate(dateRangeMatch?.[2]);
-	let checkinDate = parsedCheckinDate || candidate.checkinDate || allDates[0]?.iso || "";
+	let checkinDate =
+		parsedCheckinDate || candidate.checkinDate || allDates[0]?.iso || "";
 	let checkoutDate =
 		parsedCheckoutDate || candidate.checkoutDate || allDates[1]?.iso || "";
 	if (!stayNightsBetween(checkinDate, checkoutDate)) {
@@ -2113,7 +2155,11 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const nightlyRate =
 		paymentDetails.nightlyRateAmount ||
 		moneyAfterLine(lines, /^Nightly rates?/i, fallbackCurrency) ||
-		moneyNearLabel(rawText, /Nightly rates?(?:\s*\([^)]*\))?/i, fallbackCurrency);
+		moneyNearLabel(
+			rawText,
+			/Nightly rates?(?:\s*\([^)]*\))?/i,
+			fallbackCurrency
+		);
 	const taxes =
 		paymentDetails.taxesAmount ||
 		moneyAfterLine(lines, /^Taxes$/i, fallbackCurrency) ||
@@ -2138,15 +2184,27 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		paymentDetails.totalPayoutAmount ||
 		paymentDetails.amountToChargeExpediaAmount ||
 		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 8) ||
-		moneyAfterLine(lines, /^Amount to charge Expedia Group$/i, fallbackCurrency, 6) ||
+		moneyAfterLine(
+			lines,
+			/^Amount to charge Expedia Group$/i,
+			fallbackCurrency,
+			6
+		) ||
 		moneyNearLabel(
 			rawText,
 			/Your total payout(?:\s+Amount to charge Expedia Group)?/i,
 			fallbackCurrency,
 			420
 		) ||
-		moneyNearLabel(rawText, /Amount to charge Expedia Group/i, fallbackCurrency, 260);
-	const amount = totalGuestPayment || parseMoneyValue(candidate.amountHint, fallbackCurrency);
+		moneyNearLabel(
+			rawText,
+			/Amount to charge Expedia Group/i,
+			fallbackCurrency,
+			260
+		);
+	const amount =
+		totalGuestPayment ||
+		parseMoneyValue(candidate.amountHint, fallbackCurrency);
 	const bookingTableAmount = optionalMoneyNumber(candidate.amount);
 	const detectedPaymentCollectionModel =
 		detectExpediaPaymentCollectionModel(rawText);
@@ -2176,6 +2234,15 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 
 	return {
 		detailsFetched: true,
+		detailCommercialEvidence: {
+			guestGrossExplicit: Boolean(totalGuestPayment),
+			hotelPayoutExplicit: Boolean(totalPayout),
+			sourceCurrency: String(
+				totalGuestPayment?.currency || totalPayout?.currency || ""
+			)
+				.trim()
+				.toUpperCase(),
+		},
 		reservationId,
 		confirmationNumber: reservationId || candidate.confirmationNumber,
 		hotelConfirmationNumber,
@@ -2218,6 +2285,18 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 			new Set(commercialEvidenceConflicts)
 		).sort(),
 		paymentSummary: {
+			sourceCurrency:
+				totalGuestPayment?.currency ||
+				totalPayout?.currency ||
+				nightlyRate?.currency ||
+				taxes?.currency ||
+				"",
+			sourceNightlyRateAmount: nightlyRate?.amount ?? null,
+			sourceTaxesAmount: taxes?.amount ?? null,
+			sourceTotalGuestPaymentAmount: totalGuestPayment?.amount ?? null,
+			sourceExpediaCompensationAmount: expediaCompensation?.amount ?? null,
+			sourceAcceleratorAmount: accelerator?.amount ?? null,
+			sourceTotalPayoutAmount: totalPayout?.amount ?? null,
 			nightlyRateAmount: nightlyRate?.amount ?? null,
 			taxesAmount: taxes?.amount ?? null,
 			totalGuestPaymentAmount:
@@ -3149,15 +3228,69 @@ const detailValues = (detail = {}) =>
 		})
 	);
 
-const mergeDetailCandidate = ({ candidate = {}, detail = {}, snapshot = {}, detailUrl = "" }) => {
+const hasTrustedExpediaDetailGross = (candidate = {}) => {
+	const sourceCurrency = String(
+		candidate.detailCommercialEvidence?.sourceCurrency ||
+			candidate.paymentSummary?.sourceCurrency ||
+			""
+	)
+		.trim()
+		.toUpperCase();
+	const sourceGross = optionalMoneyNumber(
+		candidate.paymentSummary?.sourceTotalGuestPaymentAmount
+	);
+	return Boolean(
+		candidate.detailsFetched === true &&
+			candidate.detailCommercialEvidence?.guestGrossExplicit === true &&
+			candidate.commercialEvidenceConflict !== true &&
+			/^[A-Z]{3}$/.test(sourceCurrency) &&
+			sourceGross !== null &&
+			sourceGross > 0
+	);
+};
+
+const mergeDetailCandidate = ({
+	candidate = {},
+	detail = {},
+	snapshot = {},
+	detailUrl = "",
+}) => {
+	const detailPaymentSummary = detail.paymentSummary || {};
 	const mergedPaymentSummary = mergePaymentSummaries(
 		candidate.paymentSummary,
-		detail.paymentSummary,
-		{ sourceCurrency: candidate.sourceCurrency || "" }
+		detailPaymentSummary,
+		{
+			sourceCurrency: candidate.sourceCurrency || "",
+		}
+	);
+	const detailSourceCurrency = String(detailPaymentSummary.sourceCurrency || "")
+		.trim()
+		.toUpperCase();
+	const hasDetailSourceCurrency = /^[A-Z]{3}$/.test(detailSourceCurrency);
+	for (const field of [
+		"sourceNightlyRateAmount",
+		"sourceTaxesAmount",
+		"sourceTotalGuestPaymentAmount",
+		"sourceExpediaCompensationAmount",
+		"sourceAcceleratorAmount",
+		"sourceTotalPayoutAmount",
+	]) {
+		const value = optionalMoneyNumber(detailPaymentSummary[field]);
+		if (value !== null) mergedPaymentSummary[field] = value;
+	}
+	if (hasDetailSourceCurrency) {
+		mergedPaymentSummary.sourceCurrency = detailSourceCurrency;
+	}
+	const detailSourceGross = optionalMoneyNumber(
+		detailPaymentSummary.sourceTotalGuestPaymentAmount
 	);
 	return normalizeCandidateMoneyToSar({
 		...candidate,
 		...detailValues(detail),
+		...(detailSourceGross !== null ? { sourceAmount: detailSourceGross } : {}),
+		...(hasDetailSourceCurrency
+			? { sourceCurrency: detailSourceCurrency }
+			: {}),
 		paymentSummary: mergedPaymentSummary,
 		sourceUrl: snapshot.url || detailUrl || candidate.sourceUrl,
 		detailUrl: candidate.detailUrl || detailUrl,
@@ -4251,6 +4384,9 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 									error && error.message ? error.message : String(error),
 							});
 						}
+						if (hasTrustedExpediaDetailGross(candidate)) {
+							candidate = await applyTrustedCandidateSarConversion(candidate);
+						}
 						classification = await classifyCandidate(candidate);
 					}
 				} else {
@@ -4270,8 +4406,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 								classification.item?.pmsConfirmationNumber || "",
 							currentStatus: classification.item?.currentStatus || "",
 							incomingStatus: classification.item?.incomingStatus || "",
-							matchedLookupValue:
-								classification.item?.matchedLookupValue || "",
+							matchedLookupValue: classification.item?.matchedLookupValue || "",
 							matchedReservationBy:
 								classification.item?.matchedReservationBy || [],
 						},
@@ -4293,16 +4428,18 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 						confirmationNumber: candidate.confirmationNumber,
 						reservationId: candidate.reservationId,
 						hotelConfirmationNumber: candidate.hotelConfirmationNumber,
-						paymentCollectionModel: candidate.paymentCollectionModel || "unknown",
-						currency: candidate.currency || candidate.paymentSummary?.currency || "",
+						paymentCollectionModel:
+							candidate.paymentCollectionModel || "unknown",
+						currency:
+							candidate.currency || candidate.paymentSummary?.currency || "",
 						sourceCurrency:
 							candidate.sourceCurrency ||
 							candidate.paymentSummary?.sourceCurrency ||
 							"",
-					sourceAmount:
-						candidate.sourceAmount ??
-						candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
-						null,
+						sourceAmount:
+							candidate.sourceAmount ??
+							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+							null,
 						exchangeRateToSar:
 							candidate.exchangeRateToSar ||
 							candidate.paymentSummary?.exchangeRateToSar ||
@@ -4311,18 +4448,18 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 							candidate.exchangeRateSource ||
 							candidate.paymentSummary?.exchangeRateSource ||
 							"",
-					totalGuestPaymentAmount:
-						candidate.paymentSummary?.totalGuestPaymentAmount ??
-						candidate.amount ??
-						null,
-					sourceTotalGuestPaymentAmount:
-						candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
-						candidate.sourceAmount ??
-						null,
-					totalPayoutAmount:
-						candidate.paymentSummary?.totalPayoutAmount ?? null,
-					sourceTotalPayoutAmount:
-						candidate.paymentSummary?.sourceTotalPayoutAmount ?? null,
+						totalGuestPaymentAmount:
+							candidate.paymentSummary?.totalGuestPaymentAmount ??
+							candidate.amount ??
+							null,
+						sourceTotalGuestPaymentAmount:
+							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+							candidate.sourceAmount ??
+							null,
+						totalPayoutAmount:
+							candidate.paymentSummary?.totalPayoutAmount ?? null,
+						sourceTotalPayoutAmount:
+							candidate.paymentSummary?.sourceTotalPayoutAmount ?? null,
 						hasVirtualCardSignal:
 							candidate.paymentSignals?.hasVirtualCardSignal || false,
 						rawCardStored: false,
@@ -4541,6 +4678,9 @@ module.exports = {
 		parseReservationRowCandidate,
 		parseExpediaReservationDetailText,
 		normalizeCandidateMoneyToSar,
+		mergeDetailCandidate,
+		hasTrustedExpediaDetailGross,
+		applyTrustedCandidateSarConversion,
 		lineConfirmationValueAfter,
 		classifyCandidate,
 		shouldFetchExpediaReservationDetails,

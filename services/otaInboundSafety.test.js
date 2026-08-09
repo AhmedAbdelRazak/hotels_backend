@@ -40,6 +40,7 @@ const {
 	explicitRoomCapacity,
 	extractNormalizedReservation,
 	fetchWithHardTimeout,
+	applyLiveSarConversion,
 	findConfidentFuzzyHotelMatch,
 	findReservationByOtaConfirmation,
 	generateDateRange,
@@ -8542,6 +8543,91 @@ test("source-only foreign OTA-collect creation keeps unknown payment and settlem
 		assert.equal(evidence.roles.guestGross.sourceCurrency, "USD", shape);
 		assert.equal(evidence.roles.guestGross.propertyAmount, null, shape);
 	}
+});
+
+test("trusted Expedia USD conversion materializes cent-exact SAR roles in the common contract", async () => {
+	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
+	const fetchedAt = "2026-08-09T06:00:00.000Z";
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		provider: "expedia",
+		providerLabel: "Expedia",
+		bookingSource: "Expedia",
+		commercialSourceType: "authenticated_provider_portal",
+		amount: null,
+		totalAmountSar: null,
+		sourceAmount: 146.46,
+		sourceCurrency: "USD",
+		totalPayoutSar: null,
+		netAfterExpensesTotal: null,
+		currency: "USD",
+		propertyCurrency: "SAR",
+		propertyConversionVerified: false,
+		exchangeRateToSar: 0,
+		sourceExchangeRateToSar: 0,
+		paymentSummary: {
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: 146.46,
+			sourceTotalPayoutAmount: 112.92,
+			totalGuestPaymentAmount: null,
+			totalPayoutAmount: null,
+			currency: null,
+			propertyCurrency: "SAR",
+			propertyConversionVerified: false,
+			exchangeRateToSar: null,
+		},
+		source: {
+			from: "expedia-sync",
+			subject: "Authenticated Expedia portal commercial detail",
+			messageId: "expedia-portal-commercial-2530158461",
+		},
+	});
+	const converted = await applyLiveSarConversion(normalized, {
+		apiKey: "test-credential-never-persist",
+		cache: new Map(),
+		now: () => Date.parse(fetchedAt),
+		fetchImpl: async () => ({
+			ok: true,
+			async json() {
+				return {
+					result: "success",
+					base_code: "USD",
+					target_code: "SAR",
+					conversion_rate: 3.75,
+					time_last_update_unix: Date.parse(sourceTimestamp) / 1000,
+				};
+			},
+		}),
+	});
+
+	assert.equal(converted.sourceAmount, 146.46);
+	assert.equal(converted.sourceCurrency, "USD");
+	assert.equal(converted.propertyCurrency, "SAR");
+	assert.equal(converted.propertyConversionVerified, true);
+	assert.equal(converted.totalAmountSar, 549.23);
+	assert.equal(converted.amount, 549.23);
+	assert.equal(converted.currency, "SAR");
+	assert.equal(converted.sourcePayoutAmount, 112.92);
+	assert.equal(converted.totalPayoutSar, 423.45);
+	assert.equal(converted.paymentSummary.totalGuestPaymentAmount, 549.23);
+	assert.equal(converted.paymentSummary.totalPayoutAmount, 423.45);
+	assert.equal(converted.paymentSummary.currency, "SAR");
+	assert.equal(converted.amountConvertedAt, fetchedAt);
+
+	const evidence = buildExistingReservationUpdateSet({ normalized: converted })["supplierData.otaCommercialEvidence"];
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+	assert.equal(evidence.provider, "expedia");
+	assert.equal(evidence.sourceCurrency, "USD");
+	assert.equal(evidence.propertyCurrency, "SAR");
+	assert.equal(evidence.roles.guestGross.sourceAmount, 146.46);
+	assert.equal(evidence.roles.guestGross.propertyAmount, 549.23);
+	assert.equal(evidence.roles.hotelPayout.sourceAmount, 112.92);
+	assert.equal(evidence.roles.hotelPayout.propertyAmount, 423.45);
+	assert.equal(evidence.roles.deductionAggregate.sourceAmount, 33.54);
+	assert.equal(evidence.roles.deductionAggregate.propertyAmount, 125.78);
+	assert.equal(evidence.roles.explicitOtaCommission.verified, false);
+	assert.equal(evidence.currencyConversion.rate, 3.75);
+	assert.equal(evidence.provenance.conversion.sourceTimestamp, sourceTimestamp);
+	assert.equal(evidence.provenance.conversion.sourceHash, converted.currencyConversionEvidence.provenance.sourceHash);
 });
 
 const applyDottedCommercialSet = (reservation, set = {}) => {
