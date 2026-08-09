@@ -3,6 +3,9 @@ const {
 	reservationRoomNumbers,
 	reservationRoomTypes,
 } = require("./reservationRoomSummary");
+const {
+	resolveAdminReservationFinancialTotals,
+} = require("./adminReservationFinancialTotals");
 
 const EXECUTIVE_SUMMARY_TIMEZONE = "Asia/Riyadh";
 const EXECUTIVE_SUMMARY_TIMEZONE_LABEL = "Makkah Time";
@@ -243,6 +246,7 @@ const reservationHotel = (reservation = {}) => {
 const serializeExecutiveReservation = (reservation, activityTypes) => {
 	const hotel = reservationHotel(reservation);
 	const amountAudit = reconcileReservationAmount(reservation);
+	const financialTotals = resolveAdminReservationFinancialTotals(reservation);
 	return {
 		id: String(reservation._id || reservation.id || ""),
 		confirmationNumber: String(reservation.confirmation_number || "N/A"),
@@ -261,6 +265,13 @@ const serializeExecutiveReservation = (reservation, activityTypes) => {
 		guests: Math.max(0, safeNumber(reservation.total_guests)),
 		totalAmount: safeNumber(reservation.total_amount),
 		currency: String(reservation.currency || "SAR").toUpperCase(),
+		// Export-only consumers use these role-safe scalars. Keep totalAmount and
+		// every executive dashboard calculation unchanged for UI compatibility.
+		grossTotalAmount: financialTotals.grossTotalAmount,
+		netTotalAmount: financialTotals.netTotalAmount,
+		financialTotalsCurrency: financialTotals.currency,
+		grossTotalAvailable: financialTotals.grossAvailable,
+		netTotalAvailable: financialTotals.netAvailable,
 		...amountAudit,
 		activityTypes,
 	};

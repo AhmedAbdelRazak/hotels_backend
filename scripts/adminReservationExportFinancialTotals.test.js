@@ -10,7 +10,10 @@ const Reservations = require("../models/reservations");
 const {
 	buildAuthenticatedProviderCommercialEvidence,
 } = require("../services/otaCommercialEvidence");
-const { exportToExcel } = require("../controllers/adminreports");
+const {
+	exportToExcel,
+	reservationExecutiveSummary,
+} = require("../controllers/adminreports");
 
 const ASSIGNED_HOTEL_ID = "64a000000000000000000001";
 const OTHER_HOTEL_ID = "64b000000000000000000002";
@@ -264,4 +267,88 @@ test("platform role 1000 keeps its assigned-hotel scope on the admin export rout
 	const serializedFilter = JSON.stringify(capturedFilter);
 	assert.match(serializedFilter, new RegExp(ASSIGNED_HOTEL_ID));
 	assert.doesNotMatch(serializedFilter, new RegExp(OTHER_HOTEL_ID));
+});
+
+test("mixed-role platform staff cannot bypass assigned-hotel scope", async () => {
+	const { rows, capturedFilter } = await runExport(
+		"/api/adminreports/export-to-excel/650000000000000000000007",
+		{
+			profile: {
+				_id: "650000000000000000000007",
+				role: 2000,
+				roles: [1000],
+				roleDescription: "hotelmanager",
+				hotelsToSupport: [ASSIGNED_HOTEL_ID],
+			},
+			auth: { _id: "650000000000000000000007" },
+			sourceReservations: [
+				buildReservation({
+					hotelId: ASSIGNED_HOTEL_ID,
+					confirmationNumber: "MIXED-ROLE-ASSIGNED",
+				}),
+				buildReservation({
+					hotelId: OTHER_HOTEL_ID,
+					confirmationNumber: "MIXED-ROLE-OTHER",
+				}),
+			],
+		}
+	);
+
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].confirmation_number, "MIXED-ROLE-ASSIGNED");
+	const serializedFilter = JSON.stringify(capturedFilter);
+	assert.match(serializedFilter, new RegExp(ASSIGNED_HOTEL_ID));
+	assert.doesNotMatch(serializedFilter, new RegExp(OTHER_HOTEL_ID));
+});
+
+test("executive summary loads every bounded field required to verify legacy OTA totals", async () => {
+	const originalFind = Reservations.find;
+	let selectedFields = "";
+	Reservations.find = () => ({
+		select(fields) {
+			selectedFields = fields;
+			return this;
+		},
+		populate() {
+			return this;
+		},
+		sort() {
+			return this;
+		},
+		maxTimeMS() {
+			return this;
+		},
+		lean() {
+			return Promise.resolve([]);
+		},
+	});
+	const req = {
+		query: { day: "today" },
+		profile: { _id: "650000000000000000000008", role: 8000 },
+		auth: { _id: "650000000000000000000008" },
+	};
+	const res = makeResponse();
+	try {
+		await reservationExecutiveSummary(req, res);
+	} finally {
+		Reservations.find = originalFind;
+	}
+
+	assert.equal(res.statusCode, 200);
+	const selectedFieldSet = new Set(selectedFields.split(/\s+/).filter(Boolean));
+	for (const field of [
+		"adminPricing",
+		"ota_financial_summary",
+		"supplierData.otaCommercialEvidence",
+		"supplierData.otaCommercialEvidenceStaleReason",
+		"supplierData.hotelRunnerEmailCommercialEvidence",
+		"supplierData.hotelRunner.transport",
+		"supplierData.otaPaymentSummary",
+		"pickedRoomsPricing",
+		"commission_ota",
+		"otaIdentityKey",
+		"otaCrossTransportIdentityKey",
+	]) {
+		assert.equal(selectedFieldSet.has(field), true, `${field} must be selected`);
+	}
 });

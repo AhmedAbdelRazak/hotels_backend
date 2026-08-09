@@ -1,6 +1,9 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+	buildAuthenticatedProviderCommercialEvidence,
+} = require("./otaCommercialEvidence");
+const {
 	buildExecutiveComparisonWindow,
 	buildExecutiveDateWindow,
 	buildExecutiveReservationMatch,
@@ -103,6 +106,9 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.deepEqual(result.reservations[0].activityTypes, ["checkin", "new-reservation"]);
 	assert.equal(result.reservations[0].nights, 2);
 	assert.equal(result.reservations[0].averageNightlyAmount, 280);
+	assert.equal(result.reservations[0].grossTotalAmount, 560);
+	assert.equal(result.reservations[0].netTotalAmount, 560);
+	assert.equal(result.reservations[0].financialTotalsCurrency, "SAR");
 	assert.equal(result.reservations[0].amountQuality.status, "verified");
 	assert.deepEqual(result.reservations[0].roomTypes, [
 		"City View",
@@ -110,6 +116,111 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.deepEqual(result.reservations[0].roomNumbers, ["101"]);
 	assert.deepEqual(result.reservations[2].activityTypes, ["new-reservation"]);
 	assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
+});
+
+test("executive rows expose only role-safe gross and net scalars for Excel", () => {
+	const window = buildExecutiveDateWindow(
+		"today",
+		new Date("2026-07-19T02:00:00.000Z")
+	);
+	const evidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "agoda",
+		authenticatedProvider: "agoda",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_provider_portal",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "a".repeat(64),
+		sourceTimestamp: "2026-07-19T01:00:00.000Z",
+		sourceId: "agoda-executive-export-1",
+		guestGross: { verified: true, amount: 148.96 },
+		hotelPayout: { verified: true, amount: 92.18 },
+	});
+	const result = buildExecutiveReservationSummary(
+		[
+			{
+				_id: "verified-ota",
+				createdAt: "2026-07-19T03:00:00.000Z",
+				booking_source: "agoda",
+				total_amount: 148.96,
+				currency: "SAR",
+				adminPricing: {
+					mode: "hotelrunner_api",
+					propertyCurrency: "SAR",
+					clientTotal: 148.96,
+					netAfterExpensesTotal: 92.18,
+					commercialVerified: false,
+				},
+				ota_financial_summary: {
+					propertyCurrency: "SAR",
+					clientTotal: 148.96,
+					netAfterExpenses: 92.18,
+					commercialVerified: false,
+				},
+				supplierData: {
+					otaProvider: "agoda",
+					otaCommercialEvidenceStaleReason: "",
+					otaCommercialEvidence: evidence,
+					hotelRunner: { transport: "hotelrunner_api" },
+				},
+			},
+			{
+				_id: "unverified-ota",
+				createdAt: "2026-07-19T04:00:00.000Z",
+				booking_source: "trip.com",
+				total_amount: 63.11,
+				currency: "SAR",
+				adminPricing: {
+					mode: "hotelrunner_api",
+					propertyCurrency: "SAR",
+					clientTotal: 63.11,
+					netAfterExpensesTotal: 59.59,
+					commercialVerified: false,
+				},
+			},
+			{
+				_id: "negative-net",
+				createdAt: "2026-07-19T05:00:00.000Z",
+				booking_source: "OTA",
+				total_amount: 100,
+				currency: "SAR",
+				adminPricing: {
+					mode: "admin_three_price",
+					propertyCurrency: "SAR",
+					clientTotal: 100,
+					netAfterExpensesTotal: -10,
+				},
+			},
+		],
+		window
+	);
+
+	const verified = result.reservations.find((row) => row.id === "verified-ota");
+	assert.equal(verified.totalAmount, 148.96, "dashboard amount stays unchanged");
+	assert.equal(verified.grossTotalAmount, 148.96);
+	assert.equal(verified.netTotalAmount, 92.18);
+	assert.equal(verified.financialTotalsCurrency, "SAR");
+	assert.equal(verified.grossTotalAvailable, true);
+	assert.equal(verified.netTotalAvailable, true);
+
+	const unverified = result.reservations.find(
+		(row) => row.id === "unverified-ota"
+	);
+	assert.equal(unverified.grossTotalAmount, null);
+	assert.equal(unverified.netTotalAmount, null);
+	assert.equal(unverified.grossTotalAvailable, false);
+	assert.equal(unverified.netTotalAvailable, false);
+
+	const negative = result.reservations.find((row) => row.id === "negative-net");
+	assert.equal(negative.grossTotalAmount, 100);
+	assert.equal(negative.netTotalAmount, -10);
+	assert.equal(
+		JSON.stringify(result).includes("otaCommercialEvidence"),
+		false,
+		"nested commercial evidence must not reach the executive response"
+	);
 });
 
 test("amount audit reconciles a long-stay total without changing its stored value", () => {
