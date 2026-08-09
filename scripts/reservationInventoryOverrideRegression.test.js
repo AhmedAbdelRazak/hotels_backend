@@ -16,6 +16,51 @@ const {
 } = require("../services/reservationInventoryOverridePolicy");
 const reservationAccess = require("../controllers/reservations").__test;
 
+test("strict room-only updates preserve rejected reservation workflow state", () => {
+	const rejectedReservation = {
+		reservation_status: "pending confirmation",
+		state: "pending confirmation",
+		pendingConfirmation: { status: "rejected" },
+		agentDecisionSnapshot: { status: "rejected" },
+	};
+	const platformAdmin = { role: 1000, activeUser: true };
+	const roomOnlyPayload = {
+		roomId: ["room-419"],
+		__roomAssignmentUpdateIntent: true,
+	};
+
+	assert.equal(
+		reservationAccess.shouldAdminUpdateResubmitRejectedReservation({
+			reservation: rejectedReservation,
+			payload: roomOnlyPayload,
+			actor: platformAdmin,
+			hotelManagementReservationUpdate: true,
+		}),
+		false,
+	);
+	assert.equal(
+		reservationAccess.shouldAdminUpdateResubmitRejectedReservation({
+			reservation: rejectedReservation,
+			payload: roomOnlyPayload,
+			actor: platformAdmin,
+			hotelManagementReservationUpdate: false,
+		}),
+		true,
+	);
+	assert.equal(
+		reservationAccess.shouldAdminUpdateResubmitRejectedReservation({
+			reservation: rejectedReservation,
+			payload: {
+				...roomOnlyPayload,
+				customer_details: { name: "Corrected guest" },
+			},
+			actor: platformAdmin,
+			hotelManagementReservationUpdate: true,
+		}),
+		true,
+	);
+});
+
 test("platform admins can override inventory while OrderTakers and agents cannot", () => {
 	assert.equal(
 		canPlatformStaffOverrideReservationInventory({
