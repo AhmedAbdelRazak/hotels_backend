@@ -42,6 +42,9 @@ const {
   buildAuthenticatedProviderCommercialEvidence,
   validateOtaCommercialEvidence,
 } = require("../services/otaCommercialEvidence");
+const {
+  hasCaptureOrSettlementActivity,
+} = require("../services/otaReservationMapper");
 
 const REPAIR_ID = "expedia-commercial-materialization-20260809-v2";
 const BACKUP_COLLECTION = "ota_expedia_commercial_repair_backup_20260809_v2";
@@ -55,12 +58,19 @@ const OWNER_LEASE_MS = 60 * 1000;
 const OWNER_WRITE_SAFETY_MS = 5 * 1000;
 const TARGET = v1.TARGET;
 const COLLECTIONS = v1.COLLECTIONS;
+const AUDITED_PAID_AMOUNT_FIELD_HASH =
+  "7b7ce6ce3b17bc62c7806e505993b4bdf2785cbb05ca7b998d877dd1369b08c6";
+const AUDITED_FINANCE_STATUS_FIELD_HASH =
+  "c4c1ac9f97345d42ebdd6927516930068256a192b642f2e4fc3a132de70a4691";
+const AUDITED_LEGACY_HOUSED_BY_FIELD_HASH =
+  "8962d05e641fcb88223e902673ed585d3634c532938d30645cfe64cb54aa14d4";
 const EXECUTION_PATHS = Object.freeze([
   "package.json",
   "scripts/repairExpediaCommercialMaterialization20260809.js",
   "scripts/repairExpediaCommercialEnrichment20260809.js",
   "services/recentOtaInboundRecovery20260805.js",
   "services/otaCommercialEvidence.js",
+  "services/otaReservationMapper.js",
 ]);
 const MUTATION_CAPABILITIES = new WeakSet();
 
@@ -1405,11 +1415,73 @@ function assertOperationallySafe(reservation, expectedV1Document) {
   ) {
     fail("Lifecycle changed or is terminal.", "EXPEDIA_V2_PROTECTED_STATE");
   }
+  const canonicalField = (document, key) => ({
+    present: owns(document, key),
+    value: owns(document, key) ? document[key] : null,
+  });
+  const canonicalFieldHash = (document, key) =>
+    canonicalEjsonSha256(canonicalField(document, key));
+  const paidAmountFieldHash = canonicalFieldHash(
+    expectedV1Document,
+    "paid_amount"
+  );
+  const financeStatusFieldHash = canonicalFieldHash(
+    expectedV1Document,
+    "financeStatus"
+  );
+  const housedByFieldHash = canonicalFieldHash(expectedV1Document, "housedBy");
+  const expectedPaidAmountIsInactive =
+    !owns(expectedV1Document, "paid_amount") ||
+    hasExactNumericZero(expectedV1Document, "paid_amount");
+  const expectedFinanceStatus = lower(expectedV1Document?.financeStatus);
+  const inactivePaymentBaseline =
+    expectedPaidAmountIsInactive &&
+    ["", "not paid", "unpaid", "pending"].includes(expectedFinanceStatus);
+  const auditedPaidOnlineBaseline =
+    paidAmountFieldHash === AUDITED_PAID_AMOUNT_FIELD_HASH &&
+    financeStatusFieldHash === AUDITED_FINANCE_STATUS_FIELD_HASH;
+  const expectedHousedBy = expectedV1Document?.housedBy;
+  const expectedHousedByPrototype =
+    expectedHousedBy && typeof expectedHousedBy === "object"
+      ? Object.getPrototypeOf(expectedHousedBy)
+      : null;
+  const inactiveHousedByBaseline =
+    !owns(expectedV1Document, "housedBy") ||
+    expectedHousedBy == null ||
+    expectedHousedBy === false ||
+    expectedHousedBy === 0 ||
+    expectedHousedBy === "" ||
+    (Array.isArray(expectedHousedBy) && expectedHousedBy.length === 0) ||
+    (typeof expectedHousedBy === "object" &&
+      !Array.isArray(expectedHousedBy) &&
+      (expectedHousedByPrototype === Object.prototype ||
+        expectedHousedByPrototype === null) &&
+      Object.keys(expectedHousedBy).length === 0);
+  const auditedLegacyHousedByBaseline =
+    housedByFieldHash === AUDITED_LEGACY_HOUSED_BY_FIELD_HASH;
+  if (
+    canonicalFieldHash(reservation, "paid_amount") !== paidAmountFieldHash ||
+    canonicalFieldHash(reservation, "financeStatus") !==
+      financeStatusFieldHash ||
+    canonicalFieldHash(reservation, "housedBy") !== housedByFieldHash ||
+    (!inactivePaymentBaseline && !auditedPaidOnlineBaseline) ||
+    (!inactiveHousedByBaseline && !auditedLegacyHousedByBaseline)
+  ) {
+    fail(
+      "Audited payment or legacy housing baseline changed.",
+      "EXPEDIA_V2_PROTECTED_STATE"
+    );
+  }
   const meaningful = (value) => {
     if (value == null || value === false || value === 0 || value === "")
       return false;
+    if (value instanceof Date) return true;
     if (Array.isArray(value)) return value.length > 0;
-    if (typeof value === "object") return Object.keys(value).length > 0;
+    if (typeof value === "object") {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) return true;
+      return Object.keys(value).length > 0;
+    }
     return true;
   };
   if (
@@ -1419,7 +1491,7 @@ function assertOperationallySafe(reservation, expectedV1Document) {
       reservation?.housed,
       reservation?.isHoused,
       reservation?.housedAt,
-      reservation?.housedBy,
+      reservation?.inhouse_date,
       reservation?.checkedInAt,
       reservation?.checkedOutAt,
     ].some(meaningful)
@@ -1430,7 +1502,7 @@ function assertOperationallySafe(reservation, expectedV1Document) {
     );
   }
   if (
-    Math.abs(Number(reservation?.paid_amount || 0)) > 0.0001 ||
+    hasCaptureOrSettlementActivity(reservation) ||
     reservation?.moneyTransferredToHotel === true ||
     reservation?.commissionPaid === true ||
     reservation?.payment_details?.captured === true ||
@@ -1440,10 +1512,13 @@ function assertOperationallySafe(reservation, expectedV1Document) {
       reservation?.payment_details?.captureId,
       reservation?.payment_details?.transactionId,
       reservation?.payment_details?.settlementId,
+      reservation?.payment_details?.finalCaptureTransactionId,
       reservation?.financial_cycle?.capturedAt,
       reservation?.financial_cycle?.settledAt,
       reservation?.financial_cycle?.paidAt,
       reservation?.financial_cycle?.hotelPaidAt,
+      reservation?.financial_cycle?.closedAt,
+      reservation?.financial_cycle?.closedBy,
       reservation?.financial_cycle?.captureId,
       reservation?.financial_cycle?.settlementId,
       reservation?.bofa_payment?.vcc?.chargedAt,
@@ -1453,8 +1528,7 @@ function assertOperationallySafe(reservation, expectedV1Document) {
     ["paid", "captured", "settled", "complete", "completed"].includes(
       lower(reservation?.financial_cycle?.status)
     ) ||
-    reservation?.bofa_payment?.vcc?.charged === true ||
-    !/^(|not paid|unpaid|pending)$/i.test(clean(reservation?.financeStatus))
+    reservation?.bofa_payment?.vcc?.charged === true
   ) {
     fail(
       "Capture or settlement activity blocks repair.",

@@ -866,8 +866,11 @@ function v2Job({ createdAt, rate = 3.75 } = {}) {
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 
-async function preparedFixture({ rate = 3.75 } = {}) {
+async function preparedFixture({ rate = 3.75, mutateSourceReservation } = {}) {
   const source = v1Fixture();
+  if (typeof mutateSourceReservation === "function") {
+    mutateSourceReservation(source.reservation);
+  }
   const db = new MemoryDb({
     [COLLECTIONS.reservation]: [source.reservation],
     [COLLECTIONS.event]: [source.event],
@@ -1291,6 +1294,210 @@ test("full-document CAS blocks any post-plan reservation change", async () => {
   );
 });
 
+const applyProductionProtectedBaseline = (reservation) => {
+  reservation.paid_amount = 423.45;
+  reservation.financeStatus = "paid online";
+  reservation.payment = "paid online";
+  reservation.housedBy = { name: "" };
+  reservation.paid_amount_breakdown = {
+    paid_online_via_link: 0,
+    paid_at_hotel_cash: 0,
+    paid_at_hotel_card: 0,
+    paid_to_hotel: 0,
+    paid_online_jannatbooking: 0,
+    paid_online_other_platforms: 423.45,
+    paid_online_via_instapay: 0,
+    paid_no_show: 0,
+    payment_comments: "Expedia collected by platform",
+  };
+  reservation.financial_cycle = {
+    collectionModel: "pms_collected",
+    status: "open",
+    commissionType: "amount",
+    commissionValue: 0,
+    commissionAmount: 0,
+    commissionAssigned: false,
+    pmsCollectedAmount: 423.45,
+    hotelCollectedAmount: 0,
+    hotelPayoutDue: 534,
+    commissionDueToPms: 0,
+    lastUpdatedAt: new Date("2026-08-09T03:11:26.196Z"),
+  };
+  reservation.payment_details = {
+    captured: false,
+    onsite_paid_amount: 0,
+  };
+};
+
+test("the exact paid-online and legacy housedBy baseline is safe and preserved", async () => {
+  const fixture = await preparedFixture({
+    mutateSourceReservation: applyProductionProtectedBaseline,
+  });
+  const plan = await readyPlan(fixture);
+  assert.equal(plan.state, "ready");
+  const result = await applyPlanThroughMain(fixture, plan);
+  assert.equal(result.state, "applied");
+  const repaired = await fixture.db
+    .collection(COLLECTIONS.reservation)
+    .findOne({ _id: oid(TARGET.reservationMongoId) });
+  assert.equal(repaired.paid_amount, 423.45);
+  assert.equal(repaired.financeStatus, "paid online");
+  assert.equal(repaired.payment, "paid online");
+  assert.deepEqual(repaired.housedBy, { name: "" });
+  assert.deepEqual(repaired.paid_amount_breakdown, {
+    paid_online_via_link: 0,
+    paid_at_hotel_cash: 0,
+    paid_at_hotel_card: 0,
+    paid_to_hotel: 0,
+    paid_online_jannatbooking: 0,
+    paid_online_other_platforms: 423.45,
+    paid_online_via_instapay: 0,
+    paid_no_show: 0,
+    payment_comments: "Expedia collected by platform",
+  });
+  assert.deepEqual(repaired.financial_cycle, {
+    collectionModel: "pms_collected",
+    status: "open",
+    commissionType: "amount",
+    commissionValue: 0,
+    commissionAmount: 0,
+    commissionAssigned: false,
+    pmsCollectedAmount: 423.45,
+    hotelCollectedAmount: 0,
+    hotelPayoutDue: 534,
+    commissionDueToPms: 0,
+    lastUpdatedAt: new Date("2026-08-09T03:11:26.196Z"),
+  });
+  assert.deepEqual(repaired.payment_details, {
+    captured: false,
+    onsite_paid_amount: 0,
+  });
+});
+
+test("paid_amount, financeStatus, or housedBy baseline drift remains blocked", async () => {
+  const mutations = [
+    (reservation) => {
+      reservation.paid_amount = 424.45;
+    },
+    (reservation) => {
+      reservation.financeStatus = "paid";
+    },
+    (reservation) => {
+      reservation.financeStatus = "Paid Online";
+    },
+    (reservation) => {
+      reservation.housedBy.name = "changed";
+    },
+  ];
+  for (const mutate of mutations) {
+    const fixture = await preparedFixture({
+      mutateSourceReservation: applyProductionProtectedBaseline,
+    });
+    mutate(fixture.db.collection(COLLECTIONS.reservation).documents[0]);
+    await assert.rejects(
+      () => readyPlan(fixture),
+      (error) => error?.code === "EXPEDIA_V2_PROTECTED_STATE"
+    );
+  }
+});
+
+test("unsafe expected baselines and canonical capture signals remain blocked", async () => {
+  const unsafeBaselines = [
+    (reservation) => {
+      reservation.paid_amount = 999;
+    },
+    (reservation) => {
+      reservation.paid_amount = "423.45";
+    },
+    (reservation) => {
+      reservation.financeStatus = "paid";
+    },
+    (reservation) => {
+      reservation.financeStatus = "Paid Online";
+    },
+    (reservation) => {
+      reservation.housedBy = { name: "arbitrary" };
+    },
+    (reservation) => {
+      reservation.housedBy = new Date(Number.NaN);
+    },
+    (reservation) => {
+      reservation.housedBy = oid("6a40df5f1a6d1850eb25c184");
+    },
+    (reservation) => {
+      reservation.inhouse_date = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.housedAt = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.checkedInAt = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.checkedOutAt = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.vcc_payment = { charged: true };
+    },
+    (reservation) => {
+      reservation.financial_cycle = {
+        status: "closed",
+        closedAt: new Date("2026-08-09T05:00:00.000Z"),
+      };
+    },
+    (reservation) => {
+      reservation.commissionPaidAt = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.moneyTransferredAt = new Date("2026-08-09T05:00:00.000Z");
+    },
+    (reservation) => {
+      reservation.paid_amount_breakdown.paid_at_hotel_cash = 1;
+    },
+    (reservation) => {
+      reservation.braintree_payment = { captured: true };
+    },
+    (reservation) => {
+      reservation.bofa_payment.secure_acceptance = { status: "approved" };
+    },
+    (reservation) => {
+      reservation.vcc_payment = { last_transaction_id: "txn-evidence" };
+    },
+    (reservation) => {
+      reservation.payment_details.finalCaptureTransactionId =
+        "capture-evidence";
+    },
+    (reservation) => {
+      reservation.payment_details.captureId = new Date(
+        "2026-08-09T05:00:00.000Z"
+      );
+    },
+    (reservation) => {
+      reservation.financial_cycle.capturedAt = new Date(
+        "2026-08-09T05:00:00.000Z"
+      );
+    },
+    (reservation) => {
+      reservation.bofa_payment.vcc.chargedAt = new Date(
+        "2026-08-09T05:00:00.000Z"
+      );
+    },
+  ];
+  for (const [index, addUnsafeBaseline] of unsafeBaselines.entries()) {
+    const fixture = await preparedFixture({
+      mutateSourceReservation: (reservation) => {
+        applyProductionProtectedBaseline(reservation);
+        addUnsafeBaseline(reservation);
+      },
+    });
+    await assert.rejects(
+      () => readyPlan(fixture),
+      (error) => error?.code === "EXPEDIA_V2_PROTECTED_STATE",
+      "unsafe baseline case " + index
+    );
+  }
+});
+
 test("lifecycle, manual, settled, and housed states independently block planning", async () => {
   const mutations = [
     (reservation) => {
@@ -1303,10 +1510,22 @@ test("lifecycle, manual, settled, and housed states independently block planning
       reservation.paid_amount = 10;
     },
     (reservation) => {
+      reservation.payment_details.captured = true;
+    },
+    (reservation) => {
+      reservation.moneyTransferredToHotel = true;
+    },
+    (reservation) => {
       reservation.financial_cycle = {
         status: "settled",
         settledAt: new Date(),
       };
+    },
+    (reservation) => {
+      reservation.housed = true;
+    },
+    (reservation) => {
+      reservation.checkedInAt = new Date();
     },
     (reservation) => {
       reservation.roomId = [oid("6a40df5f1a6d1850eb25c183")];
