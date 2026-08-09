@@ -111,6 +111,7 @@ const {
 	assignedHotelIds: assignedHotelIdsForReservationUpdate,
 	canEditHotelReservation,
 	sanitizeHotelReservationUpdate,
+	shouldPreserveWorkflowForRoomAssignmentOnly,
 } = require("../services/hotelReservationUpdatePolicy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -1310,6 +1311,17 @@ const shouldAdminEditResubmitRejectedReservation = (
 	isOrderTakerEditableReservation(reservation) &&
 	payloadHasAnyOwnField(payload, ADMIN_REJECTED_CORRECTION_FIELDS) &&
 	!payloadHasAnyOwnField(payload, EXPLICIT_WORKFLOW_UPDATE_FIELDS);
+
+const shouldAdminUpdateResubmitRejectedReservation = ({
+	reservation = {},
+	payload = {},
+	actor = {},
+	hotelManagementReservationUpdate = false,
+} = {}) =>
+	!shouldPreserveWorkflowForRoomAssignmentOnly({
+		hotelManagementReservationUpdate,
+		payload,
+	}) && shouldAdminEditResubmitRejectedReservation(reservation, payload, actor);
 
 const buildAdminCorrectionResubmission = (
 	reservation = {},
@@ -2817,6 +2829,7 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		protectAiReservationGuestCountUpdate,
 		resolveCommissionPaidReview,
 		resolveHotelRunnerCommissionPaidTransition,
+		shouldAdminUpdateResubmitRejectedReservation,
 	};
 }
 
@@ -7837,6 +7850,12 @@ exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
+		const preserveWorkflowForRoomAssignmentOnly =
+			shouldPreserveWorkflowForRoomAssignmentOnly({
+				hotelManagementReservationUpdate:
+					req.hotelManagementReservationUpdate === true,
+				payload: updateData,
+			});
 		const shouldSendUpdateEmail =
 			updateData.sendEmail === true || updateData.sendEmail === "true";
 		const updateEmailHotelNameHint =
@@ -8842,11 +8861,13 @@ exports.updateReservation = async (req, res) => {
 			"admin_reservation_update"
 		);
 		if (
-			shouldAdminEditResubmitRejectedReservation(
-				existingReservation,
-				updateData,
-				requestingActor || {}
-			)
+			shouldAdminUpdateResubmitRejectedReservation({
+				reservation: existingReservation,
+				payload: updateData,
+				actor: requestingActor || {},
+				hotelManagementReservationUpdate:
+					req.hotelManagementReservationUpdate === true,
+			})
 		) {
 			const correctionResubmission = buildAdminCorrectionResubmission(
 				existingReservation,
@@ -9135,6 +9156,7 @@ exports.updateReservation = async (req, res) => {
 
 		// 9️⃣ Handle "Checked Out" status updates
 		if (
+			!preserveWorkflowForRoomAssignmentOnly &&
 			updatedReservation.reservation_status &&
 			/checked[- _]?out/.test(
 				String(updatedReservation.reservation_status || "").toLowerCase()

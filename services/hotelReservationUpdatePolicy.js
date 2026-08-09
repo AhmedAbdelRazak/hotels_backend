@@ -124,11 +124,50 @@ const sanitizeHotelReservationUpdate = (payload = {}) =>
 		{},
 	);
 
+const ROOM_ASSIGNMENT_INTENT_FIELDS = new Set([
+	"__roomAssignmentUpdateIntent",
+	"__housingUpdateIntent",
+	"roomAssignmentUpdateIntent",
+]);
+
+/**
+ * An explicit room-only update must not implicitly change reservation
+ * lifecycle, rejection, or finance state. Keep this predicate intentionally
+ * exact: adding any other supported field restores the existing correction
+ * workflow behavior.
+ */
+const isExplicitRoomAssignmentOnlyUpdate = (payload = {}) => {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return false;
+	}
+	if (!Object.prototype.hasOwnProperty.call(payload, "roomId")) return false;
+
+	const hasExplicitIntent = [...ROOM_ASSIGNMENT_INTENT_FIELDS].some(
+		(field) =>
+			Object.prototype.hasOwnProperty.call(payload, field) &&
+			(payload[field] === true || payload[field] === "true"),
+	);
+	if (!hasExplicitIntent) return false;
+
+	return Object.keys(payload).every(
+		(field) => field === "roomId" || ROOM_ASSIGNMENT_INTENT_FIELDS.has(field),
+	);
+};
+
+const shouldPreserveWorkflowForRoomAssignmentOnly = ({
+	hotelManagementReservationUpdate = false,
+	payload = {},
+} = {}) =>
+	hotelManagementReservationUpdate === true &&
+	isExplicitRoomAssignmentOnlyUpdate(payload);
+
 module.exports = {
 	assignedHotelIds,
 	canEditHotelReservation,
 	hasHotelReservationEditorRole,
+	isExplicitRoomAssignmentOnlyUpdate,
 	isConfiguredSuperAdmin,
 	normalizeId,
 	sanitizeHotelReservationUpdate,
+	shouldPreserveWorkflowForRoomAssignmentOnly,
 };
