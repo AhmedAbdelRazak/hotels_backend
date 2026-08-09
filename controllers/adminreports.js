@@ -94,7 +94,11 @@ const assignedHotelIdsFromUser = (user = {}) =>
 
 const platformHotelScopeIds = (req = {}) => {
 	const actor = req.profile;
-	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+	const actorRoles = [
+		Number(actor?.role),
+		...(Array.isArray(actor?.roles) ? actor.roles.map(Number) : []),
+	].filter(Number.isFinite);
+	if (!actor || isConfiguredSuperAdmin(actor) || !actorRoles.includes(1000)) {
 		return null;
 	}
 	return assignedHotelIdsFromUser(actor).filter((id) => ObjectId.isValid(id));
@@ -663,7 +667,24 @@ exports.reservationExecutiveSummary = async (req, res) => {
 			withPlatformHotelScope(req, match)
 		)
 			.select(
-				"confirmation_number hotelId roomId customer_details.name customer_details.fullName reservation_status state booking_source checkin_date checkout_date createdAt total_rooms total_guests total_amount currency pickedRoomsType pickedRoomsPricing"
+				[
+					"confirmation_number hotelId roomId customer_details.name customer_details.fullName",
+					"reservation_status state booking_source checkin_date checkout_date createdAt",
+					"total_rooms total_guests total_amount currency commission_ota",
+					"otaIdentityKey otaCrossTransportIdentityKey pickedRoomsType pickedRoomsPricing",
+					"adminPricing adminPricingVisibility.rootOnlyForHotelManagement",
+					"ota_financial_summary otaFinancialSummary otaPlatformReview",
+					"supplierData.otaCreatedFromEmail supplierData.otaProvider",
+					"supplierData.otaAutomationPipeline supplierData.otaCommercialEvidence",
+					"supplierData.otaCommercialEvidenceStaleReason",
+					"supplierData.hotelRunnerEmailCommercialEvidence",
+					"supplierData.hotelRunner.transport supplierData.hotelRunner.reservationId",
+					"supplierData.hotelRunner.hrNumber supplierData.hotelRunner.pricing",
+					"supplierData.otaCommissionSar supplierData.otaCommissionSource",
+					"supplierData.otaCommissionSourceBacked supplierData.otaTotalPayoutSar",
+					"supplierData.otaExpenseTotalSar supplierData.otaPayoutFallbackReason",
+					"supplierData.otaPaymentSummary",
+				].join(" ")
 			)
 			.populate("hotelId", "hotelName hotelName_OtherLanguage")
 			.sort({ createdAt: -1, _id: -1 })
