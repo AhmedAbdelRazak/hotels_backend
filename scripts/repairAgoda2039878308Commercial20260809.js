@@ -2250,7 +2250,22 @@ async function main(
 			fail("The live exact scope does not match the supplied dry-run proof.", "AGODA_2039878308_REPAIR_PROOF_MISMATCH");
 		}
 		if (plan.state === "already_applied") {
-			await loadDurableBackup(db, plan.scope.target);
+			const durable = await loadDurableBackup(db, plan.scope.target);
+			const liveHash = canonicalEjsonSha256(plan.scope.reservation);
+			const liveProtectedHash = canonicalEjsonSha256(
+				protectedReservationSnapshot(plan.scope.reservation)
+			);
+			if (
+				durable.manifest.state !== "applied" ||
+				durable.manifest.expectedRepairedHash !== liveHash ||
+				durable.manifest.appliedDocumentHash !== liveHash ||
+				durable.manifest.protectedHash !== liveProtectedHash
+			) {
+				fail(
+					"The already-applied reservation is not fully bound to an applied durable manifest.",
+					"AGODA_2039878308_REPAIR_MANIFEST_STATE_INVALID"
+				);
+			}
 		}
 		console.log(
 			JSON.stringify(

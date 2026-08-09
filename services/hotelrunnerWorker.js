@@ -17,12 +17,18 @@ const {
 const {
 	createHotelRunnerPullSync,
 } = require("./hotelrunnerPullSync");
+const {
+	TARGETED_LOOKUP_EVENT_MARKER_PATH: TARGETED_LOOKUP_MARKER_PATH,
+	buildHotelRunnerProjectionEligibilityFilter: buildProjectionEligibilityFilter,
+	createHotelRunnerFirstOtaFallbackCoordinator,
+} = require("./hotelrunnerFirstOtaFallback");
 
 const EVENT_LEASE_MS = 5 * 60 * 1000;
 const PROJECTION_LEASE_MS = 5 * 60 * 1000;
 const PROJECTION_LEASE_HEARTBEAT_MS = 60 * 1000;
 const EVENT_POLL_MS = 1_000;
 const MAX_EVENT_ATTEMPTS = 8;
+const FALLBACK_RECOVERY_INTERVAL_MS = 30_000;
 
 const wait = (milliseconds) =>
 	new Promise((resolve) => {
@@ -84,17 +90,70 @@ function createHotelRunnerWorker({
 	let stopped = true;
 	let loopPromise = null;
 	let lastPullCheckAt = 0;
+	let lastFallbackRecoveryAt = 0;
 	let projectionStateEnsured = false;
+	let fallbackIndexesPromise = null;
+	const fallbackCoordinator =
+		config.configured === true && config.projectionEnabled === true
+			? Object.prototype.hasOwnProperty.call(
+					dependencies,
+					"otaFallbackCoordinator"
+			  )
+				? dependencies.otaFallbackCoordinator
+				: (
+						dependencies.createOtaFallbackCoordinator ||
+						createHotelRunnerFirstOtaFallbackCoordinator
+				  )({
+						config,
+						instanceId,
+						graceMs: config.otaEmailFallbackGraceMs,
+						leaseMs: config.otaEmailFallbackLeaseMs,
+						negativeProofTtlMs: config.otaEmailFallbackProofTtlMs,
+						maxAttempts: config.otaEmailFallbackMaxAttempts,
+						dependencies: dependencies.otaFallbackDependencies,
+				  })
+			: null;
 
-	const projectionCutoffFilter = () =>
-		config.projectionNotBefore instanceof Date &&
-		Number.isFinite(config.projectionNotBefore.getTime())
-			? {
-					source: "push",
-					receivedAt: { $gte: config.projectionNotBefore },
-					sourceUpdatedAt: { $gte: config.projectionNotBefore },
-			  }
-			: {};
+	const projectionCutoffFilter = () => ({
+		$and: [buildProjectionEligibilityFilter(config.projectionNotBefore)],
+	});
+
+	async function ensureFallbackIndexes() {
+		if (!fallbackCoordinator) return false;
+		if (!fallbackIndexesPromise) {
+			fallbackIndexesPromise = Promise.resolve()
+				.then(() => fallbackCoordinator.ensureIndexes())
+				.catch((error) => {
+					fallbackIndexesPromise = null;
+					throw error;
+				});
+		}
+		await fallbackIndexesPromise;
+		return true;
+	}
+
+	async function recoverFallbackOrphansIfDue(nowMs = Date.now()) {
+		if (!fallbackCoordinator) return null;
+		if (!isFallbackRecoveryDue(nowMs)) {
+			return null;
+		}
+		lastFallbackRecoveryAt = nowMs;
+		await ensureFallbackIndexes();
+		return fallbackCoordinator.recoverOrphanedArchivedEmails();
+	}
+
+	function isFallbackRecoveryDue(nowMs = Date.now()) {
+		return Boolean(
+			fallbackCoordinator &&
+				nowMs - lastFallbackRecoveryAt >= FALLBACK_RECOVERY_INTERVAL_MS
+		);
+	}
+
+	async function hasFallbackWork() {
+		if (!fallbackCoordinator) return false;
+		await ensureFallbackIndexes();
+		return Boolean(await fallbackCoordinator.hasDueWork());
+	}
 
 	async function hasProjectionWork(now = new Date()) {
 		// Production Mongoose models provide exists(). Lightweight unit fakes that
@@ -435,7 +494,19 @@ function createHotelRunnerWorker({
 			throw error;
 		}
 		if (config.projectionEnabled === false) return false;
-		if (!(await hasProjectionWork())) return false;
+		const eventWorkAvailable = await hasProjectionWork();
+		const fallbackWorkAvailable =
+			!eventWorkAvailable && fallbackCoordinator
+				? await hasFallbackWork()
+				: false;
+		const fallbackRecoveryDue = isFallbackRecoveryDue();
+		if (
+			!eventWorkAvailable &&
+			!fallbackWorkAvailable &&
+			!fallbackRecoveryDue
+		) {
+			return false;
+		}
 		const projectionLease = await claimProjectionLease();
 		if (!projectionLease) return false;
 		const heartbeat = startProjectionLeaseHeartbeat();
@@ -446,7 +517,41 @@ function createHotelRunnerWorker({
 			if (abandonedRecovery) return true;
 			event =
 				(await claimExpiredExhaustedEvent()) || (await claimEvent());
-			if (!event) return false;
+			if (!event && (await hasProjectionWork())) {
+				// A callback can be archived between the out-of-lease readiness probe
+				// and this property lease. Recheck while serialized and never let an
+				// email fallback pass an eligible HotelRunner event.
+				event =
+					(await claimExpiredExhaustedEvent()) || (await claimEvent());
+				if (!event) return false;
+			}
+			if (!event && fallbackRecoveryDue) {
+				await heartbeat.assertOwned();
+				await recoverFallbackOrphansIfDue();
+				await heartbeat.assertOwned();
+				if (await hasProjectionWork()) {
+					event =
+						(await claimExpiredExhaustedEvent()) || (await claimEvent());
+					if (!event) return false;
+				}
+			}
+			if (!event) {
+				if (!fallbackCoordinator || !(await hasFallbackWork())) return false;
+				await heartbeat.assertOwned();
+				// This is the last worker-level event check before the coordinator's
+				// own pre-commit queue checks. It closes the recovery/claim gap while
+				// the property projection lease is still held.
+				if (await hasProjectionWork()) {
+					event =
+						(await claimExpiredExhaustedEvent()) || (await claimEvent());
+					if (!event) return false;
+				}
+				if (!event) {
+					const fallbackResult = await fallbackCoordinator.runOnce();
+					await heartbeat.assertOwned();
+					return Boolean(fallbackResult);
+				}
+			}
 			if (String(event.hotelId) !== String(config.hotelId)) {
 				const error = new Error("HotelRunner event property configuration does not match.");
 				error.code = "HOTELRUNNER_EVENT_PROPERTY_MISMATCH";
@@ -471,10 +576,36 @@ function createHotelRunnerWorker({
 				throw error;
 			}
 			await finishEvent(event, result);
+			if (fallbackRecoveryDue) {
+				try {
+					await heartbeat.assertOwned();
+					await recoverFallbackOrphansIfDue();
+				} catch (recoveryError) {
+					console.error("[hotelrunner-worker] fallback recovery held", {
+						code: String(
+							recoveryError?.code || "HOTELRUNNER_FALLBACK_RECOVERY_FAILED"
+						).slice(0, 100),
+						message: safeErrorMessage(recoveryError),
+					});
+				}
+			}
 			return true;
 		} catch (error) {
 			if (!event) throw error;
 			await retryEvent(event, error);
+			if (fallbackRecoveryDue) {
+				try {
+					await heartbeat.assertOwned();
+					await recoverFallbackOrphansIfDue();
+				} catch (recoveryError) {
+					console.error("[hotelrunner-worker] fallback recovery held", {
+						code: String(
+							recoveryError?.code || "HOTELRUNNER_FALLBACK_RECOVERY_FAILED"
+						).slice(0, 100),
+						message: safeErrorMessage(recoveryError),
+					});
+				}
+			}
 			return true;
 		} finally {
 			await heartbeat.stop({ throwOnError: false });
@@ -483,6 +614,7 @@ function createHotelRunnerWorker({
 	}
 
 	async function runUntilIdle({ maxCycles = 1_000 } = {}) {
+		await ensureFallbackIndexes();
 		let processed = 0;
 		while (processed < maxCycles && (await runOnce())) processed += 1;
 		return processed;
@@ -536,6 +668,7 @@ function createHotelRunnerWorker({
 		if (!config.configured) {
 			throw new Error("HotelRunner worker configuration is incomplete.");
 		}
+		await ensureFallbackIndexes();
 		stopped = false;
 		loopPromise = loop();
 	}
@@ -570,10 +703,13 @@ function createHotelRunnerWorker({
 
 module.exports = {
 	EVENT_LEASE_MS,
+	FALLBACK_RECOVERY_INTERVAL_MS,
 	PROJECTION_LEASE_HEARTBEAT_MS,
 	EVENT_POLL_MS,
 	MAX_EVENT_ATTEMPTS,
 	PROJECTION_LEASE_MS,
+	TARGETED_LOOKUP_MARKER_PATH,
+	buildProjectionEligibilityFilter,
 	createHotelRunnerWorker,
 	normalizedFromStoredEvent,
 	retryDelayMs,

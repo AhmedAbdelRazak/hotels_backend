@@ -32,6 +32,9 @@ const {
 const {
 	sanitizeRequestUrlForLogs,
 } = require("./services/hotelrunnerLogSafety");
+const {
+	startHotelRunnerFallbackNotificationOutbox,
+} = require("./services/hotelrunnerFallbackNotificationOutbox");
 
 const app = express();
 const server = http.createServer(app);
@@ -124,6 +127,13 @@ mongoose
 		startSupportCaseMaintenanceJob({
 			getIo: () => app.get("io"),
 			getScheduleAiTurn: () => app.get("scheduleAiPlanTurn"),
+		});
+		// Reservation projection is finalized by the HotelRunner worker first.
+		// This PM2 process owns Socket.IO and therefore leases/delivers the durable
+		// post-terminal notification intents without coupling delivery failures to
+		// reservation correctness.
+		startHotelRunnerFallbackNotificationOutbox({
+			dependencies: { getIo: () => app.get("io") },
 		});
 	})
 	.catch((err) => console.log("DB Connection Error: ", err));

@@ -549,26 +549,108 @@ test("admin status counts only cutoff-eligible push events and archives every co
 				response
 			);
 			assert.equal(response.statusCode, 200);
-			assert.equal(eligibleMatch.source, "push");
-			assert.equal(eligibleMatch.receivedAt.$gte.toISOString(), cutoff.toISOString());
+			const eligibility = eligibleMatch.$and[0];
+			const push = eligibility.$or.find((branch) => branch.source === "push");
+			const targeted = eligibility.$or.find((branch) => branch.source?.$in);
+			assert.equal(push.source, "push");
+			assert.equal(push.receivedAt.$gte.toISOString(), cutoff.toISOString());
 			assert.equal(
-				eligibleMatch.sourceUpdatedAt.$gte.toISOString(),
+				push.sourceUpdatedAt.$gte.toISOString(),
 				cutoff.toISOString()
 			);
+			assert.deepEqual(targeted.source, { $in: ["pull", "push"] });
+			assert.equal(
+				targeted[
+					"result.hotelRunnerFirstFallbackTargetedLookup.projectable"
+				],
+				true
+			);
 			assert.equal(String(noneligibleMatch.hotelId), hotelId);
-			assert.deepEqual(noneligibleMatch.$nor, [
-				{
-					source: "push",
-					receivedAt: { $gte: cutoff },
-					sourceUpdatedAt: { $gte: cutoff },
-				},
-			]);
+			assert.deepEqual(noneligibleMatch.$nor, [eligibility]);
 			assert.equal(response.body.queue.pending, 2);
 			assert.equal(response.body.archive.preActivationEventCount, 5);
 			assert.deepEqual(eventSelections, [
 				"receivedAt status source integrityConflict integrityConflictCount",
 				"processedAt status source integrityConflict integrityConflictCount",
 			]);
+		} finally {
+			HotelDetails.findOne = originals.hotelFindOne;
+			HotelRunnerEvent.aggregate = originals.eventAggregate;
+			HotelRunnerEvent.findOne = originals.eventFindOne;
+			HotelRunnerEvent.countDocuments = originals.eventCountDocuments;
+			HotelRunnerReservation.aggregate = originals.reservationAggregate;
+			HotelRunnerSyncState.findOne = originals.syncStateFindOne;
+		}
+	});
+});
+
+test("admin status fails health when the live worker release does not match the backend checkout", async () => {
+	await withSyntheticConfig(async () => {
+		process.env.HOTELRUNNER_PROJECTION_ENABLED = "true";
+		process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE =
+			"2026-08-09T15:00:00.000Z";
+		const hotelId = "64b000000000000000000001";
+		const ownerId = "64b000000000000000000002";
+		const originals = {
+			hotelFindOne: HotelDetails.findOne,
+			eventAggregate: HotelRunnerEvent.aggregate,
+			eventFindOne: HotelRunnerEvent.findOne,
+			eventCountDocuments: HotelRunnerEvent.countDocuments,
+			reservationAggregate: HotelRunnerReservation.aggregate,
+			syncStateFindOne: HotelRunnerSyncState.findOne,
+		};
+		const query = (value) => ({
+			sort() {
+				return this;
+			},
+			select() {
+				return this;
+			},
+			lean() {
+				return this;
+			},
+			exec: async () => value,
+			then(resolve, reject) {
+				return Promise.resolve(value).then(resolve, reject);
+			},
+		});
+		HotelDetails.findOne = () =>
+			query({
+				_id: hotelId,
+				belongsTo: ownerId,
+				activateHotel: true,
+				xHotelProActive: true,
+				roomCountDetails: [],
+			});
+		HotelRunnerEvent.aggregate = () => Promise.resolve([]);
+		HotelRunnerReservation.aggregate = () => Promise.resolve([]);
+		HotelRunnerEvent.findOne = () => query(null);
+		HotelRunnerEvent.countDocuments = () => Promise.resolve(0);
+		HotelRunnerSyncState.findOne = () =>
+			query({
+				status: "idle",
+				workerReleaseSha: "0".repeat(40),
+				workerReleaseTreeSha: "1".repeat(40),
+				workerInstanceId: "stale-worker",
+				workerStartedAt: new Date(Date.now() - 10_000),
+				workerHeartbeatAt: new Date(),
+			});
+		try {
+			const response = responseRecorder();
+			await hotelRunnerAdminStatus(
+				{ profile: { _id: ownerId, activeUser: true } },
+				response
+			);
+			assert.equal(response.statusCode, 503);
+			assert.equal(response.body.revisionHealth.status, "unhealthy");
+			assert.equal(
+				response.body.revisionHealth.alerts.includes(
+					"worker_backend_revision_mismatch"
+				),
+				true
+			);
+			assert.equal(response.body.worker.instanceId, "stale-worker");
+			assert.equal(response.body.worker.releaseSha, "0".repeat(40));
 		} finally {
 			HotelDetails.findOne = originals.hotelFindOne;
 			HotelRunnerEvent.aggregate = originals.eventAggregate;

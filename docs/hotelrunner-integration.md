@@ -366,7 +366,7 @@ Two labels must not be over-interpreted:
 - **Backend configuration ready** proves that required values and one local binding pass local configuration validation. It does not prove that HotelRunner accepted the credential.
 - the backend field currently named `latestCallback` is actually the latest stored event and may come from push or pull. Treat it as **latest stored HotelRunner delivery**, not proof of a recent callback.
 
-Likewise, persisted sync state is not a process heartbeat. Actual worker liveness requires systemd/process inspection plus recent expected pull timestamps.
+Persisted sync state now includes a release-attested worker registration and a 15-second heartbeat. Admin health requires a fresh heartbeat plus exact worker/backend/live-checkout commit-and-tree parity; a mismatch returns unhealthy and makes the worker stop. Systemd process inspection remains useful operational evidence, but a running PID alone is not considered healthy.
 
 The current page has no individual event/quarantine view, manual pull, projection preview, credential-validation proof, or `requires_response` display. If configuration is incomplete, the current status handler returns `503`, so the UI normally shows a load failure rather than a useful configuration-incomplete card. These are documented current limitations, not implemented features.
 
@@ -409,6 +409,10 @@ All values belong in the backend `.env` only. The repository ignores `.env`, `.e
 | `HOTELRUNNER_REQUEST_TIMEOUT_MS` | 12000; bounded 3000-30000 | Vendor request timeout |
 | `HOTELRUNNER_CALLBACK_BODY_LIMIT_BYTES` | 1 MiB; bounded 64 KiB-2 MiB | Maximum callback `data` size |
 | `HOTELRUNNER_CALLBACK_MAX_RESERVATIONS` | 100; bounded 1-250 | Maximum reservations accepted in one callback/pull envelope |
+| `HOTELRUNNER_OTA_EMAIL_FALLBACK_GRACE_MS` | 180000; bounded 30000-900000 | Grace period in which HotelRunner callback/API ownership has priority over an authenticated direct-OTA email |
+| `HOTELRUNNER_OTA_EMAIL_FALLBACK_LEASE_MS` | 300000; bounded 30000-900000 | Crash-recoverable lease for one durable email-fallback identity job |
+| `HOTELRUNNER_OTA_EMAIL_FALLBACK_PROOF_TTL_MS` | 120000; bounded 30000-600000 | Maximum age of an identity-bound confirmed-empty HotelRunner lookup proof |
+| `HOTELRUNNER_OTA_EMAIL_FALLBACK_MAX_ATTEMPTS` | 12; bounded 3-30 | Retry ceiling before the job fails closed into manual review; it never silently falls back on lookup uncertainty |
 | `HOTELRUNNER_PROPERTY_DAILY_BUDGET` | 225; maximum 240 | Internal per-property daily call budget |
 | `HOTELRUNNER_PROPERTY_MINUTE_BUDGET` | 4; maximum 5 | Internal per-property minute budget |
 | `HOTELRUNNER_APPLICATION_MINUTE_BUDGET` | 60; maximum 75 | Internal per-application minute budget |
@@ -556,6 +560,24 @@ Canonical provider fields and recognized legacy provider labels must also reach 
 
 Trip.com has an explicit cross-transport identity bridge so its existing email-created record can be linked to the direct HotelRunner event. This bridge still requires exact validated provider identity and rejects contradictory providers.
 
+### HotelRunner-first direct-OTA email ingress
+
+When projection is active, an authenticated direct-OTA `new_reservation` email that resolves from source-backed hotel evidence to the one configured active HotelRunner property is not reconciled inline by the SendGrid process. The controller first persists the complete normalized `InboundEmail` audit with `processingStatus=awaiting_hotelrunner`, then inserts a durable identity job and returns HTTP 200. Important-email forwarding may still run after acceptance. Reservation refresh and Airbnb creation WhatsApp notifications are materialized only from the durable terminal result and delivered once through the backend notification outbox.
+
+If that configured property's projection/configuration gate is unavailable, the same direct email is archived as `recovery_pending` and answered retryably; it never falls through to the legacy inline creator. Authenticated HotelRunner relay emails are audit-only corroboration and never own an email fallback job, lifecycle creation, or commercial pricing.
+
+The HotelRunner worker always drains due callback/API event work before these fallback jobs. After the grace period it checks durable local HotelRunner state, performs one exact reservation-number GET only when no callback evidence exists, and permits email creation only from a current identity-bound confirmed-empty proof. An exact HotelRunner result is persisted to the normal event queue and projected there; an uncertain, ambiguous, conflicting, or unavailable response retries or enters review and never authorizes email fallback.
+
+The creation boundary has one explicit cross-process linearization contract:
+
+1. A HotelRunner callback first compare-and-sets the exact active fallback identity to `api_observed`, then persists its event. Failure of that first write is retryable and is never acknowledged; failure between the marker and event insert leaves a non-consuming barrier that clears any negative proof until redelivery or event visibility lets the API path win.
+2. Email mapping performs every awaited validation before it compare-and-sets that exact owned job and proof from `open` to `email_authorized`. The authorization is therefore taken at the reservation insert boundary, not when the coordinator first calls the mapper.
+3. While `email_authorized` exists, callbacks receive a retryable response and cannot preempt it merely because a short timer elapsed. The exclusion is bound to the owned fallback-job lease; stale recovery belongs to a reclaimed coordinator after fresh local/vendor checks.
+4. The email insert carries the exact authorization token and proof in its immutable creation marker. Success commits `email_committed`; an insert failure releases the exact token, while acknowledgement-loss recovery adopts only the exact token-stamped reservation.
+5. These states are MongoDB compare-and-set decisions. Process memory and the absence of a JavaScript `await` are not ordering guarantees.
+
+The archive-before-enqueue boundary is crash recoverable. An enqueue failure returns retryable HTTP 503 while retaining the audit and dedupe claim, and the worker recovers stale `awaiting_hotelrunner` archives that do not yet have a job. Duplicate deliveries cannot re-enter inline reservation creation.
+
 ### Existing OTA platform-review workflow
 
 `HOTELRUNNER_REQUIRE_OTA_REVIEW=true` reuses the PMS workflow; it does not introduce a second lifecycle status:
@@ -575,7 +597,7 @@ The operator-facing list derives the label **OTA Platform Review HotelRunner** f
 
 While pending review, a HotelRunner modification updates source-owned guest, stay, room, and gross-pricing fields on the same reservation and does not release it. Local room, housing, finance, settlement, or reviewed-pricing ownership continues to protect or quarantine conflicting changes. A later flag rollback cannot silently release an already-created HotelRunner review; staff must use the dedicated release workflow. A cancellation updates that same reservation to `cancelled` and marks its pending review metadata cancelled.
 
-An exact HotelRunner match to an email-created OTA review links the durable HotelRunner mirror to that existing reservation. Original email provenance is retained, HotelRunner management metadata is added, and no second reservation is created. Email ingestion remains active for reservations HotelRunner does not own. With `HOTELRUNNER_REQUIRE_OTA_REVIEW=false`, new confirmed HotelRunner reservations keep the previously tested direct `confirmed` behavior; deduplication, modifications, and cancellations are unchanged.
+An exact HotelRunner match to a legacy email-created OTA review links the durable HotelRunner mirror to that existing reservation. Original email provenance is retained, HotelRunner management metadata is added, and no second reservation is created. For new eligible direct-OTA messages, the durable HotelRunner-first queue now prevents that email/API creation race; email ingestion remains active as the confirmed-empty fallback and for other properties or message types. With `HOTELRUNNER_REQUIRE_OTA_REVIEW=false`, new confirmed HotelRunner reservations keep the previously tested direct `confirmed` behavior; deduplication, modifications, and cancellations are unchanged.
 
 ### Ordering and watermarks
 
@@ -794,13 +816,14 @@ also supplied exact guest gross and payout, `commission_ota` can be stored as
 their exact difference while the original HotelRunner pricing snapshot remains
 unchanged.
 
-The resulting priority rule is lifecycle-first, not transport-first creation:
-the email safety net may create the local row before a delayed or temporarily
-held API event, but the next valid HotelRunner event links to that same row,
-sets direct source authority, and becomes the create/modify/cancel lifecycle
-owner. The email remains the commercial-evidence source only for fields the
-HotelRunner schema does not guarantee. Uncovered reservations continue through
-the existing email path.
+That earlier lifecycle-first convergence rule is superseded for new eligible
+mail. Creation is now transport-prioritized: a durable HotelRunner callback or
+exact reservation-number lookup gets the first opportunity to create the local
+row, and direct email may create only after a current, identity-bound,
+documented confirmed-empty API response. The authenticated direct email remains
+commercial evidence for fields the HotelRunner schema does not guarantee.
+Uncovered properties and non-eligible message types retain their existing email
+handling.
 
 ### One-time audited reconciliation
 
@@ -840,12 +863,12 @@ The existing OTA-email pipeline remains a permanent coverage safety net; it is n
 
 Authority is resolved per exact reservation:
 
-1. an authenticated, source-backed email with no existing direct HotelRunner projection follows the established email create/update/cancel path;
-2. when HotelRunner later supplies the same validated provider confirmation, the unique identity links to the same MongoDB reservation rather than creating a duplicate;
+1. an authenticated, source-backed direct-OTA new-reservation email for the configured HotelRunner property is archived into the durable HotelRunner-first queue and cannot create inline;
+2. callback events and an exact bounded HotelRunner reservation-number lookup have creation priority; email fallback requires a fresh identity/configuration/hotel-bound confirmed-empty proof;
 3. after that exact reservation carries a direct HotelRunner projection marker, lower-authority email lifecycle/create facts are audit-only and cannot overwrite lifecycle, guest, dates, rooms, gross, or payment state; and
 4. the only permitted email mutation of a direct-owned reservation is the guarded commercial-only enrichment described above.
 
-Authenticated HotelRunner email relays also require zero-or-one-provider consensus from source-backed commercial labels. Conflicting recognized OTA labels do not select a convenient winner: automatic lookup, creation, and mutation fail closed for review. Incidental provider names in guest prose are not identity evidence.
+Authenticated HotelRunner email relays require zero-or-one-provider consensus from source-backed commercial labels and are persisted audit-only. They never create a fallback identity or supply canonical commercial money. Conflicting recognized OTA labels do not select a convenient winner, and incidental provider names in guest prose are not identity evidence.
 
 This behavior is independent of property-wide projection configuration for unrelated reservations. An uncovered reservation continues to use email even when another reservation at the same hotel is HotelRunner-owned. Other hotels are unchanged.
 
@@ -1187,7 +1210,7 @@ Suggested alert conditions for the future monitoring page:
 - exact event/mirror keys make callbacks and pulls idempotent;
 - persisted leases recover from process death;
 - overlapping pull windows tolerate duplicate delivery;
-- projection off stops future direct mutation; email fallback remains reservation-aware and existing source markers remain auditable;
+- projection off stops future direct mutation; direct new-reservation email for the configured HotelRunner property is held fail-closed instead of reverting to inline creation, while existing source markers remain auditable;
 - no rollback requires deleting local reservations; and
 - code rollback uses exact Git revisions and retained deployment backups. Preserve the now-deployed network-boundary revisions when rolling back HotelRunner feature code so raw origin ports do not reopen.
 

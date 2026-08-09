@@ -82,3 +82,20 @@ test("worker and reservation-index verifier disable implicit Mongoose writes bef
 		);
 	}
 });
+
+test("daemon attests a clean exact release before loading reservation worker code", () => {
+	const entrypoint = require.resolve("../workers/hotelrunnerSyncWorker");
+	const source = fs.readFileSync(entrypoint, "utf8");
+	const attestation = source.indexOf(
+		"const workerRevision = assertExactGitRelease();"
+	);
+	const workerImplementation = source.indexOf(
+		'require("../services/hotelrunnerWorker")'
+	);
+	const registration = source.indexOf("await registerWorkerRelease({");
+	const workerStart = source.indexOf("await worker.start();");
+
+	assert.ok(attestation > -1 && attestation < workerImplementation);
+	assert.ok(registration > workerImplementation && registration < workerStart);
+	assert.match(source, /await revisionGuard\.checkNow\(\);[\s\S]*await worker\.start\(\)/);
+});

@@ -72,6 +72,13 @@ const inboundEmailSchema = new mongoose.Schema(
 		emailContext: { type: Object, default: {} },
 		orchestratorDecision: { type: Object, default: {} },
 		reconciliation: { type: Object, default: {} },
+		// Durable hand-off metadata for the HotelRunner-first OTA ingress path.
+		// The normalized reservation above remains the immutable work input; this
+		// marker records whether that archived input has reached the fallback queue.
+		hotelRunnerFirstFallback: {
+			type: mongoose.Schema.Types.Mixed,
+			default: undefined,
+		},
 		forwardDecision: {
 			shouldForward: { type: Boolean, default: false },
 			reason: { type: String, trim: true, lowercase: true, default: "" },
@@ -117,6 +124,16 @@ const inboundEmailSchema = new mongoose.Schema(
 			},
 			attemptedAt: { type: Date, default: null },
 			completedAt: { type: Date, default: null },
+			// A HotelRunner-first terminal outbox claims this key before invoking
+			// Twilio. The immutable claim makes retries/process crashes at-most-once
+			// for the external submission while preserving the final delivery audit.
+			attemptKey: { type: String, trim: true, lowercase: true, default: "" },
+			outboxId: {
+				type: ObjectId,
+				ref: "HotelRunnerFallbackNotificationOutbox",
+				default: null,
+			},
+			claimedAt: { type: Date, default: null },
 		},
 		parseWarnings: { type: [String], default: [] },
 		parseErrors: { type: [String], default: [] },

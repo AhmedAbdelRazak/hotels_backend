@@ -11,11 +11,16 @@ const {
 } = require("../controllers/reservations");
 const {
 	loadHotelRunnerEmailCommercialBridge,
+	loadHotelRunnerQueuedEmailCommercialBridge,
+	validateHotelRunnerQueuedEmailCommercialBridgeRooms,
 } = require("./hotelrunnerEmailCommercialBridge");
 const {
 	authoritativeExistingRefreshProtectedStateGuard,
+	buildDirectHotelRunnerCommercialPricing,
 	buildOtaIdentityKey,
+	directHotelRunnerCommercialEnrichmentSet,
 	generateUniquePmsConfirmationNumber,
+	hotelRunnerEmailCommercialEvidenceHash,
 	verifiedHotelRunnerEmailCommercialEvidence,
 } = require("./otaReservationMapper");
 const {
@@ -66,6 +71,7 @@ const HOTELRUNNER_PROVIDER_ALIASES = new Map([
 	["bookingcom", "booking"],
 	["agoda", "agoda"],
 	["agodacom", "agoda"],
+	["agodaycs5", "agoda"],
 	["expedia", "expedia"],
 	["expediacom", "expedia"],
 	["hotels", "hotels"],
@@ -79,6 +85,7 @@ const HOTELRUNNER_PROVIDER_ALIASES = new Map([
 ]);
 
 const clean = (value = "") => String(value == null ? "" : value).trim();
+const objectIdKey = (value) => clean(value?._id || value).toLowerCase();
 const comparable = (value = "") =>
 	clean(value)
 		.toLowerCase()
@@ -101,6 +108,23 @@ const nullableRound2 = (value) => {
 };
 const centsToNullableAmount = (value) =>
 	Number.isSafeInteger(value) ? Number((value / 100).toFixed(2)) : null;
+
+function setDocumentPath(target, path, value) {
+	const parts = clean(path).split(".").filter(Boolean);
+	if (!parts.length) return;
+	let cursor = target;
+	for (const part of parts.slice(0, -1)) {
+		if (
+			!cursor[part] ||
+			typeof cursor[part] !== "object" ||
+			Array.isArray(cursor[part])
+		) {
+			cursor[part] = {};
+		}
+		cursor = cursor[part];
+	}
+	cursor[parts[parts.length - 1]] = value;
+}
 
 function hotelRunnerPricingBreakdown(normalized = {}) {
 	const rooms = (normalized.rooms || []).map((room) => ({
@@ -852,6 +876,104 @@ function buildCreateReservationDocument({
 			},
 		],
 	};
+}
+
+function applyQueuedEmailCommercialEvidenceToCreateDocument(
+	document,
+	{ normalized = {}, bridge = null } = {}
+) {
+	const fail = (reason) => ({ ok: false, reason });
+	if (
+		!document ||
+		bridge?.ok !== true ||
+		!bridge.evidence ||
+		!["gross", "payout"].includes(clean(bridge.amountRole).toLowerCase())
+	) {
+		return fail("queued_bridge_invalid");
+	}
+	const inbound = bridge.normalizedReservation;
+	if (!inbound || typeof inbound !== "object" || Array.isArray(inbound)) {
+		return fail("queued_archive_missing");
+	}
+	const commercialPricing = buildDirectHotelRunnerCommercialPricing(
+		document,
+		inbound,
+		bridge.evidence,
+		{ reportedTotalRole: bridge.amountRole }
+	);
+	if (!commercialPricing) return fail("queued_daily_pricing_invalid");
+	const commercialSet = directHotelRunnerCommercialEnrichmentSet(
+		inbound,
+		bridge.evidence,
+		{
+			reportedTotalRole: bridge.amountRole,
+			existing: document,
+			commercialPricing,
+		}
+	);
+	if (!commercialSet) return fail("queued_commercial_set_invalid");
+	for (const [path, value] of Object.entries(commercialSet)) {
+		setDocumentPath(document, path, value);
+	}
+
+	const linkedAt = new Date(bridge.evidence.appliedAt || Date.now());
+	if (!Number.isFinite(linkedAt.getTime())) {
+		return fail("queued_evidence_timestamp_invalid");
+	}
+	document.supplierData = {
+		...(document.supplierData || {}),
+		otaInboundEmailId: bridge.inboundEmailId,
+		otaLastInboundEmailId: bridge.inboundEmailId,
+		otaLastEmailAt: inbound?.source?.receivedAt || linkedAt,
+		otaAmountSar: bridge.evidence.grossTotalSar,
+		otaSourceCurrency: bridge.sourceCurrency,
+		otaSourceAmount: bridge.sourceAmount,
+		otaCreatedFromEmail: false,
+		hotelRunnerFirstFallbackCommercialBridge: {
+			version: 1,
+			jobId: bridge.jobId,
+			inboundEmailId: bridge.inboundEmailId,
+			inboundEmailHash: bridge.inboundEmailHash,
+			normalizedReservationHash: bridge.normalizedReservationHash,
+			resolvedHotelProofHash: bridge.resolvedHotelProofHash,
+			archiveFingerprint: bridge.archiveFingerprint,
+			linkedAt,
+		},
+	};
+	document.reservationAuditLog = [
+		...(Array.isArray(document.reservationAuditLog)
+			? document.reservationAuditLog
+			: []),
+		{
+			at: linkedAt,
+			source: "hotelrunner-api",
+			action: "created-with-queued-authenticated-ota-commercial-evidence",
+			hotelRunnerReservationId: normalized.hotelRunnerReservationId,
+			messageUid: normalized.messageUid,
+			inboundEmailId: bridge.inboundEmailId,
+			fallbackJobId: bridge.jobId,
+			archiveFingerprint: bridge.archiveFingerprint,
+		},
+	];
+
+	const verified = verifiedHotelRunnerEmailCommercialEvidence(document, {
+		provider: bridge.evidence.provider,
+		grossTotalSar: bridge.evidence.grossTotalSar,
+		currency: "SAR",
+	});
+	if (
+		!verified ||
+		clean(verified.evidenceHash).toLowerCase() !==
+			clean(bridge.evidence.evidenceHash).toLowerCase() ||
+		clean(document.supplierData?.hotelRunner?.transport).toLowerCase() !==
+			"hotelrunner_api" ||
+		Number(document.supplierData?.otaSourceAuthority) !== 4 ||
+		clean(document.supplierData?.otaAutomationPipeline).toLowerCase() !==
+			"hotelrunner-background-worker"
+	) {
+		return fail("queued_commercial_materialization_invalid");
+	}
+	return { ok: true, document, commercialPricing, evidence: verified };
 }
 
 function normalizedPickedRooms(rows = []) {
@@ -2319,6 +2441,72 @@ function hotelRunnerOwnershipEvidenceBridge(existing = {}, normalized = {}, emai
 		: null;
 }
 
+function hasExactIncomingEmailOwnershipBridge(normalized = {}, emailBridge = null) {
+	const evidence = emailBridge?.ok === true ? emailBridge.evidence : null;
+	if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+		return false;
+	}
+	const provider = hotelRunnerCommercialProvider(normalized);
+	const expectedIdentity = clean(
+		buildOtaIdentityKey(provider, hotelRunnerExternalAlias(normalized))
+	).toLowerCase();
+	const reportedCents = Number(normalized.totalCents);
+	const reportedAmount =
+		Number.isSafeInteger(reportedCents) && reportedCents > 0
+			? round2(reportedCents / 100)
+			: null;
+	const bridgeAmount = Number(emailBridge.hotelRunnerAmount);
+	const sourceCurrency = clean(emailBridge.sourceCurrency).toUpperCase();
+	const incomingCurrency = clean(normalized.currency).toUpperCase();
+	const amountRole = clean(emailBridge.amountRole).toLowerCase();
+	const gross = Number(evidence.grossTotalSar);
+	const payout = Number(evidence.payoutTotalSar);
+	const expense = Number(evidence.otaExpenseTotalSar);
+	const roleAmount = amountRole === "gross" ? gross : payout;
+	let expectedHash = "";
+	try {
+		expectedHash = hotelRunnerEmailCommercialEvidenceHash(evidence);
+	} catch (_error) {
+		return false;
+	}
+
+	// `ok` is emitted by loadHotelRunnerEmailCommercialBridge only after exact
+	// provider identity, stay dates, total room count, currency, and source-amount
+	// comparisons against the referenced authenticated inbound audit. Recheck the
+	// self-contained identity and money facts here so a weaker stored-evidence
+	// fallback can never authorize preservation across a critical room handoff.
+	return Boolean(
+		provider &&
+			expectedIdentity &&
+			evidence.verified === true &&
+			clean(evidence.source).toLowerCase() === "authenticated_ota_email" &&
+			clean(evidence.provider).toLowerCase() === provider &&
+			clean(evidence.otaIdentityKey).toLowerCase() === expectedIdentity &&
+			clean(evidence.currency).toUpperCase() === "SAR" &&
+			clean(evidence.evidenceHash).toLowerCase() ===
+				clean(expectedHash).toLowerCase() &&
+			["gross", "payout"].includes(amountRole) &&
+			reportedAmount !== null &&
+			Number.isFinite(bridgeAmount) &&
+			Math.abs(round2(bridgeAmount) - reportedAmount) <= 0.02 &&
+			sourceCurrency &&
+			sourceCurrency === incomingCurrency &&
+			Number.isFinite(gross) &&
+			gross > 0 &&
+			Number.isFinite(payout) &&
+			payout > 0 &&
+			payout <= gross + 0.02 &&
+			Number.isFinite(expense) &&
+			expense >= 0 &&
+			Math.abs(round2(gross - payout) - round2(expense)) <= 0.02 &&
+			Number.isFinite(Number(emailBridge.grossTotalSar)) &&
+			Math.abs(round2(emailBridge.grossTotalSar) - round2(gross)) <= 0.02 &&
+			(sourceCurrency !== "SAR" ||
+				(Number.isFinite(roleAmount) &&
+					Math.abs(round2(roleAmount) - reportedAmount) <= 0.02))
+	);
+}
+
 function availabilitySnapshotInventorySummary(snapshot = {}) {
 	if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
 		return null;
@@ -2458,6 +2646,8 @@ async function applyActiveUpdate({
 		normalized,
 		emailBridge
 	);
+	const exactIncomingEmailOwnershipBridge =
+		hasExactIncomingEmailOwnershipBridge(normalized, emailBridge);
 	const incomingCommercialEvidence = ownershipEvidenceBridge?.evidence || null;
 	const hasLegacyPresentedCommercialEvidence = Boolean(
 		existingCommercialEvidence ||
@@ -2466,8 +2656,9 @@ async function applyActiveUpdate({
 	);
 	const commercialEvidenceStale = Boolean(
 		criticalChanged
-			? hasLegacyPresentedCommercialEvidence ||
-				existingAuthenticatedProviderEvidence
+			? !exactIncomingEmailOwnershipBridge &&
+				(hasLegacyPresentedCommercialEvidence ||
+					existingAuthenticatedProviderEvidence)
 			: hasLegacyPresentedCommercialEvidence &&
 				!incomingCommercialEvidence &&
 				!existingAuthenticatedProviderEvidence
@@ -2536,7 +2727,12 @@ async function applyActiveUpdate({
 		...safeDescriptiveUpdates(existing, priorProjection, incomingProjection),
 		...hotelRunnerOwnershipCommissionSet(existing, ownershipEvidenceBridge),
 	};
-	if (incomingUnresolvedEvidence && existingAuthenticatedProviderEvidence && criticalChanged) {
+	if (
+		incomingUnresolvedEvidence &&
+		existingAuthenticatedProviderEvidence &&
+		criticalChanged &&
+		!exactIncomingEmailOwnershipBridge
+	) {
 		set["supplierData.otaCommercialEvidencePrevious"] =
 			existingOtaCommercialEvidence;
 		set["supplierData.otaCommercialEvidence"] = incomingUnresolvedEvidence;
@@ -2572,10 +2768,9 @@ async function applyActiveUpdate({
 		set.pickedRoomsPricing = pricing.pickedRooms;
 	}
 	const preserveVerifiedEmailCommercial = Boolean(
-		((emailBridge?.ok === true && emailBridge?.evidence) ||
-			incomingCommercialEvidence ||
-			existingAuthenticatedProviderEvidence) &&
-			!criticalChanged
+		exactIncomingEmailOwnershipBridge ||
+			(!criticalChanged &&
+				(incomingCommercialEvidence || existingAuthenticatedProviderEvidence))
 	);
 	const commercialProtected =
 		commercialChanged &&
@@ -2831,6 +3026,7 @@ async function createReservation({
 	mirror,
 	hotel,
 	pricing,
+	emailBridge = null,
 	config = {},
 }, dependencies) {
 	const ReservationModel = dependencies.ReservationModel || Reservations;
@@ -2917,7 +3113,7 @@ async function createReservation({
 	const generateConfirmation =
 		dependencies.generateConfirmation || generateUniquePmsConfirmationNumber;
 	const confirmationNumber = await generateConfirmation();
-	const document = buildCreateReservationDocument({
+	let document = buildCreateReservationDocument({
 		normalized,
 		event,
 		hotel,
@@ -2926,6 +3122,37 @@ async function createReservation({
 		reservationMongoId,
 		config,
 	});
+	if (emailBridge?.ok === true && emailBridge.evidence) {
+		const materialized = applyQueuedEmailCommercialEvidenceToCreateDocument(
+			document,
+			{ normalized, bridge: emailBridge }
+		);
+		if (!materialized.ok) {
+			if (
+				clean(normalized.currency).toUpperCase() !==
+				clean(hotel.currency || "SAR").toUpperCase()
+			) {
+				return {
+					status: "quarantined",
+					code: "hotelrunner_queued_email_commercial_materialization_failed",
+					message:
+						"The authenticated OTA evidence could not be materialized exactly on the HotelRunner base reservation.",
+					bridgeReason: materialized.reason,
+				};
+			}
+			// Rebuild from the authoritative API facts because the failed in-memory
+			// evidence attempt may have partially populated nested commercial fields.
+			document = buildCreateReservationDocument({
+				normalized,
+				event,
+				hotel,
+				pricing,
+				confirmationNumber,
+				reservationMongoId,
+				config,
+			});
+		}
+	}
 	let createdReservation = null;
 	try {
 		const createWithSnapshot =
@@ -3164,7 +3391,7 @@ async function projectHotelRunnerReservation(
 	const loadEmailBridge =
 		dependencies.loadEmailCommercialBridge ||
 		loadHotelRunnerEmailCommercialBridge;
-	const emailBridge = existing
+	let emailBridge = existing
 		? await loadEmailBridge(
 				{
 					existing,
@@ -3176,6 +3403,7 @@ async function projectHotelRunnerReservation(
 					: undefined
 			  )
 		: { ok: false, reason: "pms_reservation_not_created_yet", amountRole: "" };
+	const linkedEmailBridge = emailBridge;
 
 	if (normalized.state === "canceled") {
 		if (!existing) {
@@ -3235,11 +3463,118 @@ async function projectHotelRunnerReservation(
 	}
 
 	const hotelCurrency = clean(hotel.currency || "SAR").toUpperCase();
+	const hotelRunnerCurrency = clean(normalized.currency).toUpperCase();
+	let queuedEmailBridge = null;
+	const commercialProvider = hotelRunnerCommercialProvider(normalized);
+	const fallbackBridgeConfigured = Boolean(
+		dependencies.loadQueuedEmailCommercialBridge ||
+			(objectIdKey(config.hotelId) === objectIdKey(hotel._id) &&
+				/^[a-f0-9]{64}$/.test(clean(config.hrIdFingerprint).toLowerCase()))
+	);
+	if (
+		emailBridge?.evidence == null &&
+		commercialProvider &&
+		commercialProvider !== "hotelrunner" &&
+		fallbackBridgeConfigured
+	) {
+		const loadQueuedBridge =
+			dependencies.loadQueuedEmailCommercialBridge ||
+			loadHotelRunnerQueuedEmailCommercialBridge;
+		try {
+			queuedEmailBridge = await loadQueuedBridge(
+				{
+					normalized,
+					provider: commercialProvider,
+					hotel,
+					config,
+				},
+				{
+					FallbackJobModel: dependencies.FallbackJobModel,
+					InboundEmailModel: dependencies.InboundEmailModel,
+					resolveArchivedHotel: dependencies.resolveArchivedHotel,
+					now: dependencies.queuedEmailBridgeNow,
+				}
+			);
+		} catch (_error) {
+			queuedEmailBridge = {
+				ok: false,
+				reason: "fallback_job_lookup_failed",
+				amountRole: "",
+			};
+		}
+		if (queuedEmailBridge?.ok === true && queuedEmailBridge.evidence) {
+			emailBridge = queuedEmailBridge;
+		} else if (clean(queuedEmailBridge?.reason) !== "fallback_job_not_found") {
+			const transientReasons = new Set([
+				"fallback_job_lookup_failed",
+				"fallback_job_model_required",
+				"inbound_email_lookup_failed",
+				"inbound_email_model_required",
+				"queued_hotel_lookup_failed",
+			]);
+			const reason = clean(queuedEmailBridge?.reason) || "queued_bridge_invalid";
+			const identityContradictionReasons = new Set([
+				"fallback_job_identity_ambiguous",
+				"fallback_job_identity_conflict",
+				"fallback_job_identity_mismatch",
+				"archived_email_hotel_mismatch",
+				"archived_email_provider_mismatch",
+				"archived_email_confirmation_mismatch",
+				"queued_archive_job_reference_mismatch",
+				"queued_provider_identity_mismatch",
+				"queued_stay_mismatch",
+				"queued_room_count_mismatch",
+				"queued_currency_mismatch",
+				"queued_hotel_mismatch",
+				"queued_hotel_proof_mismatch",
+			]);
+			if (identityContradictionReasons.has(reason)) {
+				if (hotelRunnerCurrency !== hotelCurrency) {
+					await markMirrorReview(
+						mirror,
+						"quarantined",
+						"hotelrunner_queued_email_bridge_rejected",
+						"The durable OTA queue identity contradicts the HotelRunner reservation identity required for currency conversion.",
+						{ bridgeReason: reason },
+						dependencies
+					);
+					return {
+						status: "quarantined",
+						code: "hotelrunner_queued_email_bridge_rejected",
+						bridgeReason: reason,
+						mirrorId: mirror._id,
+					};
+				}
+				// Same-currency HotelRunner lifecycle authority must not be blocked
+				// by contradictory lower-authority email evidence. Ignore the email
+				// bridge here; its durable coordinator job will become needs-review
+				// when it attempts exact commercial reconciliation.
+				queuedEmailBridge = null;
+			}
+			if (
+				hotelRunnerCurrency !== hotelCurrency &&
+				transientReasons.has(reason)
+			) {
+				return {
+					status: "retry",
+					code: "hotelrunner_queued_email_bridge_unavailable",
+					bridgeReason: reason,
+					mirrorId: mirror._id,
+				};
+			}
+			// Sparse, manual-review, or otherwise non-commercial archives never
+			// block an authoritative same-currency API lifecycle. They simply do
+			// not participate in commercial enrichment. Foreign-currency events
+			// remain held by the ordinary currency gate below.
+			queuedEmailBridge = null;
+		}
+	}
+
 	const currencyBridgedByAuthenticatedEmail = Boolean(
 		emailBridge?.ok === true && emailBridge?.evidence
 	);
 	if (
-		normalized.currency !== hotelCurrency &&
+		hotelRunnerCurrency !== hotelCurrency &&
 		!currencyBridgedByAuthenticatedEmail
 	) {
 		if (
@@ -3262,7 +3597,7 @@ async function projectHotelRunnerReservation(
 			"quarantined",
 			"hotelrunner_currency_requires_review",
 			"HotelRunner currency differs from the PMS hotel currency; no implicit conversion was made.",
-			{ sourceCurrency: normalized.currency, hotelCurrency },
+				{ sourceCurrency: hotelRunnerCurrency, hotelCurrency },
 			dependencies
 		);
 		return {
@@ -3314,6 +3649,52 @@ async function projectHotelRunnerReservation(
 			unsafeMasterInvCodes: mapping.unsafeMasterInvCodes,
 			mirrorId: mirror._id,
 		};
+	}
+	if (queuedEmailBridge?.ok === true && queuedEmailBridge.evidence) {
+		const validateQueuedBridgeRooms =
+			dependencies.validateQueuedEmailCommercialBridgeRooms ||
+			validateHotelRunnerQueuedEmailCommercialBridgeRooms;
+		let roomVerifiedBridge;
+		try {
+			roomVerifiedBridge = await validateQueuedBridgeRooms(
+				queuedEmailBridge,
+				{ hotel, resolvedRooms: mapping.resolvedRooms },
+				dependencies.resolveArchivedRoom
+					? { resolveArchivedRoom: dependencies.resolveArchivedRoom }
+					: undefined
+			);
+		} catch (_error) {
+			roomVerifiedBridge = {
+				ok: false,
+				reason: "queued_room_lookup_failed",
+				amountRole: "",
+			};
+		}
+		if (roomVerifiedBridge?.ok !== true || !roomVerifiedBridge.evidence) {
+			const bridgeReason =
+				clean(roomVerifiedBridge?.reason) || "queued_room_identity_mismatch";
+			if (hotelRunnerCurrency === hotelCurrency) {
+				emailBridge = linkedEmailBridge;
+				queuedEmailBridge = null;
+			} else {
+				await markMirrorReview(
+					mirror,
+					"quarantined",
+					"hotelrunner_queued_email_room_bridge_rejected",
+					"The authenticated OTA room identity did not match every HotelRunner-resolved PMS room.",
+					{ bridgeReason },
+					dependencies
+				);
+				return {
+					status: "quarantined",
+					code: "hotelrunner_queued_email_room_bridge_rejected",
+					bridgeReason,
+					mirrorId: mirror._id,
+				};
+			}
+		} else {
+			emailBridge = roomVerifiedBridge;
+		}
 	}
 	const pricing = buildPickedRoomsProjection(
 		normalized,
@@ -3396,7 +3777,7 @@ async function projectHotelRunnerReservation(
 				dependencies
 		  )
 		: await createReservation(
-				{ normalized, event, mirror, hotel, pricing, config },
+				{ normalized, event, mirror, hotel, pricing, emailBridge, config },
 				dependencies
 		  );
 	if (["quarantined", "needs_mapping"].includes(result.status)) {
@@ -3418,6 +3799,7 @@ module.exports = {
 	allocateCents,
 	applyActiveUpdate,
 	applyCancellation,
+	applyQueuedEmailCommercialEvidenceToCreateDocument,
 	buildCreateReservationDocument,
 	buildPickedRoomsProjection,
 	candidateMatchesStrongIdentity,

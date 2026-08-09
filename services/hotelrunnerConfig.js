@@ -207,6 +207,34 @@ function getHotelRunnerConfig(env = process.env) {
 			1,
 			250
 		),
+		// Authenticated direct-OTA reservation emails for this property are
+		// archived first and held behind HotelRunner's callback/API path. These
+		// values are deliberately bounded so a malformed environment value cannot
+		// remove the grace period or create an effectively permanent lease/proof.
+		otaEmailFallbackGraceMs: boundedInteger(
+			env.HOTELRUNNER_OTA_EMAIL_FALLBACK_GRACE_MS,
+			180_000,
+			30_000,
+			900_000
+		),
+		otaEmailFallbackLeaseMs: boundedInteger(
+			env.HOTELRUNNER_OTA_EMAIL_FALLBACK_LEASE_MS,
+			300_000,
+			30_000,
+			900_000
+		),
+		otaEmailFallbackProofTtlMs: boundedInteger(
+			env.HOTELRUNNER_OTA_EMAIL_FALLBACK_PROOF_TTL_MS,
+			120_000,
+			30_000,
+			600_000
+		),
+		otaEmailFallbackMaxAttempts: boundedInteger(
+			env.HOTELRUNNER_OTA_EMAIL_FALLBACK_MAX_ATTEMPTS,
+			12,
+			3,
+			30
+		),
 		quota: {
 			propertyDaily: boundedInteger(
 				env.HOTELRUNNER_PROPERTY_DAILY_BUDGET,
