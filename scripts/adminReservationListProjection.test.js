@@ -11,6 +11,9 @@ const Rooms = require("../models/rooms");
 const {
   ADMIN_RESERVATION_LIST_PROJECTION,
 } = require("../services/adminReservationListProjection");
+const {
+  buildAuthenticatedProviderCommercialEvidence,
+} = require("../services/otaCommercialEvidence");
 const { paginatedReservationList } = require("../controllers/janat");
 
 const HOTEL_A = new mongoose.Types.ObjectId("64a000000000000000000001");
@@ -431,6 +434,16 @@ test("projection preserves super-admin and hotel-management visibility transform
       sourceDocuments: visibilityDocuments,
     });
     assert.deepEqual(projected.body, legacy.body);
+    if (profile.__hotelManagementSourceView) {
+      assert.equal(
+        Object.hasOwn(projected.body.data[0], "gross_total_amount"),
+        false
+      );
+      assert.equal(
+        Object.hasOwn(projected.body.data[0], "net_total_amount"),
+        false
+      );
+    }
   }
 });
 
@@ -449,6 +462,130 @@ test("gateway diagnostic exclusions retain the verified VCC summary fields", asy
     "Bank of America"
   );
   assert.equal(projected.body.data[0].vcc_capture_summary.amountUsd, 250);
+});
+
+test("compact admin rows retain verified OTA gross and net without exposing nested evidence", async () => {
+  const otaReservation = baseReservation({
+    id: "65c000000000000000000003",
+    hotelId: HOTEL_A,
+    hotelName: "Hotel Alpha",
+    confirmation: "ota-verified-1",
+    name: "Verified OTA Guest",
+    createdAt: now,
+  });
+  otaReservation.booking_source = "agoda";
+  otaReservation.customer_details.booking_source = "agoda";
+  otaReservation.total_amount = 148.96;
+  otaReservation.adminPricing = {
+    mode: "hotelrunner_api",
+    propertyCurrency: "SAR",
+    clientTotal: 148.96,
+    netAfterExpensesTotal: 92.18,
+    otaExpenseTotal: 56.78,
+    rootTotal: 150,
+    commercialVerified: false,
+  };
+  otaReservation.supplierData = {
+    otaProvider: "agoda",
+    otaCommercialEvidenceStaleReason: "",
+    hotelRunner: { transport: "hotelrunner_api" },
+    otaCommercialEvidence: buildAuthenticatedProviderCommercialEvidence({
+      provider: "agoda",
+      authenticatedProvider: "agoda",
+      sourceAuthenticated: true,
+      sourceTrusted: true,
+      sourceType: "authenticated_provider_portal",
+      sourceCurrency: "SAR",
+      propertyCurrency: "SAR",
+      bookingBasis: "reservation_total",
+      sourceHash: "a".repeat(64),
+      sourceTimestamp: "2026-08-09T12:00:00.000Z",
+      sourceId: "agoda-ota-verified-1",
+      guestGross: { verified: true, amount: 148.96 },
+      hotelPayout: { verified: true, amount: 92.18 },
+    }),
+  };
+
+  const result = await runHandler({
+    honorProjection: true,
+    query: { searchQuery: "ota-verified-1" },
+    profile: { _id: ADMIN_ID, role: 7000, roleDescription: "order taker" },
+    sourceDocuments: [otaReservation],
+  });
+
+  assert.equal(result.body.data.length, 1);
+  assert.equal(result.body.data[0].gross_total_amount, 148.96);
+  assert.equal(result.body.data[0].net_total_amount, 92.18);
+  assert.equal(result.body.data[0].financial_totals_currency, "SAR");
+  assert.equal(result.body.data[0].gross_total_available, true);
+  assert.equal(result.body.data[0].net_total_available, true);
+  assert.equal(result.body.data[0].supplierData.otaCommercialEvidence, undefined);
+});
+
+test("financial totals resolve from the persisted OTA summary before the display summary is derived", async () => {
+  const otaReservation = baseReservation({
+    id: "65d000000000000000000004",
+    hotelId: HOTEL_A,
+    hotelName: "Hotel Alpha",
+    confirmation: "ota-summary-only-1",
+    name: "Summary Only OTA Guest",
+    createdAt: now,
+  });
+  otaReservation.booking_source = "agoda";
+  otaReservation.customer_details.booking_source = "agoda";
+  otaReservation.total_amount = 148.96;
+  otaReservation.adminPricing = {
+    mode: "hotelrunner_api",
+    propertyCurrency: "SAR",
+    clientTotal: 148.96,
+    rootTotal: 150,
+    commercialVerified: false,
+  };
+  otaReservation.ota_financial_summary = {
+    propertyCurrency: "SAR",
+    clientTotal: 148.96,
+    netAfterExpenses: 92.18,
+    otaExpenseTotal: 56.78,
+    commercialVerified: true,
+  };
+  otaReservation.supplierData = {
+    otaProvider: "agoda",
+    otaCommercialEvidenceStaleReason: "",
+    hotelRunner: { transport: "hotelrunner_api" },
+    otaCommercialEvidence: buildAuthenticatedProviderCommercialEvidence({
+      provider: "agoda",
+      authenticatedProvider: "agoda",
+      sourceAuthenticated: true,
+      sourceTrusted: true,
+      sourceType: "authenticated_provider_portal",
+      sourceCurrency: "SAR",
+      propertyCurrency: "SAR",
+      bookingBasis: "reservation_total",
+      sourceHash: "b".repeat(64),
+      sourceTimestamp: "2026-08-09T12:00:00.000Z",
+      sourceId: "agoda-ota-summary-only-1",
+      guestGross: { verified: true, amount: 148.96 },
+      hotelPayout: { verified: true, amount: 92.18 },
+    }),
+  };
+
+  const result = await runHandler({
+    honorProjection: true,
+    query: { searchQuery: "ota-summary-only-1" },
+    profile: { _id: ADMIN_ID, role: 7000, roleDescription: "order taker" },
+    sourceDocuments: [otaReservation],
+  });
+
+  assert.equal(result.body.data.length, 1);
+  assert.equal(result.body.data[0].gross_total_amount, 148.96);
+  assert.equal(result.body.data[0].net_total_amount, 92.18);
+  assert.equal(result.body.data[0].financial_totals_currency, "SAR");
+  assert.equal(result.body.data[0].net_total_available, true);
+  assert.equal(
+    result.body.data[0].ota_financial_summary.netAfterExpenses,
+    150,
+    "the derived display summary intentionally differs from the persisted verified payout"
+  );
 });
 
 test("the critical admin route retains its complete authentication and access middleware", () => {

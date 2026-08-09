@@ -110,6 +110,9 @@ const {
 	compactAdminPricingForReservationList,
 } = require("../services/adminReservationListPricing");
 const {
+	resolveAdminReservationFinancialTotals,
+} = require("../services/adminReservationFinancialTotals");
+const {
 	ADMIN_RESERVATION_LIST_PROJECTION,
 } = require("../services/adminReservationListProjection");
 const {
@@ -4696,6 +4699,13 @@ exports.paginatedReservationList = async (req, res) => {
 
 		// 4) Format each doc to compute payment_status (PayPal-aware)
 		const capturedConfirmationNumbers = ["2944008828"]; // manual override if needed
+		const isHotelManagementViewer = Boolean(
+			req.profile?.__hotelManagementSourceView ||
+				Number(req.profile?.role) === 2000 ||
+				/hotel management|hotel owner/i.test(
+					String(req.profile?.roleDescription || "")
+				)
+		);
 
 		function formatReservation(doc) {
 			const customer_details = doc?.customer_details || {};
@@ -4796,6 +4806,12 @@ exports.paginatedReservationList = async (req, res) => {
 				doc,
 				req.profile,
 			);
+			// Resolve commercial roles while the original persisted OTA summary and
+			// evidence are still intact. The display summary below is intentionally
+			// derived and must not change the values used by the table/export contract.
+			const financialTotals = isHotelManagementViewer
+				? null
+				: resolveAdminReservationFinancialTotals(doc);
 
 			return {
 				...doc,
@@ -4812,6 +4828,15 @@ exports.paginatedReservationList = async (req, res) => {
 				isCheckinToday,
 				isCheckoutToday,
 				isPaymentTriggered,
+				...(financialTotals
+					? {
+							gross_total_amount: financialTotals.grossTotalAmount,
+							net_total_amount: financialTotals.netTotalAmount,
+							financial_totals_currency: financialTotals.currency,
+							gross_total_available: financialTotals.grossAvailable,
+							net_total_available: financialTotals.netAvailable,
+					  }
+					: {}),
 				...(otaFinancialSummary
 					? {
 							hotel_visible_amount:
@@ -5251,6 +5276,20 @@ exports.paginatedReservationList = async (req, res) => {
 				days_of_residence: reservation.days_of_residence || 0,
 				total_rooms: reservation.total_rooms || 0,
 				total_amount: reservation.total_amount || 0,
+				...(!isHotelManagementViewer &&
+				Object.prototype.hasOwnProperty.call(
+					reservation,
+					"gross_total_amount"
+				)
+					? {
+							gross_total_amount: reservation.gross_total_amount,
+							net_total_amount: reservation.net_total_amount,
+							financial_totals_currency:
+								reservation.financial_totals_currency,
+							gross_total_available: reservation.gross_total_available,
+							net_total_available: reservation.net_total_available,
+					  }
+					: {}),
 				paid_amount: reservation.paid_amount || 0,
 				commission: reservation.commission || 0,
 				paid_amount_breakdown: compactMoneyObject(
