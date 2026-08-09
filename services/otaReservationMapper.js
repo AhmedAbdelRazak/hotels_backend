@@ -94,7 +94,11 @@ const STABLE_DEFAULT_RATE_CURRENCIES = new Set(["USD", "AED", "QAR", "BHD", "OMR
 const EXCHANGE_RATE_CACHE_TTL_MS = Number(
 	process.env.OTA_EXCHANGE_RATE_CACHE_TTL_MS || 6 * 60 * 60 * 1000
 );
+const MAX_LIVE_EXCHANGE_RATE_SOURCE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_LIVE_EXCHANGE_RATE_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const exchangeRateCache = new Map();
+const TRUSTED_EXCHANGE_RATE_PROVIDER = "exchange_rate_api";
+const TRUSTED_EXCHANGE_RATE_SOURCE_TYPE = "trusted_exchange_evidence";
 
 const PROVIDER_LABELS = {
 	expedia: "Expedia",
@@ -934,7 +938,7 @@ function getSarExchangeRate(currency) {
 
 async function fetchWithHardTimeout(
 	url,
-	{ fetchImpl = fetch, timeoutMs = 8000 } = {}
+	{ fetchImpl = fetch, timeoutMs = 8000, responseReader = null } = {}
 ) {
 	const boundedTimeoutMs = Math.max(1, Number(timeoutMs || 8000));
 	const controller =
@@ -951,11 +955,17 @@ async function fetchWithHardTimeout(
 		}, boundedTimeoutMs);
 	});
 	try {
-		return await Promise.race([
-			fetchImpl(url, {
+		const requestPromise = (async () => {
+			const response = await fetchImpl(url, {
 				timeout: boundedTimeoutMs,
 				...(controller ? { signal: controller.signal } : {}),
-			}),
+			});
+			return typeof responseReader === "function"
+				? responseReader(response)
+				: response;
+		})();
+		return await Promise.race([
+			requestPromise,
 			timeoutPromise,
 		]);
 	} finally {
@@ -963,42 +973,273 @@ async function fetchWithHardTimeout(
 	}
 }
 
-async function fetchLiveSarExchangeRate(currency) {
-	const code = String(currency || "SAR").trim().toUpperCase() || "SAR";
+function normalizedExchangeRateTimestamp(value, fallback) {
+	const parsed = value instanceof Date ? value : new Date(value);
+	if (Number.isFinite(parsed.getTime())) return parsed.toISOString();
+	const fallbackDate = fallback instanceof Date ? fallback : new Date(fallback);
+	return Number.isFinite(fallbackDate.getTime())
+		? fallbackDate.toISOString()
+		: new Date().toISOString();
+}
+
+function validatedLiveExchangeRateTimestamp(value, fetchedAtMs) {
+	const parsed = value instanceof Date ? value : new Date(value);
+	const timestampMs = parsed.getTime();
+	if (
+		!Number.isFinite(timestampMs) ||
+		!Number.isFinite(fetchedAtMs) ||
+		timestampMs > fetchedAtMs + MAX_LIVE_EXCHANGE_RATE_FUTURE_SKEW_MS ||
+		fetchedAtMs - timestampMs > MAX_LIVE_EXCHANGE_RATE_SOURCE_AGE_MS
+	) {
+		return "";
+	}
+	return parsed.toISOString();
+}
+
+function trustedExchangeRateEvidence({
+	sourceCurrency,
+	propertyCurrency = "SAR",
+	rate,
+	sourceTimestamp,
+} = {}) {
+	const from = String(sourceCurrency || "")
+		.trim()
+		.toUpperCase();
+	const to = String(propertyCurrency || "")
+		.trim()
+		.toUpperCase();
+	const normalizedRate = Number(Number(rate).toFixed(10));
+	const sourceDate =
+		sourceTimestamp instanceof Date
+			? sourceTimestamp
+			: new Date(sourceTimestamp);
+	if (
+		!(/^[A-Z]{3}$/.test(from) && /^[A-Z]{3}$/.test(to)) ||
+		!Number.isFinite(normalizedRate) ||
+		normalizedRate <= 0 ||
+		normalizedRate > 1_000_000 ||
+		!Number.isFinite(sourceDate.getTime())
+	) {
+		return null;
+	}
+	const timestamp = sourceDate.toISOString();
+	const sanitizedSourceTuple = {
+		provider: TRUSTED_EXCHANGE_RATE_PROVIDER,
+		sourceType: TRUSTED_EXCHANGE_RATE_SOURCE_TYPE,
+		sourceCurrency: from,
+		propertyCurrency: to,
+		rate: normalizedRate,
+		sourceTimestamp: timestamp,
+	};
+	const sourceHash = crypto
+		.createHash("sha256")
+		.update(JSON.stringify(sanitizedSourceTuple), "utf8")
+		.digest("hex");
+	return {
+		trusted: true,
+		verified: true,
+		sourceCurrency: from,
+		propertyCurrency: to,
+		rate: normalizedRate,
+		provenance: {
+			provider: TRUSTED_EXCHANGE_RATE_PROVIDER,
+			sourceType: TRUSTED_EXCHANGE_RATE_SOURCE_TYPE,
+			sourceHash,
+			sourceTimestamp: timestamp,
+			sourceId: `exchange-rate-api-${from.toLowerCase()}-${to.toLowerCase()}-${sourceHash.slice(
+				0,
+				24
+			)}`,
+		},
+	};
+}
+
+function validatedTrustedExchangeRateEvidence(
+	value,
+	{ sourceCurrency = "", propertyCurrency = "SAR", rate = null } = {}
+) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	if (value.trusted !== true || value.verified !== true) return null;
+	const expected = trustedExchangeRateEvidence({
+		sourceCurrency: value.sourceCurrency,
+		propertyCurrency: value.propertyCurrency,
+		rate: value.rate,
+		sourceTimestamp: value.provenance?.sourceTimestamp,
+	});
+	if (!expected) return null;
+	if (
+		(sourceCurrency &&
+			expected.sourceCurrency !==
+				String(sourceCurrency).trim().toUpperCase()) ||
+		(propertyCurrency &&
+			expected.propertyCurrency !==
+				String(propertyCurrency).trim().toUpperCase()) ||
+		(rate !== null &&
+			rate !== undefined &&
+			Math.abs(expected.rate - Number(rate)) > 0.0000000001) ||
+		value.provenance?.provider !== expected.provenance.provider ||
+		value.provenance?.sourceType !== expected.provenance.sourceType ||
+		value.provenance?.sourceHash !== expected.provenance.sourceHash ||
+		value.provenance?.sourceId !== expected.provenance.sourceId
+	) {
+		return null;
+	}
+	return expected;
+}
+
+function cloneLiveExchangeRate(value = {}, source = value.source) {
+	return {
+		...value,
+		source,
+		currencyConversionEvidence: value.currencyConversionEvidence
+			? {
+					...value.currencyConversionEvidence,
+					provenance: {
+						...value.currencyConversionEvidence.provenance,
+					},
+			  }
+			: null,
+	};
+}
+
+function boundedExchangeRateErrorCode(error) {
+	const marker = String(
+		error?.code || error?.name || "exchange_rate_request_failed"
+	)
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "_")
+		.slice(0, 80);
+	return marker || "exchange_rate_request_failed";
+}
+
+async function fetchLiveSarExchangeRate(
+	currency,
+	{
+		apiKey = process.env.EXCHANGE_RATE,
+		fetchImpl = fetch,
+		now = Date.now,
+		cache = exchangeRateCache,
+		timeoutMs = 8000,
+	} = {}
+) {
+	const code =
+		String(currency || "SAR")
+			.trim()
+			.toUpperCase() || "SAR";
 	if (!code || code === "SAR") {
 		return { code: "SAR", rate: 1, source: "identity" };
 	}
-	const apiKey = String(process.env.EXCHANGE_RATE || "").trim();
-	if (!apiKey) return null;
+	const credential = String(apiKey || "").trim();
+	if (!credential) return null;
+	const nowValue = typeof now === "function" ? now() : now;
+	const nowDate = nowValue instanceof Date ? nowValue : new Date(nowValue);
+	const nowMs = Number.isFinite(nowDate.getTime())
+		? nowDate.getTime()
+		: Date.now();
 
-	const cached = exchangeRateCache.get(code);
-	if (cached && Date.now() - cached.fetchedAt < EXCHANGE_RATE_CACHE_TTL_MS) {
-		return { code, rate: cached.rate, source: "exchange_rate_api_cached" };
+	const cached = cache?.get?.(code);
+	const cachedAtMs = new Date(cached?.fetchedAt || 0).getTime();
+	const cachedEvidence = validatedTrustedExchangeRateEvidence(
+		cached?.currencyConversionEvidence,
+		{
+			sourceCurrency: code,
+			propertyCurrency: "SAR",
+			rate: cached?.rate,
+		}
+	);
+	if (
+		cached &&
+		Number.isFinite(cachedAtMs) &&
+		nowMs - cachedAtMs >= 0 &&
+		nowMs - cachedAtMs < EXCHANGE_RATE_CACHE_TTL_MS &&
+		cachedEvidence &&
+		validatedLiveExchangeRateTimestamp(
+			cachedEvidence.provenance.sourceTimestamp,
+			nowMs
+		)
+	) {
+		return cloneLiveExchangeRate({
+			code,
+			rate: cachedEvidence.rate,
+			source: "exchange_rate_api_cached",
+			fetchedAt: cached.fetchedAt,
+			sourceTimestamp: cachedEvidence.provenance.sourceTimestamp,
+			currencyConversionEvidence: cachedEvidence,
+		});
 	}
 
 	try {
-		const response = await fetchWithHardTimeout(
-			`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${encodeURIComponent(
+		const responsePayload = await fetchWithHardTimeout(
+			`https://v6.exchangerate-api.com/v6/${credential}/pair/${encodeURIComponent(
 				code
 			)}/SAR/`,
-			{ timeoutMs: 8000 }
+			{
+				fetchImpl,
+				timeoutMs,
+				responseReader: async (response) => ({
+					response,
+					data:
+						response?.ok === false ? null : await response.json(),
+				}),
+			}
 		);
-		const data = await response.json();
+		const { response, data } = responsePayload;
+		if (response?.ok === false) return null;
 		const rate = Number(data?.conversion_rate);
-		if (data?.result === "success" && Number.isFinite(rate) && rate > 0) {
-			exchangeRateCache.set(code, { rate, fetchedAt: Date.now() });
-			return { code, rate, source: "exchange_rate_api" };
+		const responseSourceCurrency = String(data?.base_code || "")
+			.trim()
+			.toUpperCase();
+		const responsePropertyCurrency = String(data?.target_code || "")
+			.trim()
+			.toUpperCase();
+		const fetchedAt = new Date(nowMs).toISOString();
+		const serviceTimestamp = Number(data?.time_last_update_unix);
+		const sourceTimestamp =
+			Number.isFinite(serviceTimestamp) && serviceTimestamp > 0
+				? validatedLiveExchangeRateTimestamp(
+						new Date(serviceTimestamp * 1000),
+						nowMs
+				  )
+				: "";
+		const evidence = trustedExchangeRateEvidence({
+			sourceCurrency: code,
+			propertyCurrency: "SAR",
+			rate,
+			sourceTimestamp,
+		});
+		if (
+			data?.result === "success" &&
+			responseSourceCurrency === code &&
+			responsePropertyCurrency === "SAR" &&
+			evidence
+		) {
+			const live = {
+				code,
+				rate: evidence.rate,
+				source: "exchange_rate_api",
+				fetchedAt,
+				sourceTimestamp,
+				currencyConversionEvidence: evidence,
+			};
+			cache?.set?.(code, cloneLiveExchangeRate(live));
+			return cloneLiveExchangeRate(live);
 		}
 		console.warn("[ota-reconcile] currency.live_rate.unavailable", {
 			currency: code,
-			result: data?.result || "",
-			errorType: data?.["error-type"] || "",
+			reason:
+				data?.result !== "success"
+					? "response_not_success"
+					: responseSourceCurrency !== code ||
+					  responsePropertyCurrency !== "SAR"
+					? "pair_mismatch"
+					: "invalid_rate_or_provenance",
 		});
 		return null;
 	} catch (error) {
 		console.warn("[ota-reconcile] currency.live_rate.error", {
 			currency: code,
-			error: error.message,
+			errorCode: boundedExchangeRateErrorCode(error),
 		});
 		return null;
 	}
@@ -1064,11 +1305,46 @@ function getVccAmountConversionMeta(amount, currency) {
 	return withUsdConversionMeta(getSarConversionMeta(amount, currency));
 }
 
-async function getSarConversionMetaAsync(amount, currency) {
+async function getSarConversionMetaAsync(
+	amount,
+	currency,
+	{ rateLookup = fetchLiveSarExchangeRate, ...rateLookupOptions } = {}
+) {
 	const numericAmount = Number(amount || 0);
-	const code = String(currency || "SAR").trim().toUpperCase() || "SAR";
-	const liveExchange = await fetchLiveSarExchangeRate(code);
-	const exchange = liveExchange || getSarExchangeRate(code);
+	const code =
+		String(currency || "SAR")
+			.trim()
+			.toUpperCase() || "SAR";
+	let liveExchange = null;
+	try {
+		liveExchange = await rateLookup(code, rateLookupOptions);
+	} catch (error) {
+		console.warn("[ota-reconcile] currency.live_rate.lookup_error", {
+			currency: code,
+			errorCode: boundedExchangeRateErrorCode(error),
+		});
+	}
+	const trustedEvidence = validatedTrustedExchangeRateEvidence(
+		liveExchange?.currencyConversionEvidence,
+		{
+			sourceCurrency: code,
+			propertyCurrency: "SAR",
+			rate: liveExchange?.rate,
+		}
+	);
+	const trustedLiveExchange = trustedEvidence
+		? {
+				...liveExchange,
+				code,
+				rate: trustedEvidence.rate,
+				currencyConversionEvidence: trustedEvidence,
+		  }
+		: code === "SAR" && Number(liveExchange?.rate) === 1
+		? { code: "SAR", rate: 1, source: "identity" }
+		: null;
+	const exchange = trustedLiveExchange || getSarExchangeRate(code);
+	const convertedAt =
+		trustedLiveExchange?.fetchedAt || new Date().toISOString();
 	if (!numericAmount) {
 		return {
 			sourceAmount: 0,
@@ -1076,7 +1352,8 @@ async function getSarConversionMetaAsync(amount, currency) {
 			exchangeRateToSar: exchange.rate || 0,
 			exchangeRateSource: exchange.source,
 			totalAmountSar: 0,
-			convertedAt: new Date().toISOString(),
+			convertedAt,
+			currencyConversionEvidence: trustedEvidence,
 		};
 	}
 	return {
@@ -1085,12 +1362,15 @@ async function getSarConversionMetaAsync(amount, currency) {
 		exchangeRateToSar: exchange.rate || 0,
 		exchangeRateSource: exchange.source,
 		totalAmountSar: exchange.rate ? round2(numericAmount * exchange.rate) : 0,
-		convertedAt: new Date().toISOString(),
+		convertedAt,
+		currencyConversionEvidence: trustedEvidence,
 	};
 }
 
 async function getVccAmountConversionMetaAsync(amount, currency) {
-	return withUsdConversionMeta(await getSarConversionMetaAsync(amount, currency));
+	return withUsdConversionMeta(
+		await getSarConversionMetaAsync(amount, currency)
+	);
 }
 
 function toSarAmount(amount, currency) {
@@ -13269,37 +13549,103 @@ function requiredNewReservationMissing(normalized = {}) {
 	return missing;
 }
 
-async function applyLiveSarConversion(normalized = {}) {
+async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 	const next = {
 		...normalized,
 		warnings: [...(normalized.warnings || [])],
 		errors: [...(normalized.errors || [])],
 	};
-	const amount = Number(next.amount || 0);
-	if (amount) {
-		const conversion = await getSarConversionMetaAsync(
-			amount,
-			next.currency || "SAR"
+	const initialPaymentSummary = { ...(next.paymentSummary || {}) };
+	const rawSourceAmount =
+		next.sourceAmount ??
+		initialPaymentSummary.sourceTotalGuestPaymentAmount ??
+		next.amount ??
+		null;
+	const amount = Number(rawSourceAmount);
+	const sourceCurrency = normalizeMoneyCurrency(
+		next.sourceCurrency ||
+			initialPaymentSummary.sourceCurrency ||
+			(next.propertyConversionVerified === true ? "" : next.currency) ||
+			""
+	);
+	const summarySourceCurrency = normalizeMoneyCurrency(
+		initialPaymentSummary.sourceCurrency || sourceCurrency
+	);
+	const sourceCurrencyConflict = Boolean(
+		sourceCurrency &&
+			summarySourceCurrency &&
+			sourceCurrency !== summarySourceCurrency
+	);
+	if (
+		Number.isFinite(amount) &&
+		amount > 0 &&
+		sourceCurrency &&
+		!sourceCurrencyConflict
+	) {
+		const suppliedEvidence = validatedTrustedExchangeRateEvidence(
+			next.currencyConversionEvidence,
+			{
+				sourceCurrency,
+				propertyCurrency: "SAR",
+			}
 		);
-		const propertyConversionVerified =
-			conversion.sourceCurrency === "SAR" &&
-			conversion.exchangeRateSource === "identity" &&
-			Math.abs(Number(conversion.exchangeRateToSar) - 1) <= 0.000001;
+		const conversion = suppliedEvidence
+			? {
+					sourceAmount: amount,
+					sourceCurrency,
+					exchangeRateToSar: suppliedEvidence.rate,
+					exchangeRateSource: "exchange_rate_api_stored",
+					totalAmountSar: round2(amount * suppliedEvidence.rate),
+					convertedAt: normalizedExchangeRateTimestamp(
+						next.amountConvertedAt,
+						suppliedEvidence.provenance.sourceTimestamp
+					),
+					currencyConversionEvidence: suppliedEvidence,
+			  }
+			: await getSarConversionMetaAsync(
+					amount,
+					sourceCurrency,
+					conversionOptions
+			  );
+		const trustedEvidence = validatedTrustedExchangeRateEvidence(
+			conversion.currencyConversionEvidence,
+			{
+				sourceCurrency,
+				propertyCurrency: "SAR",
+				rate: conversion.exchangeRateToSar,
+			}
+		);
+		const propertyConversionVerified = Boolean(
+			(conversion.sourceCurrency === "SAR" &&
+				conversion.exchangeRateSource === "identity" &&
+				Math.abs(Number(conversion.exchangeRateToSar) - 1) <= 0.000001) ||
+				trustedEvidence
+		);
+		next.sourceAmount = amount;
+		next.sourceCurrency = sourceCurrency;
 		next.propertyCurrency = "SAR";
 		next.propertyConversionVerified = propertyConversionVerified;
 		next.totalAmountSar = propertyConversionVerified
 			? conversion.totalAmountSar
 			: null;
+		next.amount = propertyConversionVerified ? conversion.totalAmountSar : null;
+		next.currency = propertyConversionVerified ? "SAR" : sourceCurrency;
 		next.exchangeRateToSar = conversion.exchangeRateToSar;
 		next.exchangeRateSource = conversion.exchangeRateSource;
-		next.amountConvertedAt = conversion.convertedAt;
+		next.sourceExchangeRateToSar = conversion.exchangeRateToSar;
+		next.sourceExchangeRateSource = conversion.exchangeRateSource;
+		next.amountConvertedAt = propertyConversionVerified
+			? conversion.convertedAt
+			: "";
+		if (trustedEvidence) next.currencyConversionEvidence = trustedEvidence;
+		else delete next.currencyConversionEvidence;
 
 		if (
 			conversion.sourceCurrency !== "SAR" &&
 			conversion.exchangeRateSource === "fallback_default" &&
-			!STABLE_DEFAULT_RATE_CURRENCIES.has(conversion.sourceCurrency)
+			!propertyConversionVerified
 		) {
-			const warning = `Using fallback SAR exchange rate for ${conversion.sourceCurrency}; configure OTA_${conversion.sourceCurrency}_TO_SAR_RATE or EXCHANGE_RATE for exact production accounting.`;
+			const warning = `Trusted live SAR exchange evidence is unavailable for ${conversion.sourceCurrency}; source-currency amounts were retained without materializing fallback property money.`;
 			if (!next.warnings.includes(warning)) next.warnings.push(warning);
 		}
 		if (
@@ -13310,39 +13656,54 @@ async function applyLiveSarConversion(normalized = {}) {
 			if (!next.errors.includes(error)) next.errors.push(error);
 		}
 
-		const paymentSummary = { ...(next.paymentSummary || {}) };
-		const sourcePayoutAmount = Number(
-			paymentSummary.sourceTotalPayoutAmount || 0
+		const paymentSummary = { ...initialPaymentSummary };
+		const rawSourcePayoutAmount = paymentSummary.sourceTotalPayoutAmount;
+		const sourcePayoutAmount = Number(rawSourcePayoutAmount);
+		const hasSourcePayout = Boolean(
+			rawSourcePayoutAmount !== null &&
+				rawSourcePayoutAmount !== undefined &&
+				rawSourcePayoutAmount !== "" &&
+				Number.isFinite(sourcePayoutAmount) &&
+				sourcePayoutAmount >= 0
 		);
-		const summarySourceCurrency = normalizeMoneyCurrency(
-			paymentSummary.sourceCurrency || next.sourceCurrency || next.currency || ""
+		const sourcePayoutCurrency = normalizeMoneyCurrency(
+			paymentSummary.sourceTotalPayoutCurrency ||
+				next.sourcePayoutCurrency ||
+				summarySourceCurrency ||
+				sourceCurrency
 		);
-		if (
-			sourcePayoutAmount > 0 &&
-			summarySourceCurrency === conversion.sourceCurrency &&
-			Number(conversion.exchangeRateToSar || 0) > 0
-		) {
-			const payoutAmountSar = propertyConversionVerified
-				? round2(
-						sourcePayoutAmount * Number(conversion.exchangeRateToSar)
-					  )
-				: null;
-			next.totalPayoutSar = payoutAmountSar;
-			next.netAfterExpensesTotal = payoutAmountSar;
-			next.paymentSummary = {
-				...paymentSummary,
-				totalGuestPaymentAmount: propertyConversionVerified
-					? conversion.totalAmountSar
-					: null,
-				totalPayoutAmount: payoutAmountSar,
-				currency: propertyConversionVerified ? "SAR" : null,
-				propertyCurrency: "SAR",
-				propertyConversionVerified,
-				exchangeRateToSar: conversion.exchangeRateToSar,
-				exchangeRateSource: conversion.exchangeRateSource,
-				amountConvertedAt: conversion.convertedAt,
-			};
-		}
+		const payoutCanMaterialize = Boolean(
+			hasSourcePayout &&
+				propertyConversionVerified &&
+				sourcePayoutCurrency === sourceCurrency
+		);
+		const payoutAmountSar = payoutCanMaterialize
+			? round2(sourcePayoutAmount * Number(conversion.exchangeRateToSar))
+			: null;
+		next.sourcePayoutAmount = hasSourcePayout ? sourcePayoutAmount : null;
+		next.sourcePayoutCurrency = hasSourcePayout ? sourcePayoutCurrency : "";
+		next.totalPayoutSar = payoutAmountSar;
+		next.netAfterExpensesTotal = payoutAmountSar;
+		next.paymentSummary = {
+			...paymentSummary,
+			sourceCurrency,
+			sourceTotalGuestPaymentAmount:
+				paymentSummary.sourceTotalGuestPaymentAmount ?? amount,
+			sourceTotalPayoutAmount: hasSourcePayout ? sourcePayoutAmount : null,
+			sourceTotalPayoutCurrency: hasSourcePayout ? sourcePayoutCurrency : "",
+			totalGuestPaymentAmount: propertyConversionVerified
+				? conversion.totalAmountSar
+				: null,
+			totalPayoutAmount: payoutAmountSar,
+			currency: propertyConversionVerified ? "SAR" : null,
+			propertyCurrency: "SAR",
+			propertyConversionVerified,
+			exchangeRateToSar: conversion.exchangeRateToSar,
+			exchangeRateSource: conversion.exchangeRateSource,
+			amountConvertedAt: propertyConversionVerified
+				? conversion.convertedAt
+				: "",
+		};
 		if (
 			propertyConversionVerified &&
 			Array.isArray(next.nightlyPricingSource)
@@ -13359,6 +13720,16 @@ async function applyLiveSarConversion(normalized = {}) {
 				next.nightlyPricingSar = convertedNightlyPricing;
 			}
 		}
+	} else if (sourceCurrencyConflict) {
+		next.propertyCurrency = "SAR";
+		next.propertyConversionVerified = false;
+		next.totalAmountSar = null;
+		next.totalPayoutSar = null;
+		next.netAfterExpensesTotal = null;
+		delete next.currencyConversionEvidence;
+		const warning =
+			"Source gross and payment-summary currencies conflict; SAR conversion was not materialized.";
+		if (!next.warnings.includes(warning)) next.warnings.push(warning);
 	}
 
 	const vcc = { ...(next.vcc || {}) };
@@ -13380,8 +13751,7 @@ async function applyLiveSarConversion(normalized = {}) {
 		}
 		vcc.amountToChargeExchangeRateToSar = vccConversion.exchangeRateToSar;
 		vcc.amountToChargeExchangeRateSource = vccConversion.exchangeRateSource;
-		vcc.amountToChargeUsdExchangeRateToSar =
-			vccConversion.usdExchangeRateToSar;
+		vcc.amountToChargeUsdExchangeRateToSar = vccConversion.usdExchangeRateToSar;
 		vcc.amountToChargeUsdExchangeRateSource =
 			vccConversion.usdExchangeRateSource;
 		vcc.amountToChargeConvertedAt = vccConversion.convertedAt;
@@ -13419,7 +13789,10 @@ function documentHasSourcePricing(document = {}) {
 	const rooms = Array.isArray(document.pickedRoomsType)
 		? document.pickedRoomsType
 		: [];
-	const stayDates = generateDateRange(document.checkin_date, document.checkout_date);
+	const stayDates = generateDateRange(
+		document.checkin_date,
+		document.checkout_date
+	);
 	return (
 		stayDates.length > 0 &&
 		rooms.length > 0 &&
@@ -13432,7 +13805,8 @@ function documentHasSourcePricing(document = {}) {
 
 async function normalizeBuiltReservationDocument(document, warnings) {
 	if (documentHasSourcePricing(document)) {
-		document.pickedRoomsPricing = document.pickedRoomsPricing || document.pickedRoomsType;
+		document.pickedRoomsPricing =
+			document.pickedRoomsPricing || document.pickedRoomsType;
 		return document;
 	}
 	const pricingResult = await normalizeReservationCreationPricing(document, {

@@ -10,6 +10,7 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const { reconcileOtaReservation } = require("./otaReservationMapper");
 const { __private } = require("./expediaReservationApply");
+const { __private: collectorPrivate } = require("./expediaReservationCollector");
 const {
 	validateOtaCommercialEvidence,
 } = require("./otaCommercialEvidence");
@@ -422,6 +423,94 @@ test("matched Expedia portal evidence enriches the same HotelRunner pricing with
 			.flatMap((room) => room.pricingByDay)
 			.every((day) => day.rootPrice === 89)
 	);
+});
+
+test("trusted collector USD evidence flows through matched Expedia apply with cent-exact SAR roles", async () => {
+	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
+	const fetchedAt = "2026-08-09T06:00:00.000Z";
+	const candidate = await collectorPrivate.applyTrustedCandidateSarConversion(
+		matchedExistingCandidate({
+			sourceCurrency: "USD",
+			sourceAmount: 146.46,
+			amount: null,
+			totalAmountSar: null,
+			paymentSummary: {
+				sourceCurrency: "USD",
+				sourceTotalGuestPaymentAmount: 146.46,
+				sourceTotalPayoutAmount: 112.92,
+			},
+		}),
+		{
+			apiKey: "test-credential-never-persist",
+			cache: new Map(),
+			now: () => Date.parse(fetchedAt),
+			fetchImpl: async () => ({
+				ok: true,
+				async json() {
+					return {
+						result: "success",
+						base_code: "USD",
+						target_code: "SAR",
+						conversion_rate: 3.75,
+						time_last_update_unix: Date.parse(sourceTimestamp) / 1000,
+					};
+				},
+			}),
+		}
+	);
+	const job = matchedExistingJob();
+	const normalized = __private.candidateToNormalized({
+		candidate: {
+			...candidate,
+			reservationId: candidate.confirmationNumber,
+		},
+		job,
+		intent: "commercial_enrichment",
+		eventType: "commercial_enrichment",
+		statusToApply: "",
+	});
+	const evidence = normalized.otaCommercialEvidence;
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+	assert.equal(evidence.roles.guestGross.sourceAmount, 146.46);
+	assert.equal(evidence.roles.guestGross.propertyAmount, 549.23);
+	assert.equal(evidence.roles.hotelPayout.sourceAmount, 112.92);
+	assert.equal(evidence.roles.hotelPayout.propertyAmount, 423.45);
+	assert.equal(evidence.roles.deductionAggregate.sourceAmount, 33.54);
+	assert.equal(evidence.roles.deductionAggregate.propertyAmount, 125.78);
+	assert.equal(evidence.roles.explicitOtaCommission.verified, false);
+	assert.equal(evidence.currencyConversion.rate, 3.75);
+	assert.equal(evidence.provenance.conversion.sourceTimestamp, sourceTimestamp);
+
+	const existing = directHotelRunnerReservation();
+	let persisted = null;
+	const result = await __private.applyMatchedExistingCandidate(
+		{ candidate, job },
+		{
+			findExisting: async () => ({
+				existing,
+				matchedLookupValue: candidate.confirmationNumber,
+			}),
+			persistCommercialUpdate: async (input) => {
+				persisted = input;
+				return { matchedCount: 1 };
+			},
+		}
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.action, "commercial_enriched_existing");
+	assert.ok(persisted);
+	const set = persisted.plan.set;
+	assert.equal(set.total_amount, 549.23);
+	assert.equal(set.commission_ota, null);
+	assert.equal(set["adminPricing.clientTotal"], 549.23);
+	assert.equal(set["adminPricing.netAfterExpensesTotal"], 423.45);
+	assert.equal(set["adminPricing.otaExpenseTotal"], 125.78);
+	assert.equal(sumDailyField(set.pickedRoomsType, "clientPrice"), 549.23);
+	assert.equal(sumDailyField(set.pickedRoomsType, "netAfterExpenses"), 423.45);
+	assert.equal(sumDailyField(set.pickedRoomsType, "otaExpenseAmount"), 125.78);
+	assert.equal(sumDailyField(set.pickedRoomsType, "rootPrice"), 534);
+	assert.equal(existing.sub_total, 534);
 });
 
 test("matched Expedia fallback FX attaches source evidence without canonical money", async () => {
