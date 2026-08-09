@@ -1119,6 +1119,60 @@ test("the trusted rate is dynamic rather than hard-coded to 3.75", async () => {
   assert.equal(plan.expectedDocument.supplierData.otaExchangeRateToSar, 4);
 });
 
+test("signed Expedia deductions retain their source signs and trusted conversion", async () => {
+  const fixture = await preparedFixture();
+  const candidate = fixture.db.collection(COLLECTIONS.portalJob).documents[1]
+    .previewBuckets.matchedExisting[0];
+  Object.assign(candidate.paymentSummary, {
+    sourceNightlyRateAmount: null,
+    sourceTaxesAmount: 22.26,
+    sourceExpediaCompensationAmount: -22.38,
+    sourceAcceleratorAmount: -11.16,
+    nightlyRateAmount: null,
+    taxesAmount: null,
+    expediaCompensationAmount: null,
+    acceleratorAmount: null,
+  });
+
+  const plan = await readyPlan(fixture);
+  const paymentSummary =
+    plan.expectedDocument.supplierData.otaPaymentSummary;
+  assert.equal(paymentSummary.sourceNightlyRateAmount, null);
+  assert.equal(paymentSummary.sourceTaxesAmount, 22.26);
+  assert.equal(paymentSummary.sourceExpediaCompensationAmount, -22.38);
+  assert.equal(paymentSummary.sourceAcceleratorAmount, -11.16);
+  assert.equal(paymentSummary.nightlyRateAmount, null);
+  assert.equal(paymentSummary.taxesAmount, 83.48);
+  assert.equal(paymentSummary.expediaCompensationAmount, -83.92);
+  assert.equal(paymentSummary.acceleratorAmount, -41.85);
+  assert.deepEqual(
+    paymentSummary.currencyConversionEvidence,
+    candidate.currencyConversionEvidence
+  );
+  assert.deepEqual(
+    plan.expectedDocument.ota_financial_summary.paymentSummary,
+    paymentSummary
+  );
+});
+
+test("signed deductions do not relax malformed, nightly, or tax money", async () => {
+  const unsafeValues = [
+    ["sourceNightlyRateAmount", -0.01],
+    ["sourceTaxesAmount", -0.01],
+    ["sourceExpediaCompensationAmount", "not-money"],
+    ["sourceAcceleratorAmount", "Infinity"],
+  ];
+  for (const [field, value] of unsafeValues) {
+    const fixture = await preparedFixture();
+    fixture.db.collection(COLLECTIONS.portalJob).documents[1].previewBuckets
+      .matchedExisting[0].paymentSummary[field] = value;
+    await assert.rejects(
+      () => readyPlan(fixture),
+      (error) => error?.code === "EXPEDIA_V2_PORTAL_MONEY_INVALID"
+    );
+  }
+});
+
 test("apply creates a separate immutable backup and preserves all v1 artifacts", async () => {
   const fixture = await preparedFixture();
   const plan = await readyPlan(fixture);

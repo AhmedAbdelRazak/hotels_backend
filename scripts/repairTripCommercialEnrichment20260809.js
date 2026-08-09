@@ -1,0 +1,1903 @@
+/** @format */
+
+"use strict";
+
+/**
+ * One-time, fail-closed commercial repair for Trip.com booking
+ * 1567953940758068 only.
+ *
+ * Dry run:
+ *   node scripts/repairTripCommercialEnrichment20260809.js \
+ *     --release-sha=<approved-merge-sha>
+ *
+ * Apply (use the unexpired proof printed by the dry run):
+ *   node scripts/repairTripCommercialEnrichment20260809.js \
+ *     --apply \
+ *     --repair-id=trip-commercial-enrichment-20260809-v1 \
+ *     --release-sha=<approved-merge-sha> \
+ *     --proof=<timestamp.plan-hash>
+ *
+ * This script never calls Trip.com, HotelRunner, or an exchange-rate API. It
+ * reparses the immutable authenticated Trip audit with the deployed parser and
+ * validates the already-stored trusted conversion provenance before planning
+ * one full-document reservation CAS. HotelRunner events/mirrors and inbound
+ * audits are immutable evidence and are never updated.
+ */
+
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
+const path = require("path");
+
+require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+
+const mongoose = require("mongoose");
+
+mongoose.set("autoIndex", false);
+mongoose.set("autoCreate", false);
+
+const HotelDetails = require("../models/hotel_details");
+const HotelRunnerEvent = require("../models/hotelrunner_event");
+const HotelRunnerReservation = require("../models/hotelrunner_reservation");
+const InboundEmail = require("../models/inbound_email");
+const Reservations = require("../models/reservations");
+const {
+	applyUpdateToDocument,
+	buildExactCasFilter,
+	canonicalEjsonSha256,
+	cloneBson,
+} = require("../services/recentOtaInboundRecovery20260805");
+const {
+	buildHotelRunnerEmailCommercialEvidence,
+	directHotelRunnerCommercialEnrichmentSet,
+	extractNormalizedReservation,
+	verifiedHotelRunnerEmailCommercialEvidence,
+} = require("../services/otaReservationMapper");
+
+const REPAIR_ID = "trip-commercial-enrichment-20260809-v1";
+const BACKUP_COLLECTION = "ota_trip_commercial_repair_backup_20260809_v1";
+const MANIFEST_COLLECTION = "ota_trip_commercial_repair_manifest_20260809_v1";
+const PROOF_MAX_AGE_MS = 30 * 60 * 1000;
+const MAX_FX_SOURCE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_FX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const APPLY_STRATEGY = "durable_backup_then_full_document_cas";
+const MANIFEST_ACTIONABLE_STATES = Object.freeze([
+	"backed_up",
+	"applying",
+	"applied",
+]);
+
+const TARGET = Object.freeze({
+	key: "trip_1567953940758068",
+	otaBookingId: "1567953940758068",
+	pmsConfirmationNumber: "4272177185",
+	reservationMongoId: "6a78148198d8a805ed774b96",
+	reservationVersion: 1,
+	reservationOriginalHash:
+		"48dd5d5ee28bac67eda73648e65a7cea8fbb2602d603d8e8488c329eebfc6996",
+	hotelId: "6a40b6a1a6efe70450536038",
+	ownerId: "68b74714fb50e159d48c714d",
+	hotelNameKey: "zadajyad",
+	hotelRunnerReservationId: "40372488",
+	hrNumber: "R975439644",
+	eventId: "6a781473d8cbed2f4bad4725",
+	eventDocumentHash:
+		"601435039be54a681ff8137b67cb6e8ce583664b74a361e9f614f12226f6e48f",
+	eventPayloadHash:
+		"047065b48f9fa82c44f93f6be8b1ae38e98b18eb908e5e70ff54ab92b2baf641",
+	eventCanonicalHash:
+		"3fcf49e72f0320c5d235ef9c7badb71513ed15a7d47b90f6b7b75f7027c8b953",
+	mirrorId: "6a78147466c058f4ab61955a",
+	mirrorDocumentHash:
+		"7264d1ed742dfd39977ce26cce4863629ad112c654cab6023667bc19e3ccb762",
+	directInboundEmailId: "6a78146998d8a805ed774b49",
+	directInboundDocumentHash:
+		"0b53082cb915aae68decb2ec77769758cc35f2d6f13ad4687ad02dc576e92693",
+	directInboundBodyHash:
+		"c6628aac03c0b49d0a68aef2eccff6d64eb7e8b47741eb52299bdc6a9b48b7ac",
+	directInboundEmailHash:
+		"47c2c5043cfd633199cb45586e69fbb6e9b32fac827c97a928ee6f0a5db51479",
+	directSourceTextHash:
+		"cd79d9888cc1835ce9a469ab116bc1d44d62230392290e1076a57f64e0269813",
+	hotelRunnerInboundEmailId: "6a78147e98d8a805ed774b83",
+	hotelRunnerInboundDocumentHash:
+		"2b004d90f459d5cfb5531827e74f5f79fc74d3a2b87953a3c44e45a93fd6adb8",
+	hotelRunnerInboundBodyHash:
+		"a128200298cc1a86d208f1524756c77e5da8e23b60b86187ffccf2e86691aa85",
+	hotelRunnerInboundEmailHash:
+		"e92184e69f83a834b6e8f0081249265fd2c39d6c7d06d6447b98593ef5660cb7",
+	checkinDate: "2026-08-10",
+	checkoutDate: "2026-08-11",
+	roomConfigId: "6a40e45a1a6d1850eb25c58b",
+	parsedRoomName:
+		"Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram Flexible-before the day of arrival-Room Only-Prepay",
+	projectedSourceRoomName:
+		"Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram - Flexible-before the day of arrival-Room Only-Prepay - NR",
+	sourceCurrency: "USD",
+	propertyCurrency: "SAR",
+	sourceGross: 16.83,
+	sourcePayout: 15.89,
+	sourceDeduction: 0.94,
+	grossTotalSar: 63.11,
+	payoutTotalSar: 59.59,
+	otaExpenseTotalSar: 3.52,
+	otaCommissionSar: null,
+	rootTotalSar: 75,
+	platformMarginSar: -15.41,
+	hotelRunnerReportedSourceAmount: 15.89,
+	conversionSourceTimestamp: "2026-08-09T05:00:01.000Z",
+	conversionSourceHash:
+		"458f0e71aaff527806c429383080420d64bf7e7cc3a6762f67848a17245a0794",
+	conversionSourceId: "exchange-rate-api-usd-sar-458f0e71aaff527806c42938",
+	emailCommercialEvidenceHash:
+		"a3588e2d33e03c53690cbb5cef3fe9035a58697f1ea88bdfb5a77f95c832cf37",
+	otaCommercialEvidenceHash:
+		"44eb3224cf7a741f772583320435c6684128b356a390a4b871a0e60d5cf290be",
+});
+
+const BACKUP_ROLES = Object.freeze([
+	"reservation_before",
+	"hotelrunner_event_evidence",
+	"hotelrunner_mirror_evidence",
+	"direct_trip_email_evidence",
+	"hotelrunner_email_evidence",
+]);
+
+const ALLOWED_COMMERCIAL_SET_KEYS = Object.freeze(
+	new Set([
+		"commission",
+		"commission_ota",
+		"currency",
+		"total_amount",
+		"pickedRoomsType",
+		"pickedRoomsPricing",
+		"adminPricing.clientTotal",
+		"adminPricing.netAfterExpensesTotal",
+		"adminPricing.otaExpenseTotal",
+		"adminPricing.platformMarginTotal",
+		"adminPricing.commissionAmount",
+		"adminPricing.defaultDeductionApplied",
+		"adminPricing.payoutFallbackReason",
+		"adminPricing.commercialVerified",
+		"ota_financial_summary.show",
+		"ota_financial_summary.clientTotal",
+		"ota_financial_summary.netAfterExpenses",
+		"ota_financial_summary.netAfterOtaExpenses",
+		"ota_financial_summary.otaExpenseTotal",
+		"ota_financial_summary.platformProfit",
+		"ota_financial_summary.commissionAmount",
+		"ota_financial_summary.otaCommissionAmount",
+		"ota_financial_summary.otaDeductionBreakdown",
+		"ota_financial_summary.unclassifiedOtaDeduction",
+		"ota_financial_summary.commercialVerified",
+		"ota_financial_summary.paymentSummary",
+		"ota_financial_summary.payoutFallbackReason",
+		"supplierData.otaPaymentSummary",
+		"supplierData.otaTotalPayoutSar",
+		"supplierData.otaExpenseTotalSar",
+		"supplierData.otaCommissionSar",
+		"supplierData.otaCommissionSource",
+		"supplierData.otaCommissionSourceBacked",
+		"supplierData.otaPlatformMarginSar",
+		"supplierData.otaPayoutFallbackReason",
+		"supplierData.hotelRunnerEmailCommercialEvidence",
+		"supplierData.otaCommercialEvidence",
+	])
+);
+
+const clean = (value = "") => String(value?._id || value || "").trim();
+const lower = (value = "") => clean(value).toLowerCase();
+const upper = (value = "") => clean(value).toUpperCase();
+const round2 = (value) => Number(Number(value).toFixed(2));
+const sha256 = (value) =>
+	crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
+const dateKey = (value) => {
+	const parsed = value instanceof Date ? value : new Date(value);
+	return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : "";
+};
+
+function fail(message, code = "TRIP_COMMERCIAL_REPAIR_BLOCKED") {
+	const error = new Error(message);
+	error.code = code;
+	throw error;
+}
+
+function parseArguments(argv = []) {
+	let apply = false;
+	let repairId = "";
+	let releaseSha = "";
+	let proof = "";
+	for (const raw of argv) {
+		const argument = clean(raw);
+		if (argument === "--apply") {
+			if (apply) fail("--apply may be supplied only once.", "TRIP_REPAIR_ARGUMENT_INVALID");
+			apply = true;
+			continue;
+		}
+		if (argument.startsWith("--repair-id=")) {
+			if (repairId) fail("--repair-id may be supplied only once.", "TRIP_REPAIR_ARGUMENT_INVALID");
+			repairId = argument.slice("--repair-id=".length);
+			continue;
+		}
+		if (argument.startsWith("--release-sha=")) {
+			if (releaseSha) fail("--release-sha may be supplied only once.", "TRIP_REPAIR_ARGUMENT_INVALID");
+			releaseSha = lower(argument.slice("--release-sha=".length));
+			continue;
+		}
+		if (argument.startsWith("--proof=")) {
+			if (proof) fail("--proof may be supplied only once.", "TRIP_REPAIR_ARGUMENT_INVALID");
+			proof = lower(argument.slice("--proof=".length));
+			continue;
+		}
+		fail("Unsupported Trip commercial repair argument.", "TRIP_REPAIR_ARGUMENT_INVALID");
+	}
+	if (!/^[a-f0-9]{40}$/.test(releaseSha)) {
+		fail("An exact 40-character --release-sha is required.", "TRIP_REPAIR_RELEASE_REQUIRED");
+	}
+	if (!apply && (repairId || proof)) {
+		fail("--repair-id and --proof are apply-only arguments.", "TRIP_REPAIR_ARGUMENT_INVALID");
+	}
+	if (apply && repairId !== REPAIR_ID) {
+		fail(`Apply requires --repair-id=${REPAIR_ID}.`, "TRIP_REPAIR_ID_REQUIRED");
+	}
+	if (apply && !/^\d{13}\.[a-f0-9]{64}$/.test(proof)) {
+		fail("Apply requires the exact unexpired dry-run proof.", "TRIP_REPAIR_PROOF_REQUIRED");
+	}
+	return { apply, repairId, releaseSha, proof };
+}
+
+function parseProof(proof, now = new Date()) {
+	const match = lower(proof).match(/^(\d{13})\.([a-f0-9]{64})$/);
+	if (!match) fail("The dry-run proof format is invalid.", "TRIP_REPAIR_PROOF_INVALID");
+	const plannedAtMs = Number(match[1]);
+	const nowMs = now.getTime();
+	if (
+		!Number.isSafeInteger(plannedAtMs) ||
+		plannedAtMs > nowMs + 5_000 ||
+		nowMs - plannedAtMs > PROOF_MAX_AGE_MS
+	) {
+		fail("The dry-run proof is expired or from the future.", "TRIP_REPAIR_PROOF_EXPIRED");
+	}
+	return { plannedAt: new Date(plannedAtMs), planHash: match[2] };
+}
+
+function currentReleaseSha(repoRoot = path.resolve(__dirname, "..")) {
+	try {
+		return lower(
+			execFileSync("git", ["rev-parse", "HEAD"], {
+				cwd: repoRoot,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			})
+		);
+	} catch (_error) {
+		fail("Could not resolve the deployed Git release SHA.", "TRIP_REPAIR_RELEASE_UNRESOLVED");
+	}
+}
+
+function assertRelease(expected, actual) {
+	if (!/^[a-f0-9]{40}$/.test(lower(actual)) || lower(actual) !== lower(expected)) {
+		fail(
+			"The deployed checkout does not equal the explicitly approved merge SHA.",
+			"TRIP_REPAIR_RELEASE_MISMATCH"
+		);
+	}
+}
+
+function reservationLookup(target = TARGET) {
+	return {
+		$or: [
+			{ _id: target.reservationMongoId },
+			{ confirmation_number: target.pmsConfirmationNumber },
+			{ reservation_id: target.otaBookingId },
+			{ otaIdentityKey: `hotelrunner:${target.otaBookingId}` },
+			{ otaCrossTransportIdentityKey: `trip:${target.otaBookingId}` },
+			{ "customer_details.confirmation_number2": target.otaBookingId },
+			{ "supplierData.suppliedBookingNo": target.otaBookingId },
+			{ "supplierData.otaConfirmationNumber": target.otaBookingId },
+			{ "supplierData.platformConfirmationNumber": target.otaBookingId },
+			{ "supplierData.hotelRunner.reservationId": target.hotelRunnerReservationId },
+		],
+	};
+}
+
+function eventLookup(target = TARGET) {
+	return {
+		$or: [
+			{ _id: target.eventId },
+			{ providerNumber: target.otaBookingId },
+			{ hrNumber: target.hrNumber },
+			{ hotelRunnerReservationId: target.hotelRunnerReservationId },
+			{ reservationMongoId: target.reservationMongoId },
+		],
+	};
+}
+
+function mirrorLookup(target = TARGET) {
+	return {
+		$or: [
+			{ _id: target.mirrorId },
+			{ providerNumber: target.otaBookingId },
+			{ providerNumberAliases: target.otaBookingId },
+			{ hrNumber: target.hrNumber },
+			{ hrNumberAliases: target.hrNumber },
+			{ hotelRunnerReservationId: target.hotelRunnerReservationId },
+			{ reservationMongoId: target.reservationMongoId },
+		],
+	};
+}
+
+function inboundLookup(target = TARGET) {
+	return {
+		$or: [
+			{
+				_id: {
+					$in: [target.directInboundEmailId, target.hotelRunnerInboundEmailId],
+				},
+			},
+			{ confirmationNumber: target.otaBookingId },
+			{ "normalizedReservation.confirmationNumber": target.otaBookingId },
+			{ "normalizedReservation.reservationId": target.otaBookingId },
+			{ reservationMongoId: target.reservationMongoId },
+		],
+	};
+}
+
+async function leanMany(Model, filter, { select = "", limit = 6 } = {}) {
+	let query = Model.find(filter);
+	if (select && typeof query.select === "function") query = query.select(select);
+	if (typeof query.limit === "function") query = query.limit(limit);
+	if (typeof query.read === "function") query = query.read("primary");
+	if (typeof query.readConcern === "function") query = query.readConcern("majority");
+	if (typeof query.lean === "function") query = query.lean();
+	if (typeof query.exec === "function") return query.exec();
+	return query;
+}
+
+async function leanOne(Model, filter, options = {}) {
+	const rows = await leanMany(Model, filter, { ...options, limit: 2 });
+	if (!Array.isArray(rows) || rows.length !== 1) {
+		fail(`Expected exactly one immutable document; found ${rows?.length || 0}.`);
+	}
+	return rows[0];
+}
+
+function assertExactHash(document, expected, label) {
+	const actual = canonicalEjsonSha256(document);
+	if (!/^[a-f0-9]{64}$/.test(lower(expected)) || actual !== lower(expected)) {
+		fail(`${label} full-document hash changed.`, "TRIP_REPAIR_SOURCE_HASH_MISMATCH");
+	}
+	return actual;
+}
+
+function assertHotel(target, hotel) {
+	const room = (Array.isArray(hotel?.roomCountDetails) ? hotel.roomCountDetails : []).filter(
+		(item) => clean(item?._id) === target.roomConfigId && item?.activeRoom !== false
+	);
+	if (
+		clean(hotel?._id) !== target.hotelId ||
+		clean(hotel?.belongsTo) !== target.ownerId ||
+		lower(hotel?.hotelName).replace(/[^a-z0-9]+/g, "") !== target.hotelNameKey ||
+		hotel?.activateHotel !== true ||
+		hotel?.xHotelProActive === false ||
+		room.length !== 1
+	) {
+		fail("The exact hotel/owner/room configuration boundary changed.");
+	}
+}
+
+function assertEvent(target, event) {
+	assertExactHash(event, target.eventDocumentHash, "HotelRunner event");
+	if (
+		clean(event?._id) !== target.eventId ||
+		clean(event?.hotelId) !== target.hotelId ||
+		clean(event?.hotelRunnerReservationId) !== target.hotelRunnerReservationId ||
+		upper(event?.hrNumber) !== target.hrNumber ||
+		clean(event?.providerNumber) !== target.otaBookingId ||
+		lower(event?.channel) !== "tripcom" ||
+		lower(event?.state) !== "confirmed" ||
+		lower(event?.status) !== "completed" ||
+		event?.integrityConflict === true ||
+		Number(event?.integrityConflictCount || 0) !== 0 ||
+		lower(event?.payloadHash) !== target.eventPayloadHash ||
+		lower(event?.canonicalHash) !== target.eventCanonicalHash ||
+		clean(event?.reservationMongoId) !== target.reservationMongoId ||
+		clean(event?.mirrorId) !== target.mirrorId
+	) {
+		fail("The exact HotelRunner event envelope changed.");
+	}
+}
+
+function assertMirror(target, mirror) {
+	assertExactHash(mirror, target.mirrorDocumentHash, "HotelRunner mirror");
+	if (
+		clean(mirror?._id) !== target.mirrorId ||
+		clean(mirror?.hotelId) !== target.hotelId ||
+		clean(mirror?.hotelRunnerReservationId) !== target.hotelRunnerReservationId ||
+		upper(mirror?.hrNumber) !== target.hrNumber ||
+		clean(mirror?.providerNumber) !== target.otaBookingId ||
+		!Array.isArray(mirror?.providerNumberAliases) ||
+		!mirror.providerNumberAliases.includes(target.otaBookingId) ||
+		lower(mirror?.channel) !== "tripcom" ||
+		lower(mirror?.state) !== "confirmed" ||
+		mirror?.identityConflict === true ||
+		lower(mirror?.projectionStatus) !== "updated" ||
+		clean(mirror?.reservationMongoId) !== target.reservationMongoId ||
+		Number(mirror?.normalizedSnapshot?.totalCents) !==
+			Math.round(target.hotelRunnerReportedSourceAmount * 100) ||
+		upper(mirror?.normalizedSnapshot?.currency) !== target.sourceCurrency
+	) {
+		fail("The exact HotelRunner mirror envelope changed.");
+	}
+}
+
+function assertInbound(target, audit, role) {
+	const direct = role === "direct_trip_email_evidence";
+	const expectedId = direct
+		? target.directInboundEmailId
+		: target.hotelRunnerInboundEmailId;
+	const expectedDocumentHash = direct
+		? target.directInboundDocumentHash
+		: target.hotelRunnerInboundDocumentHash;
+	const expectedBodyHash = direct
+		? target.directInboundBodyHash
+		: target.hotelRunnerInboundBodyHash;
+	const expectedEmailHash = direct
+		? target.directInboundEmailHash
+		: target.hotelRunnerInboundEmailHash;
+	assertExactHash(audit, expectedDocumentHash, direct ? "direct Trip audit" : "HotelRunner email audit");
+	if (
+		clean(audit?._id) !== expectedId ||
+		sha256(audit?.bodyText) !== expectedBodyHash ||
+		clean(audit?.textHash) !== expectedBodyHash ||
+		clean(audit?.emailHash) !== expectedEmailHash ||
+		clean(audit?.confirmationNumber) !== target.otaBookingId ||
+		audit?.senderAuthentication?.authenticatedAligned !== true ||
+		lower(audit?.senderAuthentication?.trustedProvider) !==
+			(direct ? "trip" : "hotelrunner") ||
+		lower(audit?.provider) !== (direct ? "trip" : "hotelrunner")
+	) {
+		fail(`${direct ? "Direct Trip" : "HotelRunner"} inbound evidence changed.`);
+	}
+	if (
+		!direct &&
+		(clean(audit?.reservationMongoId) !== target.reservationMongoId ||
+			clean(audit?.pmsConfirmationNumber) !== target.pmsConfirmationNumber)
+	) {
+		fail("The HotelRunner inbound audit no longer owns the exact reservation.");
+	}
+}
+
+function trustedExchangeEvidence(target, audit) {
+	const stored = audit?.normalizedReservation || {};
+	const evidence = stored.currencyConversionEvidence;
+	const provenance = evidence?.provenance || {};
+	const rate = Number(evidence?.rate);
+	const sourceTimestamp = new Date(provenance.sourceTimestamp);
+	const convertedAt = new Date(
+		stored?.paymentSummary?.amountConvertedAt || stored.amountConvertedAt
+	);
+	const processedAt = new Date(audit?.processedAt || audit?.receivedAt);
+	if (
+		!evidence ||
+		typeof evidence !== "object" ||
+		Array.isArray(evidence) ||
+		evidence.trusted !== true ||
+		evidence.verified !== true ||
+		upper(evidence.sourceCurrency) !== target.sourceCurrency ||
+		upper(evidence.propertyCurrency) !== target.propertyCurrency ||
+		!Number.isFinite(rate) ||
+		rate <= 0 ||
+		rate > 1_000_000 ||
+		!Number.isFinite(sourceTimestamp.getTime()) ||
+		!Number.isFinite(convertedAt.getTime()) ||
+		!Number.isFinite(processedAt.getTime()) ||
+		sourceTimestamp.toISOString() !== target.conversionSourceTimestamp ||
+		convertedAt.getTime() - sourceTimestamp.getTime() > MAX_FX_SOURCE_AGE_MS ||
+		sourceTimestamp.getTime() > convertedAt.getTime() + MAX_FX_FUTURE_SKEW_MS ||
+		convertedAt.getTime() > processedAt.getTime() + MAX_FX_FUTURE_SKEW_MS
+	) {
+		fail("Stored Trip exchange evidence is absent, stale, future-dated, or pair-invalid.");
+	}
+	const tuple = {
+		provider: "exchange_rate_api",
+		sourceType: "trusted_exchange_evidence",
+		sourceCurrency: target.sourceCurrency,
+		propertyCurrency: target.propertyCurrency,
+		rate: Number(rate.toFixed(10)),
+		sourceTimestamp: sourceTimestamp.toISOString(),
+	};
+	const sourceHash = sha256(JSON.stringify(tuple));
+	const sourceId = `exchange-rate-api-${target.sourceCurrency.toLowerCase()}-${target.propertyCurrency.toLowerCase()}-${sourceHash.slice(
+		0,
+		24
+	)}`;
+	if (
+		provenance.provider !== tuple.provider ||
+		provenance.sourceType !== tuple.sourceType ||
+		provenance.sourceHash !== sourceHash ||
+		provenance.sourceId !== sourceId ||
+		sourceHash !== target.conversionSourceHash ||
+		sourceId !== target.conversionSourceId ||
+		round2(target.sourceGross * rate) !== target.grossTotalSar ||
+		round2(target.sourcePayout * rate) !== target.payoutTotalSar
+	) {
+		fail("Stored Trip exchange evidence hash, source ID, rate, or audited result changed.");
+	}
+	return {
+		trusted: true,
+		verified: true,
+		sourceCurrency: tuple.sourceCurrency,
+		propertyCurrency: tuple.propertyCurrency,
+		rate: tuple.rate,
+		provenance: {
+			provider: tuple.provider,
+			sourceType: tuple.sourceType,
+			sourceHash,
+			sourceTimestamp: tuple.sourceTimestamp,
+			sourceId,
+		},
+		convertedAt: convertedAt.toISOString(),
+	};
+}
+
+function normalizedFromAudit(target, audit) {
+	const parsed = extractNormalizedReservation({
+		from: audit.from,
+		to: audit.to,
+		subject: audit.subject,
+		text: audit.bodyText,
+		html: audit.bodyHtml,
+		messageId: audit.messageId,
+		senderAuthentication: audit.senderAuthentication,
+		sourceReceivedAt:
+			audit?.normalizedReservation?.source?.receivedAt || audit.receivedAt,
+		deliveryReceivedAt: audit.receivedAt,
+		date: audit?.normalizedReservation?.source?.messageDate || null,
+		sourceTimestampMethod:
+			audit?.normalizedReservation?.source?.timestampMethod || "stored_inbound_audit",
+	});
+	const stored = audit.normalizedReservation || {};
+	const conversion = trustedExchangeEvidence(target, audit);
+	const parsedPayout = Number(parsed?.paymentSummary?.sourceTotalPayoutAmount);
+	if (
+		parsed.provider !== "trip" ||
+		parsed.trustedTransportProvider !== "trip" ||
+		parsed.sourceSenderTrusted !== true ||
+		parsed.sourceSenderAuthenticated !== true ||
+		parsed.directTripTemplateMatched !== true ||
+		parsed.genericRepeatedFactConflict === true ||
+		(Array.isArray(parsed.genericRepeatedFactConflictFields) &&
+			parsed.genericRepeatedFactConflictFields.length !== 0) ||
+		parsed.requiresManualReview === true ||
+		parsed.sourcePresence?.roomName !== true ||
+		clean(parsed.confirmationNumber) !== target.otaBookingId ||
+		dateKey(parsed.checkinDate) !== target.checkinDate ||
+		dateKey(parsed.checkoutDate) !== target.checkoutDate ||
+		Number(parsed.roomCount) !== 1 ||
+		clean(parsed.roomName) !== target.parsedRoomName ||
+		upper(parsed.sourceCurrency) !== target.sourceCurrency ||
+		round2(parsed.sourceAmount) !== target.sourceGross ||
+		round2(parsedPayout) !== target.sourcePayout ||
+		upper(parsed.paymentSummary?.sourceCurrency) !== target.sourceCurrency
+	) {
+		fail("The deployed parser no longer yields the exact authenticated single-room Trip facts.");
+	}
+	if (
+		clean(stored?.source?.textHash) !== target.directSourceTextHash ||
+		round2(stored.sourceAmount) !== target.sourceGross ||
+		round2(stored.sourcePayoutAmount) !== target.sourcePayout ||
+		upper(stored.sourceCurrency) !== target.sourceCurrency ||
+		upper(stored.sourcePayoutCurrency) !== target.sourceCurrency
+	) {
+		fail("Stored source-only Trip facts changed.");
+	}
+	return {
+		...parsed,
+		inboundEmailId: target.directInboundEmailId,
+		sourceAmount: target.sourceGross,
+		sourceCurrency: target.sourceCurrency,
+		sourcePayoutAmount: target.sourcePayout,
+		sourcePayoutCurrency: target.sourceCurrency,
+		propertyCurrency: target.propertyCurrency,
+		propertyConversionVerified: true,
+		amount: target.grossTotalSar,
+		currency: target.propertyCurrency,
+		totalAmountSar: target.grossTotalSar,
+		totalPayoutSar: target.payoutTotalSar,
+		netAfterExpensesTotal: target.payoutTotalSar,
+		exchangeRateToSar: conversion.rate,
+		exchangeRateSource: "exchange_rate_api",
+		sourceExchangeRateToSar: conversion.rate,
+		sourceExchangeRateSource: "exchange_rate_api",
+		amountConvertedAt: conversion.convertedAt,
+		currencyConversionEvidence: {
+			trusted: conversion.trusted,
+			verified: conversion.verified,
+			sourceCurrency: conversion.sourceCurrency,
+			propertyCurrency: conversion.propertyCurrency,
+			rate: conversion.rate,
+			provenance: conversion.provenance,
+		},
+		paymentSummary: {
+			...(parsed.paymentSummary || {}),
+			sourceCurrency: target.sourceCurrency,
+			sourceTotalGuestPaymentAmount: target.sourceGross,
+			sourceTotalPayoutAmount: target.sourcePayout,
+			sourceTotalPayoutCurrency: target.sourceCurrency,
+			totalGuestPaymentAmount: target.grossTotalSar,
+			totalPayoutAmount: target.payoutTotalSar,
+			currency: target.propertyCurrency,
+			propertyCurrency: target.propertyCurrency,
+			propertyConversionVerified: true,
+			exchangeRateToSar: conversion.rate,
+			exchangeRateSource: "exchange_rate_api",
+			amountConvertedAt: conversion.convertedAt,
+		},
+		source: {
+			...(parsed.source || {}),
+			receivedAt:
+				stored?.source?.receivedAt || parsed?.source?.receivedAt || audit.receivedAt,
+			textHash: target.directSourceTextHash,
+		},
+	};
+}
+
+function roomProtectedProjection(rooms = []) {
+	return (Array.isArray(rooms) ? rooms : []).map((room) => {
+		const next = cloneBson(room || {});
+		delete next.totalPriceWithCommission;
+		delete next.chosenPrice;
+		for (const day of Array.isArray(next.pricingByDay) ? next.pricingByDay : []) {
+			for (const key of [
+				"price",
+				"clientPrice",
+				"mainPrice",
+				"totalPriceWithCommission",
+				"netAfterExpenses",
+				"netAfterOtaExpenses",
+				"otaExpenseAmount",
+				"platformMargin",
+				"commercialVerification",
+			]) {
+				delete day[key];
+			}
+		}
+		return next;
+	});
+}
+
+function deletePaths(document, paths) {
+	for (const pathText of paths) {
+		const parts = pathText.split(".");
+		let current = document;
+		for (const part of parts.slice(0, -1)) {
+			if (!current || typeof current !== "object") break;
+			current = current[part];
+		}
+		if (current && typeof current === "object") delete current[parts.at(-1)];
+	}
+}
+
+function protectedReservationSnapshot(reservation = {}) {
+	const snapshot = cloneBson(reservation);
+	deletePaths(snapshot, [
+		"__v",
+		"updatedAt",
+		"currency",
+		"total_amount",
+		"commission",
+		"commission_ota",
+		...Array.from(ALLOWED_COMMERCIAL_SET_KEYS).filter(
+			(pathText) => !["pickedRoomsType", "pickedRoomsPricing"].includes(pathText)
+		),
+	]);
+	snapshot.pickedRoomsType = roomProtectedProjection(reservation.pickedRoomsType);
+	snapshot.pickedRoomsPricing = roomProtectedProjection(
+		reservation.pickedRoomsPricing
+	);
+	return snapshot;
+}
+
+function dailyRows(reservation = {}) {
+	return (Array.isArray(reservation.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: []
+	).flatMap((room) =>
+		(Array.isArray(room?.pricingByDay) ? room.pricingByDay : []).map((day) => ({
+			date: dateKey(day?.date),
+			client: round2(day?.clientPrice),
+			root: round2(day?.rootPrice),
+			payout: round2(day?.netAfterExpenses),
+			expense: round2(day?.otaExpenseAmount),
+			margin: round2(day?.platformMargin),
+			hotelRunnerSource: round2(day?.hotelRunnerSourcePrice),
+		}))
+	);
+}
+
+function assertReservationBoundary(target, reservation, { applied = false } = {}) {
+	const rooms = Array.isArray(reservation?.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: [];
+	const room = rooms[0] || {};
+	const typeRooms = Array.isArray(reservation?.pickedRoomsType)
+		? reservation.pickedRoomsType
+		: [];
+	if (
+		clean(reservation?._id) !== target.reservationMongoId ||
+		clean(reservation?.hotelId) !== target.hotelId ||
+		clean(reservation?.belongsTo) !== target.ownerId ||
+		clean(reservation?.confirmation_number) !== target.pmsConfirmationNumber ||
+		clean(reservation?.reservation_id) !== target.otaBookingId ||
+		lower(reservation?.otaIdentityKey) !==
+			`hotelrunner:${target.otaBookingId}` ||
+		lower(reservation?.otaCrossTransportIdentityKey) !==
+			`trip:${target.otaBookingId}` ||
+		lower(reservation?.supplierData?.otaProvider) !== "hotelrunner" ||
+		lower(reservation?.supplierData?.supplierName) !== "trip.com" ||
+		lower(reservation?.state) !== "ota platform review" ||
+		lower(reservation?.reservation_status) !== "ota platform review" ||
+		dateKey(reservation?.checkin_date) !== target.checkinDate ||
+		dateKey(reservation?.checkout_date) !== target.checkoutDate ||
+		Number(reservation?.total_rooms) !== 1 ||
+		round2(reservation?.sub_total) !== target.rootTotalSar ||
+		round2(reservation?.adminPricing?.rootTotal) !== target.rootTotalSar ||
+		round2(reservation?.ota_financial_summary?.hotelVisibleAmount) !==
+			target.rootTotalSar ||
+		rooms.length !== 1 ||
+		typeRooms.length !== 1 ||
+		clean(room?.hotelRoomConfigId) !== target.roomConfigId ||
+		clean(room?.localRoomConfigId) !== target.roomConfigId ||
+		clean(room?.sourceRoomName) !== target.projectedSourceRoomName ||
+		canonicalEjsonSha256(typeRooms) !== canonicalEjsonSha256(rooms)
+	) {
+		fail("The exact reservation identity, guest-independent lifecycle, stay, room, or root boundary changed.");
+	}
+	if (!applied) {
+		if (
+			Number(reservation.__v) !== target.reservationVersion ||
+			upper(reservation.currency) !== target.sourceCurrency ||
+			round2(reservation.total_amount) !== target.hotelRunnerReportedSourceAmount ||
+			round2(reservation.adminPricing?.clientTotal) !==
+				target.hotelRunnerReportedSourceAmount ||
+			reservation.adminPricing?.commercialVerified === true ||
+			reservation.ota_financial_summary?.commercialVerified === true ||
+			reservation.commission_ota !== null
+		) {
+			fail("The exact pre-repair Trip commercial state changed.");
+		}
+		assertExactHash(reservation, target.reservationOriginalHash, "Trip reservation");
+	}
+}
+
+function assertCommercialProjection(target, reservation, evidence) {
+	const rows = dailyRows(reservation);
+	const marker = verifiedHotelRunnerEmailCommercialEvidence(reservation, {
+		provider: "trip",
+		grossTotalSar: target.grossTotalSar,
+		currency: target.propertyCurrency,
+	});
+	const common = reservation?.supplierData?.otaCommercialEvidence;
+	if (
+		upper(reservation.currency) !== target.propertyCurrency ||
+		round2(reservation.total_amount) !== target.grossTotalSar ||
+		round2(reservation.sub_total) !== target.rootTotalSar ||
+		round2(reservation.commission) !== 0 ||
+		reservation.commission_ota !== target.otaCommissionSar ||
+		reservation.adminPricing?.commercialVerified !== true ||
+		round2(reservation.adminPricing?.clientTotal) !== target.grossTotalSar ||
+		round2(reservation.adminPricing?.netAfterExpensesTotal) !==
+			target.payoutTotalSar ||
+		round2(reservation.adminPricing?.otaExpenseTotal) !==
+			target.otaExpenseTotalSar ||
+		round2(reservation.adminPricing?.platformMarginTotal) !==
+			target.platformMarginSar ||
+		reservation.ota_financial_summary?.commercialVerified !== true ||
+		round2(reservation.ota_financial_summary?.clientTotal) !==
+			target.grossTotalSar ||
+		round2(reservation.ota_financial_summary?.netAfterExpenses) !==
+			target.payoutTotalSar ||
+		round2(reservation.ota_financial_summary?.otaExpenseTotal) !==
+			target.otaExpenseTotalSar ||
+		reservation.ota_financial_summary?.otaCommissionAmount !== null ||
+		rows.length !== 1 ||
+		rows[0].date !== target.checkinDate ||
+		rows[0].client !== target.grossTotalSar ||
+		rows[0].root !== target.rootTotalSar ||
+		rows[0].payout !== target.payoutTotalSar ||
+		rows[0].expense !== target.otaExpenseTotalSar ||
+		rows[0].margin !== target.platformMarginSar ||
+		rows[0].hotelRunnerSource !== target.hotelRunnerReportedSourceAmount ||
+		!marker ||
+		marker.evidenceHash !== target.emailCommercialEvidenceHash ||
+		(evidence && marker.evidenceHash !== evidence.evidenceHash) ||
+		common?.verificationState !== "verified" ||
+		common?.evidenceHash !== target.otaCommercialEvidenceHash ||
+		round2(common?.roles?.guestGross?.sourceAmount) !== target.sourceGross ||
+		upper(common?.roles?.guestGross?.sourceCurrency) !== target.sourceCurrency ||
+		round2(common?.roles?.guestGross?.propertyAmount) !== target.grossTotalSar ||
+		round2(common?.roles?.hotelPayout?.sourceAmount) !== target.sourcePayout ||
+		round2(common?.roles?.hotelPayout?.propertyAmount) !== target.payoutTotalSar ||
+		round2(common?.roles?.deductionAggregate?.sourceAmount) !==
+			target.sourceDeduction ||
+		round2(common?.roles?.deductionAggregate?.propertyAmount) !==
+			target.otaExpenseTotalSar ||
+		common?.roles?.explicitOtaCommission?.verified !== false ||
+		common?.roles?.explicitOtaCommission?.propertyAmount !== null
+	) {
+		fail("The planned/applied Trip SAR commercial projection is not exact.");
+	}
+	return marker;
+}
+
+function buildExpectedReservation(target, reservation, audit, repairAt) {
+	const normalized = normalizedFromAudit(target, audit);
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: repairAt,
+	});
+	if (
+		!evidence ||
+		evidence.version !== 2 ||
+		evidence.verified !== true ||
+		evidence.provider !== "trip" ||
+		evidence.otaIdentityKey !== `trip:${target.otaBookingId}` ||
+		evidence.evidenceHash !== target.emailCommercialEvidenceHash ||
+		round2(evidence.grossTotalSar) !== target.grossTotalSar ||
+		round2(evidence.payoutTotalSar) !== target.payoutTotalSar ||
+		round2(evidence.otaExpenseTotalSar) !== target.otaExpenseTotalSar ||
+		evidence.otaCommissionSar !== null ||
+		round2(evidence.unclassifiedDeductionSar) !== target.otaExpenseTotalSar
+	) {
+		fail("The authenticated Trip commercial evidence contract changed.");
+	}
+	const commercialExisting = cloneBson(reservation);
+	commercialExisting.currency = "sar";
+	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence, {
+		reportedTotalRole: "unknown",
+		existing: commercialExisting,
+	});
+	if (!set) fail("The shared commercial projector did not produce an exact update set.");
+	const keys = Object.keys(set).sort();
+	const allowed = Array.from(ALLOWED_COMMERCIAL_SET_KEYS).sort();
+	if (
+		keys.length !== allowed.length ||
+		keys.some((key, index) => key !== allowed[index])
+	) {
+		const missing = allowed.filter((key) => !keys.includes(key));
+		const unexpected = keys.filter((key) => !allowed.includes(key));
+		fail(
+			`The shared commercial projector changed its bounded mutation surface (missing: ${
+				missing.join(",") || "none"
+			}; unexpected: ${unexpected.join(",") || "none"}).`
+		);
+	}
+	const update = {
+		$set: {
+			...set,
+			currency: "sar",
+			updatedAt: new Date(repairAt),
+		},
+		$inc: { __v: 1 },
+	};
+	const expected = applyUpdateToDocument(reservation, update);
+	assertReservationBoundary(target, expected, { applied: true });
+	assertCommercialProjection(target, expected, evidence);
+	if (
+		canonicalEjsonSha256(protectedReservationSnapshot(expected)) !==
+		canonicalEjsonSha256(protectedReservationSnapshot(reservation))
+	) {
+		fail("The repair would change protected guest, lifecycle, review, payment, VCC, settlement, root, or audit state.");
+	}
+	return { normalized, evidence, set, update, expected };
+}
+
+function appliedReservation(target, reservation) {
+	try {
+		assertReservationBoundary(target, reservation, { applied: true });
+		const marker = assertCommercialProjection(target, reservation);
+		if (Number(reservation.__v) !== target.reservationVersion + 1) return null;
+		return marker;
+	} catch (_error) {
+		return null;
+	}
+}
+
+async function loadScope({ target = TARGET, repairAt, models = {} } = {}) {
+	const ReservationModel = models.ReservationModel || Reservations;
+	const EventModel = models.EventModel || HotelRunnerEvent;
+	const MirrorModel = models.MirrorModel || HotelRunnerReservation;
+	const InboundModel = models.InboundModel || InboundEmail;
+	const HotelModel = models.HotelModel || HotelDetails;
+	const reservations = await leanMany(ReservationModel, reservationLookup(target), {
+		limit: 3,
+	});
+	const events = await leanMany(EventModel, eventLookup(target), {
+		select: "+payload +integrityConflicts",
+		limit: 3,
+	});
+	const mirrors = await leanMany(MirrorModel, mirrorLookup(target), {
+		select: "+normalizedSnapshot +lastAppliedProjection",
+		limit: 3,
+	});
+	const audits = await leanMany(InboundModel, inboundLookup(target), { limit: 4 });
+	const hotel = await leanOne(HotelModel, { _id: target.hotelId });
+	if (reservations.length !== 1 || events.length !== 1 || mirrors.length !== 1) {
+		fail(
+			`Exact Trip scope must be one reservation/event/mirror; found ${reservations.length}/${events.length}/${mirrors.length}.`,
+			"TRIP_REPAIR_SCOPE_INVALID"
+		);
+	}
+	const auditIds = new Set(audits.map((audit) => clean(audit?._id)));
+	if (
+		audits.length !== 2 ||
+		!auditIds.has(target.directInboundEmailId) ||
+		!auditIds.has(target.hotelRunnerInboundEmailId)
+	) {
+		fail(`Exact Trip scope must contain only the two audited inbound messages; found ${audits.length}.`);
+	}
+	const directAudit = audits.find(
+		(audit) => clean(audit?._id) === target.directInboundEmailId
+	);
+	const hotelRunnerAudit = audits.find(
+		(audit) => clean(audit?._id) === target.hotelRunnerInboundEmailId
+	);
+	const reservation = reservations[0];
+	const event = events[0];
+	const mirror = mirrors[0];
+	assertHotel(target, hotel);
+	assertEvent(target, event);
+	assertMirror(target, mirror);
+	assertInbound(target, directAudit, "direct_trip_email_evidence");
+	assertInbound(target, hotelRunnerAudit, "hotelrunner_email_evidence");
+	const appliedMarker = appliedReservation(target, reservation);
+	if (appliedMarker) {
+		return {
+			target,
+			state: "already_applied",
+			reservation,
+			event,
+			mirror,
+			directAudit,
+			hotelRunnerAudit,
+			hotel,
+			evidence: appliedMarker,
+			protectedHash: canonicalEjsonSha256(
+				protectedReservationSnapshot(reservation)
+			),
+		};
+	}
+	assertReservationBoundary(target, reservation);
+	const built = buildExpectedReservation(
+		target,
+		reservation,
+		directAudit,
+		new Date(repairAt)
+	);
+	return {
+		target,
+		state: "ready",
+		reservation,
+		event,
+		mirror,
+		directAudit,
+		hotelRunnerAudit,
+		hotel,
+		...built,
+		originalHash: canonicalEjsonSha256(reservation),
+		expectedHash: canonicalEjsonSha256(built.expected),
+		protectedHash: canonicalEjsonSha256(
+			protectedReservationSnapshot(reservation)
+		),
+	};
+}
+
+function proofBasis(scope, releaseSha, repairAt) {
+	return {
+		version: 1,
+		repairId: REPAIR_ID,
+		releaseSha: lower(releaseSha),
+		applyStrategy: APPLY_STRATEGY,
+		repairAt: new Date(repairAt).toISOString(),
+		target: {
+			key: scope.target.key,
+			reservationMongoId: scope.target.reservationMongoId,
+			otaBookingId: scope.target.otaBookingId,
+			hotelId: scope.target.hotelId,
+		},
+		immutable: {
+			reservationOriginalHash: scope.originalHash,
+			reservationExpectedHash: scope.expectedHash,
+			reservationProtectedHash: scope.protectedHash,
+			eventHash: scope.target.eventDocumentHash,
+			mirrorHash: scope.target.mirrorDocumentHash,
+			directInboundHash: scope.target.directInboundDocumentHash,
+			hotelRunnerInboundHash: scope.target.hotelRunnerInboundDocumentHash,
+			directBodyHash: scope.target.directInboundBodyHash,
+			directSourceTextHash: scope.target.directSourceTextHash,
+			conversionSourceHash: scope.target.conversionSourceHash,
+			conversionSourceId: scope.target.conversionSourceId,
+			evidenceHash: scope.evidence?.evidenceHash || "",
+			otaCommercialEvidenceHash: scope.target.otaCommercialEvidenceHash,
+			plannedSetHash: canonicalEjsonSha256(scope.set || {}),
+		},
+	};
+}
+
+async function loadPlan({ target = TARGET, repairAt, releaseSha, models = {} } = {}) {
+	const scope = await loadScope({ target, repairAt, models });
+	if (scope.state === "already_applied") {
+		return {
+			repairId: REPAIR_ID,
+			releaseSha: lower(releaseSha),
+			repairAt: new Date(repairAt),
+			state: "already_applied",
+			scope,
+			planHash: "",
+		};
+	}
+	const basis = proofBasis(scope, releaseSha, repairAt);
+	return {
+		repairId: REPAIR_ID,
+		releaseSha: lower(releaseSha),
+		repairAt: new Date(repairAt),
+		state: "ready",
+		scope,
+		basis,
+		planHash: canonicalEjsonSha256(basis),
+	};
+}
+
+function proofToken(plan) {
+	if (plan.state !== "ready") return "";
+	return `${plan.repairAt.getTime()}.${plan.planHash}`;
+}
+
+function backupRecord(plan, role, document) {
+	const basis = {
+		_id: `${REPAIR_ID}:${role}`,
+		repairId: REPAIR_ID,
+		role,
+		documentId: clean(document?._id),
+		originalHash: canonicalEjsonSha256(document),
+		backedUpAt: plan.repairAt,
+		originalDocument: cloneBson(document),
+	};
+	return { ...basis, recordHash: canonicalEjsonSha256(basis) };
+}
+
+function backupRecordsForPlan(plan) {
+	if (plan.state !== "ready") {
+		fail("Only an exact ready plan can build a durable backup set.");
+	}
+	const scope = plan.scope;
+	return [
+		backupRecord(plan, "reservation_before", scope.reservation),
+		backupRecord(plan, "hotelrunner_event_evidence", scope.event),
+		backupRecord(plan, "hotelrunner_mirror_evidence", scope.mirror),
+		backupRecord(plan, "direct_trip_email_evidence", scope.directAudit),
+		backupRecord(plan, "hotelrunner_email_evidence", scope.hotelRunnerAudit),
+	];
+}
+
+function verifyBackupRecords(records, manifest = null, target = TARGET) {
+	if (!Array.isArray(records) || records.length !== BACKUP_ROLES.length) {
+		fail("The permanent Trip backup set is incomplete.", "TRIP_REPAIR_BACKUP_INVALID");
+	}
+	const byRole = new Map();
+	for (const record of records) {
+		const { recordHash, ...basis } = record || {};
+		if (
+			clean(record?.repairId) !== REPAIR_ID ||
+			!BACKUP_ROLES.includes(record?.role) ||
+			byRole.has(record.role) ||
+			canonicalEjsonSha256(basis) !== recordHash ||
+			canonicalEjsonSha256(record.originalDocument) !== record.originalHash
+		) {
+			fail("A permanent Trip backup record failed integrity.", "TRIP_REPAIR_BACKUP_INVALID");
+		}
+		byRole.set(record.role, record);
+	}
+	const expectedIds = {
+		reservation_before: target.reservationMongoId,
+		hotelrunner_event_evidence: target.eventId,
+		hotelrunner_mirror_evidence: target.mirrorId,
+		direct_trip_email_evidence: target.directInboundEmailId,
+		hotelrunner_email_evidence: target.hotelRunnerInboundEmailId,
+	};
+	for (const [role, documentId] of Object.entries(expectedIds)) {
+		if (clean(byRole.get(role)?.documentId) !== documentId) {
+			fail("A permanent Trip backup role is bound to the wrong document.");
+		}
+	}
+	const backupSetSha256 = canonicalEjsonSha256(
+		BACKUP_ROLES.map((role) => ({ role, recordHash: byRole.get(role).recordHash }))
+	);
+	if (manifest) {
+		if (
+			manifest.backupSetSha256 !== backupSetSha256 ||
+			Number(manifest.backupRecordCount) !== BACKUP_ROLES.length ||
+			BACKUP_ROLES.some(
+				(role) => manifest.backupRecordHashes?.[role] !== byRole.get(role).recordHash
+			)
+		) {
+			fail("The Trip manifest no longer binds its immutable backup set.");
+		}
+	}
+	return { byRole, backupSetSha256 };
+}
+
+function manifestForPlan(plan, records) {
+	const verified = verifyBackupRecords(records, null, plan.scope.target);
+	const document = {
+		_id: REPAIR_ID,
+		repairId: REPAIR_ID,
+		version: 1,
+		state: "backed_up",
+		releaseSha: plan.releaseSha,
+		applyStrategy: APPLY_STRATEGY,
+		proofPlannedAt: plan.repairAt,
+		planHash: plan.planHash,
+		targetKey: plan.scope.target.key,
+		reservationMongoId: plan.scope.target.reservationMongoId,
+		otaBookingId: plan.scope.target.otaBookingId,
+		hotelId: plan.scope.target.hotelId,
+		backupCollection: BACKUP_COLLECTION,
+		backupRecordCount: records.length,
+		backupRecordHashes: Object.fromEntries(
+			records.map((record) => [record.role, record.recordHash])
+		),
+		backupSetSha256: verified.backupSetSha256,
+		originalHash: plan.scope.originalHash,
+		expectedRepairedHash: plan.scope.expectedHash,
+		protectedHash: plan.scope.protectedHash,
+		evidenceHash: plan.scope.evidence.evidenceHash,
+		otaCommercialEvidenceHash: plan.scope.target.otaCommercialEvidenceHash,
+		conversionSourceHash: plan.scope.target.conversionSourceHash,
+		directInboundDocumentHash: plan.scope.target.directInboundDocumentHash,
+		eventDocumentHash: plan.scope.target.eventDocumentHash,
+		mirrorDocumentHash: plan.scope.target.mirrorDocumentHash,
+		vendorApiCalls: 0,
+	};
+	return { ...document, manifestBasisHash: canonicalEjsonSha256(document) };
+}
+
+function assertManifestPlan(manifest, expected) {
+	const mutableKeys = new Set([
+		"state",
+		"applyingAt",
+		"applyAttemptNumber",
+		"applyOwnerToken",
+		"appliedAt",
+		"appliedDocumentHash",
+		"postverifiedAt",
+		"compensatedAt",
+		"compensationReasonCode",
+		"compensationDocumentHash",
+		"compensationWritePerformed",
+		"compensationAcknowledgementRecovered",
+		"manualInterventionAt",
+		"manualInterventionReasonCode",
+		"manualInterventionObservedHash",
+	]);
+	const strip = (value) => {
+		const next = cloneBson(value || {});
+		for (const key of mutableKeys) delete next[key];
+		return next;
+	};
+	if (
+		!manifest ||
+		![...MANIFEST_ACTIONABLE_STATES, "manual_intervention_required"].includes(
+			manifest.state
+		) ||
+		canonicalEjsonSha256(strip(manifest)) !== canonicalEjsonSha256(strip(expected))
+	) {
+		fail("An existing Trip manifest conflicts with the approved plan.");
+	}
+}
+
+async function insertImmutable(collection, document) {
+	const existing = await collection.findOne({ _id: document._id });
+	if (existing) {
+		if (canonicalEjsonSha256(existing) !== canonicalEjsonSha256(document)) {
+			fail("An immutable Trip repair artifact already exists with different content.");
+		}
+		return existing;
+	}
+	let insertionError = null;
+	try {
+		await collection.insertOne(cloneBson(document), {
+			writeConcern: { w: "majority" },
+		});
+	} catch (error) {
+		insertionError = error;
+	}
+	const observed = await collection.findOne({ _id: document._id });
+	if (observed && canonicalEjsonSha256(observed) === canonicalEjsonSha256(document)) {
+		return observed;
+	}
+	const error = new Error(
+		`Durable Trip artifact insertion did not commit${
+			insertionError ? `: ${insertionError.message}` : "."
+		}`
+	);
+	error.code = "TRIP_REPAIR_BACKUP_WRITE_FAILED";
+	throw error;
+}
+
+async function ensureDurableBackup(plan, db) {
+	if (!db || typeof db.collection !== "function") {
+		fail("A MongoDB database handle is required for the durable backup.");
+	}
+	const backups = db.collection(BACKUP_COLLECTION);
+	const manifests = db.collection(MANIFEST_COLLECTION);
+	const records = backupRecordsForPlan(plan);
+	for (const record of records) await insertImmutable(backups, record);
+	const observedRecords = await backups
+		.find({ repairId: REPAIR_ID })
+		.sort({ role: 1 })
+		.toArray();
+	verifyBackupRecords(observedRecords, null, plan.scope.target);
+	const expectedManifest = manifestForPlan(plan, records);
+	let manifest = await manifests.findOne({ _id: REPAIR_ID });
+	if (!manifest) manifest = await insertImmutable(manifests, expectedManifest);
+	assertManifestPlan(manifest, expectedManifest);
+	verifyBackupRecords(observedRecords, manifest, plan.scope.target);
+	return { manifest, records: observedRecords, expectedManifest };
+}
+
+async function loadDurableBackup(db, target = TARGET) {
+	if (!db || typeof db.collection !== "function") {
+		fail("A MongoDB database handle is required for backup verification.");
+	}
+	const manifest = await db.collection(MANIFEST_COLLECTION).findOne({ _id: REPAIR_ID });
+	const records = await db
+		.collection(BACKUP_COLLECTION)
+		.find({ repairId: REPAIR_ID })
+		.sort({ role: 1 })
+		.toArray();
+	if (!manifest) fail("The durable Trip repair manifest is missing.");
+	const verified = verifyBackupRecords(records, manifest, target);
+	return { manifest, records, ...verified };
+}
+
+async function readReservation(collection, id) {
+	return collection.findOne(
+		{ _id: cloneBson(id) },
+		{ readPreference: "primary", readConcern: { level: "majority" } }
+	);
+}
+
+async function replaceReservationOnce(collection, original, expected) {
+	const beforeHash = canonicalEjsonSha256(original);
+	const afterHash = canonicalEjsonSha256(expected);
+	let acknowledgementError = null;
+	try {
+		const result = await collection.replaceOne(
+			buildExactCasFilter(original),
+			cloneBson(expected),
+			{ writeConcern: { w: "majority" } }
+		);
+		const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+		const modified = Number(result?.modifiedCount ?? result?.nModified ?? 0);
+		if (result?.acknowledged === false || matched !== 1 || modified !== 1) {
+			throw new Error("The full-document Trip CAS did not replace exactly one reservation.");
+		}
+	} catch (error) {
+		acknowledgementError = error;
+	}
+	const observed = await readReservation(collection, original._id);
+	const observedHash = observed ? canonicalEjsonSha256(observed) : "";
+	if (observedHash === afterHash) {
+		return { document: observed, acknowledgementLost: Boolean(acknowledgementError) };
+	}
+	if (observedHash === beforeHash) {
+		const error = new Error(
+			`The Trip CAS did not commit${
+				acknowledgementError ? `: ${acknowledgementError.message}` : "."
+			}`
+		);
+		error.code = "TRIP_REPAIR_CAS_REJECTED";
+		throw error;
+	}
+	const error = new Error(
+		"The Trip CAS is ambiguous: the live reservation is neither the exact before nor exact after document."
+	);
+	error.code = "TRIP_REPAIR_MANUAL_INTERVENTION_REQUIRED";
+	throw error;
+}
+
+async function beginManifestApply(db, manifest, plan, ownerToken) {
+	if (!/^[a-f0-9]{64}$/.test(lower(ownerToken))) {
+		fail("A unique Trip apply owner token is required.");
+	}
+	if (manifest.state === "applying") {
+		if (manifest.applyOwnerToken === ownerToken) return manifest;
+		fail(
+			"Another Trip repair execution owns the applying manifest.",
+			"TRIP_REPAIR_APPLY_ALREADY_OWNED"
+		);
+	}
+	if (manifest.state !== "backed_up") {
+		fail(
+			`The Trip manifest is not actionable from state ${clean(manifest.state) || "missing"}.`,
+			"TRIP_REPAIR_MANIFEST_STATE_INVALID"
+		);
+	}
+	const collection = db.collection(MANIFEST_COLLECTION);
+	const attemptNumber = Number(manifest.applyAttemptNumber || 0) + 1;
+	const result = await collection.updateOne(
+		{
+			_id: REPAIR_ID,
+			state: "backed_up",
+			planHash: plan.planHash,
+			backupSetSha256: manifest.backupSetSha256,
+			originalHash: plan.scope.originalHash,
+			expectedRepairedHash: plan.scope.expectedHash,
+		},
+		{
+			$set: {
+				state: "applying",
+				applyingAt: new Date(plan.repairAt),
+				applyAttemptNumber: attemptNumber,
+				applyOwnerToken: ownerToken,
+			},
+		},
+		{ writeConcern: { w: "majority" } }
+	);
+	const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+	const observed = await collection.findOne({ _id: REPAIR_ID });
+	if (
+		matched !== 1 &&
+		!(
+			observed?.state === "applying" &&
+			observed.planHash === plan.planHash &&
+			observed.applyOwnerToken === ownerToken &&
+			Number(observed.applyAttemptNumber) === attemptNumber
+		)
+	) {
+		fail("The Trip manifest applying-state CAS was rejected.");
+	}
+	if (
+		observed?.state !== "applying" ||
+		observed.planHash !== plan.planHash ||
+		observed.applyOwnerToken !== ownerToken ||
+		observed.originalHash !== plan.scope.originalHash ||
+		observed.expectedRepairedHash !== plan.scope.expectedHash ||
+		Number(observed.applyAttemptNumber) !== attemptNumber
+	) {
+		fail("The Trip manifest applying state could not be verified.");
+	}
+	return observed;
+}
+
+async function classifyLiveReservation(collection, plan) {
+	const document = await readReservation(collection, plan.scope.reservation._id);
+	const hash = document ? canonicalEjsonSha256(document) : "";
+	if (hash === plan.scope.originalHash) return { state: "original", document, hash };
+	if (hash === plan.scope.expectedHash) return { state: "expected", document, hash };
+	return { state: document ? "foreign" : "missing", document, hash };
+}
+
+async function markManifestManualIntervention(
+	db,
+	manifest,
+	plan,
+	observedHash,
+	reasonCode,
+	ownerToken
+) {
+	const collection = db.collection(MANIFEST_COLLECTION);
+	try {
+		await collection.updateOne(
+			{
+				_id: REPAIR_ID,
+				state: "applying",
+				planHash: plan.planHash,
+				backupSetSha256: manifest.backupSetSha256,
+				applyOwnerToken: ownerToken,
+			},
+			{
+				$set: {
+					state: "manual_intervention_required",
+					manualInterventionAt: new Date(),
+					manualInterventionReasonCode: clean(reasonCode).slice(0, 100),
+					manualInterventionObservedHash: lower(observedHash),
+				},
+			},
+			{ writeConcern: { w: "majority" } }
+		);
+	} catch (_error) {
+		// The reservation remains untouched when its exact hash is foreign. The
+		// permanent backup still provides the operator with the recovery source.
+	}
+}
+
+async function markManifestCompensated(
+	db,
+	manifest,
+	plan,
+	{
+		reasonCode,
+		writePerformed,
+		acknowledgementRecovered,
+		ownerToken,
+		compensatedAt = new Date(),
+	}
+) {
+	const collection = db.collection(MANIFEST_COLLECTION);
+	const fields = {
+		state: "backed_up",
+		compensatedAt,
+		compensationReasonCode: clean(reasonCode).slice(0, 100),
+		compensationDocumentHash: plan.scope.originalHash,
+		compensationWritePerformed: writePerformed === true,
+		compensationAcknowledgementRecovered:
+			acknowledgementRecovered === true,
+	};
+	const result = await collection.updateOne(
+		{
+			_id: REPAIR_ID,
+			state: "applying",
+			planHash: plan.planHash,
+			backupSetSha256: manifest.backupSetSha256,
+			applyOwnerToken: ownerToken,
+			originalHash: plan.scope.originalHash,
+			expectedRepairedHash: plan.scope.expectedHash,
+		},
+		{ $set: fields },
+		{ writeConcern: { w: "majority" } }
+	);
+	const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+	const observed = await collection.findOne({ _id: REPAIR_ID });
+	if (
+		matched !== 1 &&
+		!(
+			observed?.state === "backed_up" &&
+			observed.planHash === plan.planHash &&
+			observed.compensationDocumentHash === plan.scope.originalHash
+		)
+	) {
+		fail(
+			"The Trip reservation was restored but its compensation manifest transition is unresolved.",
+			"TRIP_REPAIR_COMPENSATION_MANIFEST_UNRESOLVED"
+		);
+	}
+	if (
+		observed?.state !== "backed_up" ||
+		observed.planHash !== plan.planHash ||
+		observed.compensationDocumentHash !== plan.scope.originalHash
+	) {
+		fail(
+			"The Trip reservation was restored but the compensated manifest could not be verified.",
+			"TRIP_REPAIR_COMPENSATION_MANIFEST_UNRESOLVED"
+		);
+	}
+	return observed;
+}
+
+async function compensateReservation({
+	db,
+	collection,
+	manifest,
+	plan,
+	cause,
+	ownerToken,
+}) {
+	let classification = await classifyLiveReservation(collection, plan);
+	let writePerformed = false;
+	let acknowledgementRecovered = false;
+	if (classification.state === "expected") {
+		const resolution = await replaceReservationOnce(
+			collection,
+			plan.scope.expected,
+			plan.scope.reservation
+		);
+		writePerformed = true;
+		acknowledgementRecovered = resolution.acknowledgementLost === true;
+		classification = await classifyLiveReservation(collection, plan);
+	}
+	if (classification.state !== "original") {
+		await markManifestManualIntervention(
+			db,
+			manifest,
+			plan,
+			classification.hash,
+			cause?.code || "TRIP_REPAIR_COMPENSATION_BLOCKED",
+			ownerToken
+		);
+		const error = new Error(
+			"Standalone compensation stopped because the live Trip reservation is not the exact original or expected document."
+		);
+		error.code = "TRIP_REPAIR_MANUAL_INTERVENTION_REQUIRED";
+		error.observedHash = classification.hash;
+		error.cause = cause;
+		throw error;
+	}
+	await markManifestCompensated(db, manifest, plan, {
+		reasonCode: cause?.code || "TRIP_REPAIR_APPLY_FAILED",
+		writePerformed,
+		acknowledgementRecovered,
+		ownerToken,
+	});
+	return { writePerformed, acknowledgementRecovered };
+}
+
+async function markManifestApplied(
+	db,
+	manifest,
+	expectedHash,
+	appliedAt,
+	ownerToken = ""
+) {
+	if (manifest.state === "applied") {
+		if (manifest.appliedDocumentHash !== expectedHash) {
+			fail("Applied Trip manifest hash is inconsistent.");
+		}
+		return manifest;
+	}
+	const collection = db.collection(MANIFEST_COLLECTION);
+	const stateFilter = ownerToken
+		? { state: "applying", applyOwnerToken: ownerToken }
+		: { state: { $in: ["backed_up", "applying"] } };
+	const result = await collection.updateOne(
+		{
+			_id: REPAIR_ID,
+			...stateFilter,
+			planHash: manifest.planHash,
+			backupSetSha256: manifest.backupSetSha256,
+			expectedRepairedHash: expectedHash,
+		},
+		{
+			$set: {
+				state: "applied",
+				appliedAt,
+				appliedDocumentHash: expectedHash,
+				postverifiedAt: appliedAt,
+			},
+		},
+		{ writeConcern: { w: "majority" } }
+	);
+	const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+	if (matched !== 1) {
+		const observed = await collection.findOne({ _id: REPAIR_ID });
+		if (
+			observed?.state === "applied" &&
+			observed.appliedDocumentHash === expectedHash
+		) {
+			return observed;
+		}
+		fail("The Trip manifest applied-state CAS was rejected.");
+	}
+	const observed = await collection.findOne({ _id: REPAIR_ID });
+	if (
+		observed?.state !== "applied" ||
+		observed.appliedDocumentHash !== expectedHash
+	) {
+		fail("The Trip manifest applied state could not be verified.");
+	}
+	return observed;
+}
+
+async function applyPlan(plan, { db, models = {} } = {}) {
+	const ReservationCollection =
+		models.ReservationCollection ||
+		(models.ReservationModel || Reservations)?.collection;
+	if (
+		!ReservationCollection ||
+		typeof ReservationCollection.findOne !== "function" ||
+		typeof ReservationCollection.replaceOne !== "function"
+	) {
+		fail("The raw reservation collection is required for full-document CAS.");
+	}
+	if (plan.state === "already_applied") {
+		const backup = await loadDurableBackup(db, plan.scope.target);
+		const original = backup.byRole.get("reservation_before")?.originalDocument;
+		if (
+			!original ||
+			canonicalEjsonSha256(protectedReservationSnapshot(original)) !==
+				plan.scope.protectedHash ||
+			!MANIFEST_ACTIONABLE_STATES.includes(backup.manifest.state)
+		) {
+			fail("Already-applied Trip state is not bound to its exact permanent backup.");
+		}
+		const liveHash = canonicalEjsonSha256(plan.scope.reservation);
+		if (backup.manifest.expectedRepairedHash !== liveHash) {
+			fail("Already-applied Trip reservation differs from its durable manifest.");
+		}
+		await markManifestApplied(
+			db,
+			backup.manifest,
+			liveHash,
+			plan.scope.evidence.appliedAt || plan.repairAt
+		);
+		return { state: "already_applied", changed: 0, vendorApiCalls: 0 };
+	}
+	const backup = await ensureDurableBackup(plan, db);
+	const writeFence = await loadPlan({
+		target: plan.scope.target,
+		repairAt: plan.repairAt,
+		releaseSha: plan.releaseSha,
+		models,
+	});
+	if (
+		writeFence.state !== "ready" ||
+		writeFence.planHash !== plan.planHash ||
+		writeFence.scope.originalHash !== plan.scope.originalHash ||
+		writeFence.scope.expectedHash !== plan.scope.expectedHash
+	) {
+		fail("The exact Trip scope changed after permanent backup and before apply.");
+	}
+	const ownerToken = crypto.randomBytes(32).toString("hex");
+	let applyingManifest = await beginManifestApply(
+		db,
+		backup.manifest,
+		plan,
+		ownerToken
+	);
+	let resolution = { acknowledgementLost: false };
+	try {
+		const beforeWrite = await classifyLiveReservation(
+			ReservationCollection,
+			plan
+		);
+		if (beforeWrite.state === "original") {
+			resolution = await replaceReservationOnce(
+				ReservationCollection,
+				plan.scope.reservation,
+				plan.scope.expected
+			);
+		} else if (beforeWrite.state !== "expected") {
+			const error = new Error(
+				"The Trip reservation changed after its write fence and before full-document CAS."
+			);
+			error.code = "TRIP_REPAIR_MANUAL_INTERVENTION_REQUIRED";
+			error.observedHash = beforeWrite.hash;
+			throw error;
+		}
+		const verifiedPlan = await loadPlan({
+			target: plan.scope.target,
+			repairAt: plan.repairAt,
+			releaseSha: plan.releaseSha,
+			models,
+		});
+		if (
+			verifiedPlan.state !== "already_applied" ||
+			canonicalEjsonSha256(verifiedPlan.scope.reservation) !==
+				plan.scope.expectedHash ||
+			verifiedPlan.scope.protectedHash !== plan.scope.protectedHash
+		) {
+			fail("Post-CAS Trip verification did not prove the exact protected result.");
+		}
+		await markManifestApplied(
+			db,
+			applyingManifest,
+			plan.scope.expectedHash,
+			plan.repairAt,
+			ownerToken
+		);
+		return {
+			state: "applied",
+			changed: beforeWrite.state === "original" ? 1 : 0,
+			acknowledgementRecovered: resolution.acknowledgementLost,
+			vendorApiCalls: 0,
+		};
+	} catch (error) {
+		const observedManifest = await db
+			.collection(MANIFEST_COLLECTION)
+			.findOne({ _id: REPAIR_ID });
+		const observedReservation = await classifyLiveReservation(
+			ReservationCollection,
+			plan
+		);
+		if (
+			observedManifest?.state === "applied" &&
+			observedManifest.appliedDocumentHash === plan.scope.expectedHash &&
+			observedReservation.state === "expected"
+		) {
+			return {
+				state: "applied",
+				changed: 1,
+				acknowledgementRecovered: true,
+				vendorApiCalls: 0,
+			};
+		}
+		if (observedManifest?.state === "applying") {
+			applyingManifest = observedManifest;
+		}
+		try {
+			await compensateReservation({
+				db,
+				collection: ReservationCollection,
+				manifest: applyingManifest,
+				plan,
+				cause: error,
+				ownerToken,
+			});
+		} catch (compensationError) {
+			compensationError.applyCause = error;
+			throw compensationError;
+		}
+		error.compensated = true;
+		throw error;
+	}
+}
+
+function sanitizedOutput(plan, mode, proof = "") {
+	const target = plan.scope.target;
+	return {
+		mode,
+		repairId: REPAIR_ID,
+		releaseSha: plan.releaseSha,
+		applyStrategy: APPLY_STRATEGY,
+		state: plan.state,
+		proof: mode === "dry_run" && plan.state === "ready" ? proof : undefined,
+		proofExpiresInMinutes:
+			mode === "dry_run" && plan.state === "ready"
+				? PROOF_MAX_AGE_MS / 60_000
+				: undefined,
+		targetCount: 1,
+		target: {
+			otaBookingId: target.otaBookingId,
+			reservationMongoId: target.reservationMongoId,
+			stay: [target.checkinDate, target.checkoutDate],
+			currency: target.propertyCurrency,
+			guestGross: target.grossTotalSar,
+			hotelPayout: target.payoutTotalSar,
+			otaDeduction: target.otaExpenseTotalSar,
+			explicitOtaCommission: null,
+			protectedRoot: target.rootTotalSar,
+			platformMargin: target.platformMarginSar,
+			source: {
+				currency: target.sourceCurrency,
+				guestGross: target.sourceGross,
+				hotelPayout: target.sourcePayout,
+				hotelRunnerReportedAmount: target.hotelRunnerReportedSourceAmount,
+			},
+		},
+		backupCollection: BACKUP_COLLECTION,
+		manifestCollection: MANIFEST_COLLECTION,
+		mutatesReservationCount: 1,
+		createsReservations: false,
+		mutatesLifecycleGuestReviewPaymentVccSettlementRootOrAudits: false,
+		mutatesHotelRunnerEventMirrorOrInboundAudit: false,
+		vendorApiCalls: 0,
+	};
+}
+
+async function connectDatabase(database) {
+	await mongoose.connect(database, {
+		useNewUrlParser: true,
+		useUnifiedTopology: true,
+		autoIndex: false,
+		autoCreate: false,
+		readPreference: "primary",
+	});
+}
+
+async function main(
+	argv = process.argv.slice(2),
+	{
+		clock = () => new Date(),
+		connect = connectDatabase,
+		disconnect = async () => mongoose.disconnect(),
+		resolveReleaseSha = currentReleaseSha,
+		models = {},
+		db: injectedDb = null,
+	} = {}
+) {
+	const options = parseArguments(argv);
+	assertRelease(options.releaseSha, resolveReleaseSha());
+	const now = clock();
+	const proofDetails = options.apply ? parseProof(options.proof, now) : null;
+	const repairAt = proofDetails?.plannedAt || now;
+	const database =
+		process.env.DATABASE || process.env.MONGO_URI || process.env.MONGODB_URI;
+	if (!database && !models.skipConnect) fail("Missing DATABASE/MONGO connection string.");
+	let connectedHere = false;
+	try {
+		if (!models.skipConnect) {
+			await connect(database);
+			connectedHere = true;
+		}
+		const db = injectedDb || mongoose.connection.db;
+		const plan = await loadPlan({
+			target: models.target || TARGET,
+			repairAt,
+			releaseSha: options.releaseSha,
+			models,
+		});
+		const generatedProof = proofToken(plan);
+		if (
+			options.apply &&
+			plan.state === "ready" &&
+			(proofDetails.planHash !== plan.planHash || options.proof !== generatedProof)
+		) {
+			fail("The live exact scope does not match the supplied dry-run proof.", "TRIP_REPAIR_PROOF_MISMATCH");
+		}
+		if (plan.state === "already_applied") {
+			await loadDurableBackup(db, plan.scope.target);
+		}
+		console.log(
+			JSON.stringify(
+				sanitizedOutput(plan, options.apply ? "apply" : "dry_run", generatedProof),
+				null,
+				2
+			)
+		);
+		if (!options.apply) {
+			return {
+				state:
+					plan.state === "already_applied"
+						? "already_applied"
+						: "dry_run_ready",
+				plan,
+				proof: generatedProof,
+			};
+		}
+		const result = await applyPlan(plan, { db, models });
+		console.log(
+			JSON.stringify(
+				{
+					state: result.state,
+					repairId: REPAIR_ID,
+					releaseSha: plan.releaseSha,
+					changed: result.changed,
+					acknowledgementRecovered:
+						result.acknowledgementRecovered === true,
+					vendorApiCalls: 0,
+				},
+				null,
+				2
+			)
+		);
+		return result;
+	} finally {
+		if (connectedHere) await disconnect();
+	}
+}
+
+if (require.main === module) {
+	main().catch((error) => {
+		console.error("[trip-commercial-enrichment-repair] stopped", {
+			code: clean(error?.code || "TRIP_COMMERCIAL_REPAIR_FAILED").slice(0, 100),
+			message: clean(error?.message || "Unknown repair failure").slice(0, 500),
+		});
+		process.exitCode = 1;
+	});
+}
+
+module.exports = {
+	APPLY_STRATEGY,
+	BACKUP_COLLECTION,
+	BACKUP_ROLES,
+	MANIFEST_ACTIONABLE_STATES,
+	MANIFEST_COLLECTION,
+	PROOF_MAX_AGE_MS,
+	REPAIR_ID,
+	TARGET,
+	applyPlan,
+	assertCommercialProjection,
+	assertRelease,
+	backupRecordsForPlan,
+	beginManifestApply,
+	buildExpectedReservation,
+	currentReleaseSha,
+	classifyLiveReservation,
+	compensateReservation,
+	ensureDurableBackup,
+	loadDurableBackup,
+	loadPlan,
+	loadScope,
+	main,
+	manifestForPlan,
+	normalizedFromAudit,
+	parseArguments,
+	parseProof,
+	proofToken,
+	protectedReservationSnapshot,
+	replaceReservationOnce,
+	reservationLookup,
+	sha256,
+	trustedExchangeEvidence,
+	verifyBackupRecords,
+};

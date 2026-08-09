@@ -3371,6 +3371,38 @@ const mergeDetailCandidate = ({
 	snapshot = {},
 	detailUrl = "",
 }) => {
+	const owns = (source, field) =>
+		Object.prototype.hasOwnProperty.call(source, field);
+	const validConflictContract = (source) =>
+		owns(source, "commercialEvidenceConflict") &&
+		owns(source, "commercialEvidenceConflicts") &&
+		typeof source.commercialEvidenceConflict === "boolean" &&
+		Array.isArray(source.commercialEvidenceConflicts) &&
+		source.commercialEvidenceConflicts.every(
+			(reason) => typeof reason === "string" && reason.trim() !== ""
+		) &&
+		source.commercialEvidenceConflict ===
+			(source.commercialEvidenceConflicts.length > 0);
+	const candidateContractPresent =
+		owns(candidate, "commercialEvidenceConflict") ||
+		owns(candidate, "commercialEvidenceConflicts");
+	const invalidConflictContract =
+		!validConflictContract(detail) ||
+		(candidateContractPresent && !validConflictContract(candidate));
+	const commercialEvidenceConflicts = Array.from(
+		new Set([
+			...(Array.isArray(candidate.commercialEvidenceConflicts)
+				? candidate.commercialEvidenceConflicts
+				: []),
+			...(Array.isArray(detail.commercialEvidenceConflicts)
+				? detail.commercialEvidenceConflicts
+				: []),
+			...(invalidConflictContract
+				? ["invalid_commercial_evidence_contract"]
+				: []),
+		])
+	).sort();
+	const commercialEvidenceConflict = commercialEvidenceConflicts.length > 0;
 	const detailPaymentSummary = detail.paymentSummary || {};
 	const mergedPaymentSummary = mergePaymentSummaries(
 		candidate.paymentSummary,
@@ -3407,6 +3439,8 @@ const mergeDetailCandidate = ({
 		...(hasDetailSourceCurrency
 			? { sourceCurrency: detailSourceCurrency }
 			: {}),
+		commercialEvidenceConflict,
+		commercialEvidenceConflicts,
 		paymentSummary: mergedPaymentSummary,
 		sourceUrl: snapshot.url || detailUrl || candidate.sourceUrl,
 		detailUrl: candidate.detailUrl || detailUrl,
@@ -4609,7 +4643,7 @@ const runCollector = async ({
 					Number(candidate.paymentSummary?.totalGuestPaymentAmount || 0) > 0;
 				if (hasPaymentSignal) {
 					buckets.paymentOrVccAvailable.push(
-						paymentSignalProjection(candidate)
+						paymentSignalProjection(classification.item)
 					);
 				}
 				buckets[classification.bucket].push(classification.item);

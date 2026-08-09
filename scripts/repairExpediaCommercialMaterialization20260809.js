@@ -1908,10 +1908,10 @@ function buildCommercialEvidence({
   };
 }
 
-function optionalSourceMoney(value) {
+function optionalSourceMoney(value, { allowNegative = false } = {}) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) {
+  if (!Number.isFinite(number) || (!allowNegative && number < 0)) {
     fail(
       "An optional source payment amount is invalid.",
       "EXPEDIA_V2_PORTAL_MONEY_INVALID"
@@ -1922,20 +1922,21 @@ function optionalSourceMoney(value) {
 
 function materializedPaymentSummary(candidate, commercial, sourceJobHash) {
   const source = candidate?.paymentSummary || {};
-  const convert = (value) => {
-    const amount = optionalSourceMoney(value);
-    return amount === null ? null : round2(amount * commercial.conversion.rate);
-  };
   const fields = [
-    ["sourceNightlyRateAmount", "nightlyRateAmount"],
-    ["sourceTaxesAmount", "taxesAmount"],
-    ["sourceExpediaCompensationAmount", "expediaCompensationAmount"],
-    ["sourceAcceleratorAmount", "acceleratorAmount"],
+    ["sourceNightlyRateAmount", "nightlyRateAmount", false],
+    ["sourceTaxesAmount", "taxesAmount", false],
+    ["sourceExpediaCompensationAmount", "expediaCompensationAmount", true],
+    ["sourceAcceleratorAmount", "acceleratorAmount", true],
   ];
   const optional = {};
-  for (const [sourceField, propertyField] of fields) {
-    const sourceValue = optionalSourceMoney(source[sourceField]);
-    const propertyValue = convert(source[sourceField]);
+  for (const [sourceField, propertyField, allowNegative] of fields) {
+    const sourceValue = optionalSourceMoney(source[sourceField], {
+      allowNegative,
+    });
+    const propertyValue =
+      sourceValue === null
+        ? null
+        : round2(sourceValue * commercial.conversion.rate);
     if (
       source[propertyField] !== null &&
       source[propertyField] !== undefined &&

@@ -10,6 +10,7 @@ const {
 	loadHotelRunnerEmailCommercialBridge,
 } = require("./hotelrunnerEmailCommercialBridge");
 const {
+	applyLiveSarConversion,
 	buildHotelRunnerEmailCommercialEvidence,
 } = require("./otaReservationMapper");
 
@@ -81,6 +82,10 @@ function materializedExisting(inbound = authenticatedInbound(), overrides = {}) 
 	);
 	assert.ok(marker, "fixture must contain explicit commercial evidence");
 	const paymentSummary = { ...inbound.paymentSummary };
+	const rootTotal = 50;
+	const platformMargin = Number(
+		(Number(marker.payoutTotalSar) - rootTotal).toFixed(2)
+	);
 	return {
 		_id: RESERVATION_ID,
 		otaIdentityKey: `agoda:${inbound.confirmationNumber}`,
@@ -96,10 +101,10 @@ function materializedExisting(inbound = authenticatedInbound(), overrides = {}) 
 				pricingByDay: [
 					{
 						clientPrice: marker.grossTotalSar,
-						rootPrice: 50,
+						rootPrice: rootTotal,
 						netAfterExpenses: marker.payoutTotalSar,
 						otaExpenseAmount: marker.otaExpenseTotalSar,
-						platformMargin: 8.82,
+						platformMargin,
 						hotelRunnerSourcePrice: marker.payoutTotalSar,
 					},
 				],
@@ -107,10 +112,10 @@ function materializedExisting(inbound = authenticatedInbound(), overrides = {}) 
 		],
 		adminPricing: {
 			clientTotal: marker.grossTotalSar,
-			rootTotal: 50,
+			rootTotal,
 			netAfterExpensesTotal: marker.payoutTotalSar,
 			otaExpenseTotal: marker.otaExpenseTotalSar,
-			platformMarginTotal: 8.82,
+			platformMarginTotal: platformMargin,
 			defaultDeductionApplied: false,
 			commercialVerified: false,
 			payoutFallbackReason: "hotelrunner_commercial_evidence_stale",
@@ -265,7 +270,7 @@ test("Trip HotelRunner relay keeps the matching USD amount commercially unresolv
 	assert.equal(result.amountRole, "unknown");
 	assert.equal(result.sourceCurrency, "USD");
 	assert.equal(result.sourceAmount, 18.78);
-	assert.equal(result.grossTotalSar, 70.43);
+	assert.equal(result.grossTotalSar, null);
 	assert.equal(result.evidence, null);
 
 	const payoutAttempt = await loadHotelRunnerEmailCommercialBridge(
@@ -285,6 +290,97 @@ test("Trip HotelRunner relay keeps the matching USD amount commercially unresolv
 		reason: "payout_evidence_required",
 		amountRole: "",
 	});
+});
+
+test("Trip bridge accepts different cross-currency amounts only with trusted conversion evidence", async () => {
+	const confirmationNumber = "7711223344556699";
+	const fetchedAt = "2026-08-09T08:00:00.000Z";
+	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
+	const inbound = await applyLiveSarConversion(
+		authenticatedInbound({
+			provider: "trip",
+			trustedTransportProvider: "trip",
+			confirmationNumber,
+			reservationId: confirmationNumber,
+			amount: 23.4,
+			totalAmountSar: null,
+			sourceAmount: 23.4,
+			sourceCurrency: "USD",
+			currency: "USD",
+			propertyCurrency: "SAR",
+			propertyConversionVerified: false,
+			totalPayoutSar: null,
+			netAfterExpensesTotal: null,
+			paymentSummary: {
+				sourceCurrency: "USD",
+				sourceTotalGuestPaymentAmount: 23.4,
+				sourceTotalPayoutAmount: 20.1,
+				totalGuestPaymentAmount: null,
+				totalPayoutAmount: null,
+				currency: null,
+			},
+			source: {
+				receivedAt: "2026-08-09T07:45:00.000Z",
+				textHash:
+					"6e6dc9e61568504ea2e5b38fbf0c632cb3e5e6a3c5902306b5064102d42fa711",
+			},
+		}),
+		{
+			apiKey: "bridge-test-credential",
+			cache: new Map(),
+			now: () => Date.parse(fetchedAt),
+			fetchImpl: async () => ({
+				ok: true,
+				async json() {
+					return {
+						result: "success",
+						base_code: "USD",
+						target_code: "SAR",
+						conversion_rate: 3.81,
+						time_last_update_unix:
+							Date.parse(sourceTimestamp) / 1000,
+					};
+				},
+			}),
+		}
+	);
+	const existing = materializedExisting(inbound, {
+		otaIdentityKey: `hotelrunner:${confirmationNumber}`,
+		otaCrossTransportIdentityKey: `trip:${confirmationNumber}`,
+	});
+	const observations = {};
+	const result = await loadHotelRunnerEmailCommercialBridge(
+		{
+			existing,
+			normalized: hotelRunnerNormalized({
+				providerNumber: confirmationNumber,
+				currency: "USD",
+				totalCents: 2010,
+			}),
+			provider: "trip",
+		},
+		{ InboundEmailModel: modelFor(inboundRecord(inbound), observations) }
+	);
+
+	assert.equal(inbound.currency, "SAR");
+	assert.equal(inbound.sourceCurrency, "USD");
+	assert.equal(inbound.totalAmountSar, 89.15);
+	assert.equal(inbound.totalPayoutSar, 76.58);
+	assert.equal(inbound.propertyConversionVerified, true);
+	assert.equal(
+		inbound.currencyConversionEvidence.provenance.provider,
+		"exchange_rate_api"
+	);
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(result.amountRole, "payout");
+	assert.equal(result.grossTotalSar, 89.15);
+	assert.equal(result.evidence.payoutTotalSar, 76.58);
+	assert.equal(result.evidence.otaExpenseTotalSar, 12.57);
+	assert.ok(
+		observations.projection.includes(
+			"normalizedReservation.currencyConversionEvidence"
+		)
+	);
 });
 
 test("Agoda payout fails closed when stored commercial aliases are not exact", async () => {

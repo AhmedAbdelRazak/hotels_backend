@@ -2572,7 +2572,7 @@ async function applyActiveUpdate({
 		set.pickedRoomsPricing = pricing.pickedRooms;
 	}
 	const preserveVerifiedEmailCommercial = Boolean(
-		(emailBridge?.ok === true ||
+		((emailBridge?.ok === true && emailBridge?.evidence) ||
 			incomingCommercialEvidence ||
 			existingAuthenticatedProviderEvidence) &&
 			!criticalChanged
@@ -3235,7 +3235,9 @@ async function projectHotelRunnerReservation(
 	}
 
 	const hotelCurrency = clean(hotel.currency || "SAR").toUpperCase();
-	const currencyBridgedByAuthenticatedEmail = emailBridge?.ok === true;
+	const currencyBridgedByAuthenticatedEmail = Boolean(
+		emailBridge?.ok === true && emailBridge?.evidence
+	);
 	if (
 		normalized.currency !== hotelCurrency &&
 		!currencyBridgedByAuthenticatedEmail
