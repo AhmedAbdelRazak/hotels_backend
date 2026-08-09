@@ -1,26 +1,90 @@
 /** @format */
 
+const crypto = require("crypto");
 const DefaultInboundEmailModel = require("../models/inbound_email");
+const DefaultFallbackJobModel = require("../models/hotelrunner_ota_fallback_job");
 const {
+	agodaMultiRoomAllocationReviewAllowsCommercialOnly,
 	buildHotelRunnerEmailCommercialEvidence,
+	resolveHotel,
+	resolveRoomMatch,
 	verifiedHotelRunnerEmailCommercialEvidence,
 } = require("./otaReservationMapper");
+const {
+	canonicalConfirmation,
+	canonicalProvider,
+	hashStable,
+	validateArchivedDirectOtaEmail,
+} = require("./hotelrunnerFirstOtaFallback");
 
 const AMOUNT_TOLERANCE = 0.02;
 const CREATION_ACTIONS = new Set(["created", "created_unmapped_ota_review"]);
 const LEGACY_HOTELRUNNER_EVIDENCE_INVALIDATION =
 	"hotelrunner_commercial_evidence_stale";
+const ACTIVE_QUEUED_BRIDGE_JOB_STATES = new Set([
+	"awaiting_hotelrunner",
+	"processing",
+	"retry",
+]);
+
+const HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_JOB_PROJECTION = [
+	"_id",
+	"hotelId",
+	"provider",
+	"lookupConfirmationNumber",
+	"lookupConfirmationHash",
+	"confirmationNumber",
+	"identityKey",
+	"hrIdFingerprint",
+	"inboundEmailId",
+	"inboundEmailHash",
+	"normalizedReservationHash",
+	"resolvedHotelProofHash",
+	"archiveFingerprint",
+	"status",
+	"identityConflict",
+	"leaseOwner",
+	"leaseToken",
+	"leaseAcquiredAt",
+	"leaseUntil",
+].join(" ");
+
+// The queue fingerprint covers the complete normalized work item, so this
+// projection intentionally loads that one immutable object. It still excludes
+// raw message bodies, addresses, subjects, attachments, and payment secrets.
+const HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_AUDIT_PROJECTION = [
+	"_id",
+	"hotelId",
+	"provider",
+	"confirmationNumber",
+	"intent",
+	"eventType",
+	"emailHash",
+	"senderAuthentication",
+	"reservationMongoId",
+	"hasReservationConnection",
+	"processingStatus",
+	"automationAction",
+	"hotelRunnerFirstFallback",
+	"normalizedReservation",
+].join(" ");
 
 // Intentionally excludes message bodies, addresses, subjects, guest details,
 // payment credentials, and every other field that is not needed for this gate.
 const HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION = [
 	"_id",
+	"hotelId",
 	"provider",
 	"confirmationNumber",
+	"intent",
+	"eventType",
+	"emailHash",
+	"senderAuthentication",
 	"reservationMongoId",
 	"hasReservationConnection",
 	"processingStatus",
 	"automationAction",
+	"hotelRunnerFirstFallback",
 	"normalizedReservation.inboundEmailId",
 	"normalizedReservation.provider",
 	"normalizedReservation.trustedTransportProvider",
@@ -105,7 +169,7 @@ function id(value) {
 function providerKey(value = "") {
 	const compact = lower(value).replace(/[^a-z0-9]+/g, "");
 	if (["trip", "tripcom", "ctrip", "ctripcom"].includes(compact)) return "trip";
-	if (["agoda", "agodacom"].includes(compact)) return "agoda";
+	if (["agoda", "agodacom", "agodaycs5"].includes(compact)) return "agoda";
 	if (["booking", "bookingcom"].includes(compact)) return "booking";
 	if (["expedia", "expediacom"].includes(compact)) return "expedia";
 	if (["hotels", "hotelscom"].includes(compact)) return "hotels";
@@ -153,14 +217,18 @@ function exactIdentityMatches({ existing = {}, inbound = {}, normalized = {}, pr
 		.includes(expectedIdentity);
 }
 
-async function executeProjectedLookup(InboundEmailModel, inboundEmailId) {
+async function executeProjectedLookup(
+	InboundEmailModel,
+	inboundEmailId,
+	projection = HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION
+) {
 	if (!InboundEmailModel || typeof InboundEmailModel.findById !== "function") {
 		return { error: "inbound_email_model_required" };
 	}
 	try {
 		let query = InboundEmailModel.findById(inboundEmailId);
 		if (query && typeof query.select === "function") {
-			query = query.select(HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION);
+			query = query.select(projection);
 		}
 		if (query && typeof query.lean === "function") query = query.lean();
 		const record = query && typeof query.exec === "function" ? await query.exec() : await query;
@@ -168,6 +236,430 @@ async function executeProjectedLookup(InboundEmailModel, inboundEmailId) {
 	} catch (_error) {
 		return { error: "inbound_email_lookup_failed" };
 	}
+}
+
+async function executeProjectedJobLookup(JobModel, filter) {
+	if (!JobModel || typeof JobModel.find !== "function") {
+		return { error: "fallback_job_model_required" };
+	}
+	try {
+		let query = JobModel.find(filter);
+		if (query && typeof query.select === "function") {
+			query = query.select(HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_JOB_PROJECTION);
+		}
+		if (query && typeof query.sort === "function") query = query.sort({ _id: 1 });
+		if (query && typeof query.limit === "function") query = query.limit(2);
+		if (query && typeof query.lean === "function") query = query.lean();
+		const records =
+			query && typeof query.exec === "function" ? await query.exec() : await query;
+		return { records: Array.isArray(records) ? records : [] };
+	} catch (_error) {
+		return { error: "fallback_job_lookup_failed" };
+	}
+}
+
+const validSha256 = (value) => /^[a-f0-9]{64}$/.test(lower(value));
+
+function exactSha256(left, right) {
+	const actual = lower(left);
+	const expected = lower(right);
+	if (!validSha256(actual) || !validSha256(expected)) {
+		return false;
+	}
+	const actualBuffer = Buffer.from(actual, "hex");
+	const expectedBuffer = Buffer.from(expected, "hex");
+	return (
+		actualBuffer.length === expectedBuffer.length &&
+		crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+	);
+}
+
+const sha256 = (value) =>
+	crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
+
+function validDate(value) {
+	const parsed = value instanceof Date ? value : new Date(value || "");
+	return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function activeQueuedBridgeJob(job = {}, now = new Date()) {
+	const status = lower(job.status);
+	if (!ACTIVE_QUEUED_BRIDGE_JOB_STATES.has(status)) {
+		return false;
+	}
+	const leaseUntil = validDate(job.leaseUntil);
+	const leaseActive = Boolean(leaseUntil && leaseUntil.getTime() > now.getTime());
+	if (status === "processing") {
+		const leaseAcquiredAt = validDate(job.leaseAcquiredAt);
+		return Boolean(
+			leaseActive &&
+			clean(job.leaseOwner) &&
+			clean(job.leaseToken) &&
+			leaseAcquiredAt &&
+			leaseAcquiredAt.getTime() <= now.getTime() + 5 * 60 * 1000
+		);
+	}
+	// Awaiting/retry jobs are coordinator-owned by identity, not by a processing
+	// lease. A stray live lease on either state is inconsistent and fails closed.
+	return !leaseActive;
+}
+
+function exactHotelRunnerQueuedIdentity({ normalized = {}, provider = "", hotel, config }) {
+	const hotelId = id(hotel?._id);
+	const configuredHotelId = id(config?.hotelId);
+	const canonical = canonicalProvider(provider);
+	const incomingProvider = canonicalProvider(
+		normalized.channel || normalized.channelDisplay || normalized.sourceDisplay
+	);
+	const confirmationNumber = canonicalConfirmation(normalized.providerNumber);
+	if (
+		!hotelId ||
+		hotelId !== configuredHotelId ||
+		!canonical ||
+		incomingProvider !== canonical ||
+		!confirmationNumber ||
+		!validSha256(config?.hrIdFingerprint)
+	) {
+		return null;
+	}
+	return { hotelId, provider: canonical, confirmationNumber };
+}
+
+function hotelRunnerQueuedSourceAmount(inbound = {}, normalized = {}) {
+	const paymentSummary = inbound.paymentSummary || {};
+	const sourceAmount = positiveAmount(inbound.sourceAmount);
+	const sourceGross = positiveAmount(
+		paymentSummary.sourceTotalGuestPaymentAmount ?? sourceAmount
+	);
+	const sourcePayout = positiveAmount(paymentSummary.sourceTotalPayoutAmount);
+	const totalCents = Number(normalized.totalCents);
+	const hotelRunnerAmount =
+		Number.isSafeInteger(totalCents) && totalCents > 0
+			? round2(totalCents / 100)
+			: null;
+	if (!sourceAmount || !sourceGross || !hotelRunnerAmount) return null;
+	if (!amountMatches(sourceAmount, sourceGross)) return null;
+	if (amountMatches(hotelRunnerAmount, sourceGross)) {
+		return { amountRole: "gross", sourceAmount, hotelRunnerAmount };
+	}
+	if (sourcePayout && amountMatches(hotelRunnerAmount, sourcePayout)) {
+		return { amountRole: "payout", sourceAmount, hotelRunnerAmount };
+	}
+	return null;
+}
+
+/**
+ * Loads the immutable authenticated OTA archive owned by an active
+ * HotelRunner-first queue job. This phase intentionally performs no write and
+ * does not authorize creation until the adapter separately verifies the exact
+ * HotelRunner-to-PMS room mapping.
+ */
+async function loadHotelRunnerQueuedEmailCommercialBridge(
+	{ normalized = {}, provider = "", hotel = null, config = {} } = {},
+	{
+		FallbackJobModel = DefaultFallbackJobModel,
+		InboundEmailModel = DefaultInboundEmailModel,
+		resolveArchivedHotel = resolveHotel,
+		now = () => new Date(),
+	} = {}
+) {
+	const reject = (reason) => ({ ok: false, reason, amountRole: "" });
+	const identity = exactHotelRunnerQueuedIdentity({
+		normalized,
+		provider,
+		hotel,
+		config,
+	});
+	if (!identity) return reject("queued_identity_invalid");
+	if (
+		hotel?.activateHotel !== true ||
+		hotel?.xHotelProActive !== true ||
+		!id(hotel?.belongsTo) ||
+		upper(hotel?.currency || "SAR") !== "SAR"
+	) {
+		return reject("queued_hotel_invalid");
+	}
+
+	const jobLookup = await executeProjectedJobLookup(FallbackJobModel, {
+		hotelId: identity.hotelId,
+		provider: identity.provider,
+		confirmationNumber: identity.confirmationNumber,
+	});
+	if (jobLookup.error) return reject(jobLookup.error);
+	if (jobLookup.records.length !== 1) {
+		return reject(
+			jobLookup.records.length > 1
+				? "fallback_job_identity_ambiguous"
+				: "fallback_job_not_found"
+		);
+	}
+	const [job] = jobLookup.records;
+	const checkedAt = validDate(now());
+	if (job.identityConflict === true) {
+		return reject("fallback_job_identity_conflict");
+	}
+	if (!checkedAt || !activeQueuedBridgeJob(job, checkedAt)) {
+		return reject("fallback_job_not_active");
+	}
+	if (
+		id(job.hotelId) !== identity.hotelId ||
+		canonicalProvider(job.provider) !== identity.provider ||
+		canonicalConfirmation(job.lookupConfirmationNumber) !==
+			identity.confirmationNumber ||
+		!exactSha256(
+			job.lookupConfirmationHash,
+			sha256(clean(job.lookupConfirmationNumber))
+		) ||
+		canonicalConfirmation(job.confirmationNumber) !==
+			identity.confirmationNumber ||
+		lower(job.identityKey) !==
+			`${identity.provider}:${identity.confirmationNumber}` ||
+		!id(job.inboundEmailId)
+	) {
+		return reject("fallback_job_identity_mismatch");
+	}
+	if (!exactSha256(job.hrIdFingerprint, config.hrIdFingerprint)) {
+		return reject("fallback_job_config_mismatch");
+	}
+
+	const auditLookup = await executeProjectedLookup(
+		InboundEmailModel,
+		job.inboundEmailId,
+		HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_AUDIT_PROJECTION
+	);
+	if (auditLookup.error) return reject(auditLookup.error);
+	const audit = auditLookup.record;
+	if (!audit || id(audit._id) !== id(job.inboundEmailId)) {
+		return reject("queued_inbound_email_not_found");
+	}
+	const archive = validateArchivedDirectOtaEmail(audit, identity);
+	if (!archive.ok) return reject(archive.code || "queued_archive_invalid");
+	if (
+		!exactSha256(job.inboundEmailHash, archive.inboundEmailHash) ||
+		clean(job.lookupConfirmationNumber) !==
+			clean(archive.lookupConfirmationNumber) ||
+		!exactSha256(
+			job.lookupConfirmationHash,
+			archive.lookupConfirmationHash
+		) ||
+		!exactSha256(
+			job.normalizedReservationHash,
+			archive.normalizedReservationHash
+		) ||
+		!exactSha256(job.resolvedHotelProofHash, archive.resolvedHotelProofHash) ||
+		!exactSha256(job.archiveFingerprint, archive.archiveFingerprint)
+	) {
+		return reject("queued_archive_fingerprint_mismatch");
+	}
+	const markerJobId = id(audit.hotelRunnerFirstFallback?.jobId);
+	const markerStatus = lower(audit.hotelRunnerFirstFallback?.status);
+	if (
+		!["archive_ready", "enqueued", "recovery_pending"].includes(
+			markerStatus
+		) ||
+		(markerJobId && markerJobId !== id(job._id))
+	) {
+		return reject("queued_archive_job_reference_mismatch");
+	}
+	if (
+		!["awaiting_hotelrunner", "parsed_awaiting_hotelrunner"].includes(
+			lower(audit.processingStatus)
+		) ||
+		audit.hasReservationConnection === true ||
+		id(audit.reservationMongoId) ||
+		lower(audit.automationAction) !== "queued"
+	) {
+		return reject("queued_archive_lifecycle_mismatch");
+	}
+
+	const inbound = archive.normalizedReservation;
+	const sourcePresence = inbound.sourcePresence || {};
+	if (
+		![
+			"confirmationNumber",
+			"hotelName",
+			"roomName",
+			"checkinDate",
+			"checkoutDate",
+			"roomCount",
+			"amount",
+		].every((field) => sourcePresence[field] === true)
+	) {
+		return reject("queued_source_facts_incomplete");
+	}
+	if (
+		canonicalProvider(inbound.provider) !== identity.provider ||
+		canonicalProvider(inbound.trustedTransportProvider) !== identity.provider ||
+		canonicalConfirmation(
+			inbound.confirmationNumber || inbound.reservationId
+		) !== identity.confirmationNumber
+	) {
+		return reject("queued_provider_identity_mismatch");
+	}
+	if (
+		dateKey(inbound.checkinDate) !== dateKey(normalized.checkinDate) ||
+		dateKey(inbound.checkoutDate) !== dateKey(normalized.checkoutDate)
+	) {
+		return reject("queued_stay_mismatch");
+	}
+	const hotelRunnerRoomCount = roomCountFromHotelRunner(normalized);
+	if (
+		!hotelRunnerRoomCount ||
+		!Number.isSafeInteger(Number(inbound.roomCount)) ||
+		Number(inbound.roomCount) !== hotelRunnerRoomCount
+	) {
+		return reject("queued_room_count_mismatch");
+	}
+	const sourceCurrency = upper(
+		inbound.sourceCurrency || inbound.paymentSummary?.sourceCurrency
+	);
+	if (
+		!sourceCurrency ||
+		sourceCurrency !== upper(normalized.currency) ||
+		(upper(inbound.paymentSummary?.sourceCurrency) &&
+			upper(inbound.paymentSummary?.sourceCurrency) !== sourceCurrency)
+	) {
+		return reject("queued_currency_mismatch");
+	}
+	const sourceAmounts = hotelRunnerQueuedSourceAmount(inbound, normalized);
+	if (!sourceAmounts) return reject("queued_amount_mismatch");
+
+	let resolvedHotel;
+	try {
+		resolvedHotel = await resolveArchivedHotel(inbound, null);
+	} catch (_error) {
+		return reject("queued_hotel_lookup_failed");
+	}
+	if (
+		!resolvedHotel ||
+		id(resolvedHotel._id) !== identity.hotelId ||
+		id(resolvedHotel.belongsTo) !== id(hotel.belongsTo) ||
+		upper(resolvedHotel.currency || "SAR") !==
+			upper(hotel.currency || "SAR") ||
+		resolvedHotel.activateHotel !== true ||
+		resolvedHotel.xHotelProActive !== true
+	) {
+		return reject("queued_hotel_mismatch");
+	}
+	const currentResolvedHotelProof = {
+		version: 1,
+		hotelId: identity.hotelId,
+		belongsTo: id(hotel.belongsTo),
+		currency: upper(hotel.currency || "SAR"),
+		activateHotel: hotel.activateHotel === true,
+		xHotelProActive: hotel.xHotelProActive === true,
+	};
+	if (
+		!currentResolvedHotelProof.belongsTo ||
+		currentResolvedHotelProof.currency !== "SAR" ||
+		currentResolvedHotelProof.activateHotel !== true ||
+		currentResolvedHotelProof.xHotelProActive !== true ||
+		!exactSha256(
+			hashStable(currentResolvedHotelProof),
+			archive.resolvedHotelProofHash
+		) ||
+		!exactSha256(
+			hashStable(currentResolvedHotelProof),
+			job.resolvedHotelProofHash
+		)
+	) {
+		return reject("queued_hotel_proof_mismatch");
+	}
+	const evidence = buildHotelRunnerEmailCommercialEvidence(inbound, {
+		appliedAt: checkedAt,
+	});
+	if (
+		!evidence ||
+		canonicalProvider(evidence.provider) !== identity.provider ||
+		lower(evidence.otaIdentityKey) !==
+			`${identity.provider}:${identity.confirmationNumber}` ||
+		id(evidence.inboundEmailId) !== id(audit._id) ||
+		!exactSha256(evidence.sourceTextHash, inbound.source?.textHash)
+	) {
+		return reject("queued_commercial_evidence_invalid");
+	}
+
+	return {
+		ok: true,
+		reason: "",
+		...sourceAmounts,
+		grossTotalSar: positiveAmount(evidence.grossTotalSar),
+		sourceCurrency,
+		evidence,
+		jobId: id(job._id),
+		inboundEmailId: id(audit._id),
+		inboundEmailHash: lower(archive.inboundEmailHash),
+		normalizedReservationHash: lower(archive.normalizedReservationHash),
+		resolvedHotelProofHash: lower(archive.resolvedHotelProofHash),
+		archiveFingerprint: lower(archive.archiveFingerprint),
+		normalizedReservation: inbound,
+	};
+}
+
+function validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+	bridge = {},
+	{ hotel = null, resolvedRooms = [] } = {},
+	{ resolveArchivedRoom = resolveRoomMatch } = {}
+) {
+	const reject = (reason) => ({ ok: false, reason, amountRole: "" });
+	if (bridge?.ok !== true || !bridge.evidence) {
+		return reject(bridge?.reason || "queued_bridge_missing");
+	}
+	const inbound = bridge.normalizedReservation;
+	if (!inbound || !hotel || !Array.isArray(resolvedRooms)) {
+		return reject("queued_room_context_missing");
+	}
+	const declaredRoomCount = Number(inbound.roomCount);
+	if (
+		!Number.isSafeInteger(declaredRoomCount) ||
+		declaredRoomCount < 1 ||
+		resolvedRooms.length !== declaredRoomCount
+	) {
+		return reject("queued_room_block_invalid");
+	}
+	const configuredRoomIds = new Set(
+		(hotel.roomCountDetails || [])
+			.filter((room) => room?.activeRoom !== false && id(room?._id))
+			.map((room) => id(room._id))
+	);
+	const resolvedRoomIds = resolvedRooms.map((resolved) =>
+		id(resolved?.roomDetails?._id)
+	);
+	const resolvedMappingIds = resolvedRooms.map((resolved) =>
+		id(resolved?.mapping?.localRoomConfigId)
+	);
+	if (
+		resolvedRoomIds.some(
+			(roomId, index) =>
+				!roomId ||
+				!configuredRoomIds.has(roomId) ||
+				resolvedMappingIds[index] !== roomId
+		)
+	) {
+		return reject("queued_room_identity_mismatch");
+	}
+	if (agodaMultiRoomAllocationReviewAllowsCommercialOnly(inbound)) {
+		// The exact sole Agoda allocation warning proves commercial totals but not
+		// per-room types. HotelRunner's verified inv_code mappings own allocation;
+		// the email may not override or partially select those rooms.
+		return { ...bridge };
+	}
+	let roomMatch;
+	try {
+		roomMatch = resolveArchivedRoom(hotel, inbound.roomName, {
+			normalized: inbound,
+		});
+	} catch (_error) {
+		return reject("queued_room_lookup_failed");
+	}
+	const expectedRoomId = id(roomMatch?.roomDetails?._id);
+	if (
+		!expectedRoomId ||
+		resolvedRoomIds.some((roomId) => roomId !== expectedRoomId)
+	) {
+		return reject("queued_room_identity_mismatch");
+	}
+	return { ...bridge };
 }
 
 function explicitCommercialEvidence(existing, inbound, inboundEmailId) {
@@ -239,6 +731,32 @@ function explicitCommercialEvidence(existing, inbound, inboundEmailId) {
 	return { ...built };
 }
 
+function queuedApiCreationAuditMatches(existing = {}, record = {}, inboundEmailId) {
+	const provenance =
+		existing?.supplierData?.hotelRunnerFirstFallbackCommercialBridge;
+	if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+		return false;
+	}
+	return Boolean(
+		Number(provenance.version) === 1 &&
+		id(provenance.jobId) &&
+		id(provenance.jobId) === id(record.hotelRunnerFirstFallback?.jobId) &&
+		id(provenance.inboundEmailId) === id(inboundEmailId) &&
+		exactSha256(provenance.inboundEmailHash, record.emailHash) &&
+		validSha256(provenance.normalizedReservationHash) &&
+		validSha256(provenance.resolvedHotelProofHash) &&
+		validSha256(provenance.archiveFingerprint) &&
+		lower(record.hotelRunnerFirstFallback?.status) === "completed_api" &&
+		lower(record.intent) === "new_reservation" &&
+		lower(record.eventType) === "new" &&
+		clean(existing?.supplierData?.hotelRunner?.transport).toLowerCase() ===
+			"hotelrunner_api" &&
+		Number(existing?.supplierData?.otaSourceAuthority) === 4 &&
+		clean(existing?.supplierData?.otaAutomationPipeline).toLowerCase() ===
+			"hotelrunner-background-worker"
+	);
+}
+
 /**
  * Loads only the exact inbound-email audit referenced by the existing
  * reservation and decides whether it is safe to bridge HotelRunner's source
@@ -273,10 +791,16 @@ async function loadHotelRunnerEmailCommercialBridge(
 	) {
 		return reject("reservation_link_mismatch");
 	}
-	if (
-		lower(record.processingStatus) !== "created" ||
-		!CREATION_ACTIONS.has(lower(record.automationAction))
-	) {
+	const ordinaryEmailCreation = Boolean(
+		lower(record.processingStatus) === "created" &&
+			CREATION_ACTIONS.has(lower(record.automationAction))
+	);
+	const queuedApiCreation = queuedApiCreationAuditMatches(
+		existing,
+		record,
+		inboundEmailId
+	);
+	if (!ordinaryEmailCreation && !queuedApiCreation) {
 		return reject("inbound_email_not_creation");
 	}
 
@@ -302,7 +826,13 @@ async function loadHotelRunnerEmailCommercialBridge(
 	) {
 		return reject("source_not_authenticated");
 	}
-	if (inbound.requiresManualReview === true) {
+	if (
+		inbound.requiresManualReview === true &&
+		!(
+			queuedApiCreation &&
+			agodaMultiRoomAllocationReviewAllowsCommercialOnly(inbound)
+		)
+	) {
 		return reject("source_requires_manual_review");
 	}
 	const sourcePresence = inbound.sourcePresence || {};
@@ -403,6 +933,11 @@ async function loadHotelRunnerEmailCommercialBridge(
 }
 
 module.exports = {
+	ACTIVE_QUEUED_BRIDGE_JOB_STATES,
 	HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION,
+	HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_AUDIT_PROJECTION,
+	HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_JOB_PROJECTION,
 	loadHotelRunnerEmailCommercialBridge,
+	loadHotelRunnerQueuedEmailCommercialBridge,
+	validateHotelRunnerQueuedEmailCommercialBridgeRooms,
 };

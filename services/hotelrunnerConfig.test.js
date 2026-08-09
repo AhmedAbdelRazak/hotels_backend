@@ -180,3 +180,35 @@ test("history pull and live projection cannot be enabled together in the push-on
 		)
 	);
 });
+
+test("HotelRunner-first OTA email queue timing and retry controls have safe bounded defaults", () => {
+	const defaults = getHotelRunnerConfig(baseEnvironment);
+	assert.equal(defaults.otaEmailFallbackGraceMs, 180_000);
+	assert.equal(defaults.otaEmailFallbackLeaseMs, 300_000);
+	assert.equal(defaults.otaEmailFallbackProofTtlMs, 120_000);
+	assert.equal(defaults.otaEmailFallbackMaxAttempts, 12);
+
+	const bounded = getHotelRunnerConfig({
+		...baseEnvironment,
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_GRACE_MS: "1",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_LEASE_MS: "999999999",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_PROOF_TTL_MS: "1",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_MAX_ATTEMPTS: "999",
+	});
+	assert.equal(bounded.otaEmailFallbackGraceMs, 30_000);
+	assert.equal(bounded.otaEmailFallbackLeaseMs, 900_000);
+	assert.equal(bounded.otaEmailFallbackProofTtlMs, 30_000);
+	assert.equal(bounded.otaEmailFallbackMaxAttempts, 30);
+
+	const configured = getHotelRunnerConfig({
+		...baseEnvironment,
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_GRACE_MS: "240000",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_LEASE_MS: "180000",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_PROOF_TTL_MS: "90000",
+		HOTELRUNNER_OTA_EMAIL_FALLBACK_MAX_ATTEMPTS: "9",
+	});
+	assert.equal(configured.otaEmailFallbackGraceMs, 240_000);
+	assert.equal(configured.otaEmailFallbackLeaseMs, 180_000);
+	assert.equal(configured.otaEmailFallbackProofTtlMs, 90_000);
+	assert.equal(configured.otaEmailFallbackMaxAttempts, 9);
+});

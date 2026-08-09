@@ -7,8 +7,15 @@ const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const {
 	HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION,
+	HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_AUDIT_PROJECTION,
+	HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_JOB_PROJECTION,
 	loadHotelRunnerEmailCommercialBridge,
+	loadHotelRunnerQueuedEmailCommercialBridge,
+	validateHotelRunnerQueuedEmailCommercialBridgeRooms,
 } = require("./hotelrunnerEmailCommercialBridge");
+const {
+	createArchiveFingerprint,
+} = require("./hotelrunnerFirstOtaFallback");
 const {
 	applyLiveSarConversion,
 	buildHotelRunnerEmailCommercialEvidence,
@@ -189,6 +196,204 @@ function modelFor(record, observations = {}) {
 				},
 			};
 		},
+	};
+}
+
+function jobsModelFor(records, observations = {}) {
+	return {
+		find(filter) {
+			observations.filter = filter;
+			return {
+				select(projection) {
+					observations.projection = projection;
+					return this;
+				},
+				sort(sort) {
+					observations.sort = sort;
+					return this;
+				},
+				limit(limit) {
+					observations.limit = limit;
+					return this;
+				},
+				lean() {
+					observations.lean = true;
+					return this;
+				},
+				async exec() {
+					return records;
+				},
+			};
+		},
+	};
+}
+
+async function queuedTripFixture() {
+	const hotelId = "64b000000000000000000401";
+	const ownerId = "64b000000000000000000402";
+	const roomId = "64b000000000000000000403";
+	const jobId = "64b000000000000000000404";
+	const inboundId = "64b000000000000000000405";
+	const confirmationNumber = "1653715890127438";
+	const fingerprint = "f".repeat(64);
+	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
+	const fetchedAt = "2026-08-09T06:00:00.000Z";
+	const base = authenticatedInbound({
+		inboundEmailId: inboundId,
+		provider: "trip",
+		trustedTransportProvider: "trip",
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		hotelName: "Zad Ajyad",
+		roomName: "Double Room",
+		checkinDate: "2026-08-09",
+		checkoutDate: "2026-08-10",
+		roomCount: 1,
+		amount: null,
+		totalAmountSar: null,
+		sourceAmount: 21.4,
+		sourceCurrency: "USD",
+		currency: "USD",
+		propertyCurrency: "SAR",
+		propertyConversionVerified: false,
+		totalPayoutSar: null,
+		netAfterExpensesTotal: null,
+		exchangeRateToSar: null,
+		sourceExchangeRateToSar: null,
+		paymentSummary: {
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: 21.4,
+			sourceTotalPayoutAmount: 18.2,
+			sourceTotalPayoutCurrency: "USD",
+			totalGuestPaymentAmount: null,
+			totalPayoutAmount: null,
+			currency: null,
+			exchangeRateToSar: null,
+		},
+		sourcePresence: {
+			confirmationNumber: true,
+			hotelName: true,
+			roomName: true,
+			checkinDate: true,
+			checkoutDate: true,
+			roomCount: true,
+			amount: true,
+			paymentCollectionModel: true,
+			paymentInstructions: true,
+		},
+		source: {
+			receivedAt: "2026-08-09T05:59:00.000Z",
+			textHash: "6".repeat(64),
+		},
+	});
+	const live = await applyLiveSarConversion(base, {
+		apiKey: "queued-trip-bridge-test",
+		cache: new Map(),
+		now: () => Date.parse(fetchedAt),
+		fetchImpl: async () => ({
+			ok: true,
+			async json() {
+				return {
+					result: "success",
+					base_code: "USD",
+					target_code: "SAR",
+					conversion_rate: 3.8,
+					time_last_update_unix: Date.parse(sourceTimestamp) / 1000,
+				};
+			},
+		}),
+	});
+	const inbound = await applyLiveSarConversion(live, {
+		rateLookup: async () => {
+			throw new Error("trusted stored FX evidence must avoid a new lookup");
+		},
+	});
+	const audit = {
+		_id: inboundId,
+		hotelId,
+		provider: "trip",
+		confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		emailHash: "a".repeat(64),
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "trip",
+		},
+		reservationMongoId: null,
+		hasReservationConnection: false,
+		processingStatus: "awaiting_hotelrunner",
+		automationAction: "queued",
+		hotelRunnerFirstFallback: {
+			status: "archive_ready",
+			jobId: null,
+			resolvedHotelProof: {
+				version: 1,
+				hotelId,
+				belongsTo: ownerId,
+				currency: "SAR",
+				activateHotel: true,
+				xHotelProActive: true,
+			},
+		},
+		normalizedReservation: inbound,
+	};
+	const identity = { hotelId, provider: "trip", confirmationNumber };
+	const fingerprints = createArchiveFingerprint({ identity, audit });
+	const job = {
+		_id: jobId,
+		...identity,
+		lookupConfirmationNumber: confirmationNumber,
+		identityKey: `trip:${confirmationNumber}`,
+		hrIdFingerprint: fingerprint,
+		...fingerprints,
+		status: "awaiting_hotelrunner",
+		identityConflict: false,
+		leaseOwner: "",
+		leaseToken: "",
+		leaseAcquiredAt: null,
+		leaseUntil: null,
+	};
+	const hotel = {
+		_id: hotelId,
+		belongsTo: ownerId,
+		hotelName: "Zad Ajyad",
+		activateHotel: true,
+		xHotelProActive: true,
+		currency: "SAR",
+		roomCountDetails: [
+			{
+				_id: roomId,
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				activeRoom: true,
+			},
+		],
+	};
+	const normalized = {
+		providerNumber: confirmationNumber,
+		channel: "tripcom",
+		channelDisplay: "Trip.com",
+		sourceDisplay: "Trip.com",
+		checkinDate: "2026-08-09",
+		checkoutDate: "2026-08-10",
+		totalRooms: 1,
+		rooms: [{}],
+		currency: "USD",
+		totalCents: 1820,
+	};
+	return {
+		audit,
+		config: { hotelId, hrIdFingerprint: fingerprint },
+		fingerprints,
+		hotel,
+		inbound,
+		job,
+		normalized,
+		ownerId,
+		roomId,
 	};
 }
 
@@ -465,6 +670,107 @@ test("immutable creation audit outranks a later lifecycle-email reference", asyn
 	assert.equal(observations.lookupId, INBOUND_ID);
 });
 
+test("a coordinator-finalized API creation audit remains exact commercial provenance for later HotelRunner updates", async () => {
+	const inbound = authenticatedInbound({
+		intent: "new_reservation",
+		eventType: "new",
+	});
+	const existing = materializedExisting(inbound);
+	existing.supplierData.otaInboundEmailId = INBOUND_ID;
+	existing.supplierData.otaAutomationPipeline = "hotelrunner-background-worker";
+	existing.supplierData.otaSourceAuthority = 4;
+	existing.supplierData.hotelRunner = { transport: "hotelrunner_api" };
+	existing.supplierData.hotelRunnerFirstFallbackCommercialBridge = {
+		version: 1,
+		jobId: "64b000000000000000000399",
+		inboundEmailId: INBOUND_ID,
+		inboundEmailHash: "9".repeat(64),
+		normalizedReservationHash: "8".repeat(64),
+		resolvedHotelProofHash: "6".repeat(64),
+		archiveFingerprint: "7".repeat(64),
+		linkedAt: new Date("2026-08-07T15:27:00.000Z"),
+	};
+	const record = inboundRecord(inbound, {
+		intent: "new_reservation",
+		eventType: "new",
+		emailHash: "9".repeat(64),
+		processingStatus: "duplicate_reservation",
+		automationAction: "skipped",
+		hotelRunnerFirstFallback: {
+			status: "completed_api",
+			jobId: "64b000000000000000000399",
+		},
+	});
+	const result = await loadHotelRunnerEmailCommercialBridge(
+		{ existing, normalized: hotelRunnerNormalized(), provider: "agoda" },
+		{ InboundEmailModel: modelFor(record) }
+	);
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(result.amountRole, "payout");
+	assert.equal(result.evidence.grossTotalSar, 95.06);
+});
+
+test("only the exact Agoda allocation-only review remains usable after API-first finalization", async () => {
+	const inbound = authenticatedInbound({
+		intent: "new_reservation",
+		eventType: "new",
+		roomCount: 2,
+		requiresManualReview: true,
+		ambiguousMultiRoomEvidence: true,
+		blocksUnmappedReservationCreation: true,
+		manualReviewReasons: [
+			"Agoda email contains multiple rooms; automatic partial-room creation is disabled and the booking requires room review.",
+		],
+	});
+	const existing = materializedExisting(inbound);
+	existing.supplierData.otaInboundEmailId = INBOUND_ID;
+	existing.supplierData.otaAutomationPipeline = "hotelrunner-background-worker";
+	existing.supplierData.otaSourceAuthority = 4;
+	existing.supplierData.hotelRunner = { transport: "hotelrunner_api" };
+	existing.supplierData.hotelRunnerFirstFallbackCommercialBridge = {
+		version: 1,
+		jobId: "64b000000000000000000399",
+		inboundEmailId: INBOUND_ID,
+		inboundEmailHash: "9".repeat(64),
+		normalizedReservationHash: "8".repeat(64),
+		resolvedHotelProofHash: "6".repeat(64),
+		archiveFingerprint: "7".repeat(64),
+		linkedAt: new Date("2026-08-07T15:27:00.000Z"),
+	};
+	const record = inboundRecord(inbound, {
+		intent: "new_reservation",
+		eventType: "new",
+		emailHash: "9".repeat(64),
+		processingStatus: "duplicate_reservation",
+		automationAction: "skipped",
+		hotelRunnerFirstFallback: {
+			status: "completed_api",
+			jobId: "64b000000000000000000399",
+		},
+	});
+	const normalized = hotelRunnerNormalized({
+		totalRooms: 2,
+		rooms: [{}, {}],
+	});
+	const accepted = await loadHotelRunnerEmailCommercialBridge(
+		{ existing, normalized, provider: "agoda" },
+		{ InboundEmailModel: modelFor(record) }
+	);
+	assert.equal(accepted.ok, true, JSON.stringify(accepted));
+	assert.equal(accepted.amountRole, "payout");
+
+	record.normalizedReservation = {
+		...inbound,
+		manualReviewReasons: ["A different manual review reason."],
+	};
+	const rejected = await loadHotelRunnerEmailCommercialBridge(
+		{ existing, normalized, provider: "agoda" },
+		{ InboundEmailModel: modelFor(record) }
+	);
+	assert.equal(rejected.ok, false);
+	assert.equal(rejected.reason, "source_requires_manual_review");
+});
+
 test("Mongo ObjectId references are bounded values and never recurse", async () => {
 	const inbound = authenticatedInbound();
 	const existing = materializedExisting(inbound, {
@@ -482,4 +788,424 @@ test("Mongo ObjectId references are bounded values and never recurse", async () 
 	);
 	assert.equal(result.ok, true);
 	assert.equal(result.amountRole, "payout");
+});
+
+test("queued Trip API creation bridge accepts exact stored-FX evidence and exact PMS room ownership", async () => {
+	const fixture = await queuedTripFixture();
+	assert.equal(fixture.inbound.exchangeRateSource, "exchange_rate_api_stored");
+	assert.deepEqual(
+		fixture.inbound.paymentSummary.currencyConversionEvidence,
+		fixture.inbound.currencyConversionEvidence
+	);
+	const jobObservations = {};
+	const auditObservations = {};
+	const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+		{
+			normalized: fixture.normalized,
+			provider: "trip",
+			hotel: fixture.hotel,
+			config: fixture.config,
+		},
+		{
+			FallbackJobModel: jobsModelFor([fixture.job], jobObservations),
+			InboundEmailModel: modelFor(fixture.audit, auditObservations),
+			resolveArchivedHotel: async () => fixture.hotel,
+			now: () => new Date("2026-08-09T06:01:00.000Z"),
+		}
+	);
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(result.amountRole, "payout");
+	assert.equal(result.sourceCurrency, "USD");
+	assert.equal(result.sourceAmount, 21.4);
+	assert.equal(result.hotelRunnerAmount, 18.2);
+	assert.equal(result.grossTotalSar, 81.32);
+	assert.equal(result.evidence.payoutTotalSar, 69.16);
+	assert.equal(result.jobId, String(fixture.job._id));
+	assert.equal(result.inboundEmailId, String(fixture.audit._id));
+	assert.equal(jobObservations.projection, HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_JOB_PROJECTION);
+	assert.equal(auditObservations.projection, HOTELRUNNER_QUEUED_EMAIL_COMMERCIAL_AUDIT_PROJECTION);
+	for (const forbidden of [
+		"bodyText",
+		"bodyHtml",
+		"subject",
+		"attachments",
+		"payment_details",
+	]) {
+		assert.equal(auditObservations.projection.includes(forbidden), false);
+	}
+	const roomVerified = validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+		result,
+		{
+			hotel: fixture.hotel,
+			resolvedRooms: [
+				{
+					roomDetails: fixture.hotel.roomCountDetails[0],
+					mapping: { localRoomConfigId: fixture.roomId },
+				},
+			],
+		}
+	);
+	assert.equal(roomVerified.ok, true);
+});
+
+test("a coordinator-owned nonexpired processing job remains eligible for the read-only API bridge", async () => {
+	const fixture = await queuedTripFixture();
+	fixture.job.status = "processing";
+	fixture.job.leaseOwner = "hotelrunner-worker-1";
+	fixture.job.leaseToken = "b".repeat(32);
+	fixture.job.leaseAcquiredAt = new Date("2026-08-09T06:00:00.000Z");
+	fixture.job.leaseUntil = new Date("2026-08-09T06:05:00.000Z");
+	fixture.audit.hotelRunnerFirstFallback.status = "recovery_pending";
+	const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+		{
+			normalized: fixture.normalized,
+			provider: "trip",
+			hotel: fixture.hotel,
+			config: fixture.config,
+		},
+		{
+			FallbackJobModel: jobsModelFor([fixture.job]),
+			InboundEmailModel: modelFor(fixture.audit),
+			resolveArchivedHotel: async () => fixture.hotel,
+			now: () => new Date("2026-08-09T06:01:00.000Z"),
+		}
+	);
+	assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("queued creation bridge rejects terminal, expired, tampered, manual, and room-near-miss evidence without writes", async (t) => {
+	const cases = [
+		[
+			"terminal job",
+			"fallback_job_not_active",
+			(fixture) => {
+				fixture.job.status = "completed_api";
+			},
+		],
+		[
+			"expired processing lease",
+			"fallback_job_not_active",
+			(fixture) => {
+				fixture.job.status = "processing";
+				fixture.job.leaseOwner = "worker-1";
+				fixture.job.leaseToken = "b".repeat(32);
+				fixture.job.leaseAcquiredAt = new Date("2026-08-09T05:50:00.000Z");
+				fixture.job.leaseUntil = new Date("2026-08-09T05:59:00.000Z");
+			},
+		],
+		[
+			"fingerprint",
+			"fallback_job_config_mismatch",
+			(fixture) => {
+				fixture.job.hrIdFingerprint = "0".repeat(64);
+			},
+		],
+		[
+			"lookup confirmation hash",
+			"fallback_job_identity_mismatch",
+			(fixture) => {
+				fixture.job.lookupConfirmationHash = "0".repeat(64);
+			},
+		],
+		[
+			"archive hash",
+			"queued_archive_fingerprint_mismatch",
+			(fixture) => {
+				fixture.job.archiveFingerprint = "0".repeat(64);
+			},
+		],
+		[
+			"source amount",
+			"queued_amount_mismatch",
+			(fixture) => {
+				fixture.normalized.totalCents = 1900;
+			},
+		],
+		[
+			"resolved hotel",
+			"queued_hotel_mismatch",
+			(fixture) => {
+				fixture.resolveHotel = async () => ({
+					...fixture.hotel,
+					_id: "64b000000000000000000499",
+				});
+			},
+		],
+		[
+			"current hotel proof",
+			"queued_hotel_proof_mismatch",
+			(fixture) => {
+				fixture.hotel.belongsTo = "64b000000000000000000499";
+			},
+		],
+	];
+	for (const [name, reason, mutate] of cases) {
+		await t.test(name, async () => {
+			const fixture = await queuedTripFixture();
+			mutate(fixture);
+			const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+				{
+					normalized: fixture.normalized,
+					provider: "trip",
+					hotel: fixture.hotel,
+					config: fixture.config,
+				},
+				{
+					FallbackJobModel: jobsModelFor([fixture.job]),
+					InboundEmailModel: modelFor(fixture.audit),
+					resolveArchivedHotel:
+						fixture.resolveHotel || (async () => fixture.hotel),
+					now: () => new Date("2026-08-09T06:01:00.000Z"),
+				}
+			);
+			assert.equal(result.ok, false, name);
+			assert.equal(result.reason, reason, name);
+		});
+	}
+
+	await t.test("manual archive with a self-consistent queue fingerprint", async () => {
+		const fixture = await queuedTripFixture();
+		fixture.audit.normalizedReservation.requiresManualReview = true;
+		const fingerprints = createArchiveFingerprint({
+			identity: {
+				hotelId: fixture.config.hotelId,
+				provider: "trip",
+				confirmationNumber: fixture.normalized.providerNumber,
+			},
+			audit: fixture.audit,
+		});
+		Object.assign(fixture.job, fingerprints);
+		const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+			{
+				normalized: fixture.normalized,
+				provider: "trip",
+				hotel: fixture.hotel,
+				config: fixture.config,
+			},
+			{
+				FallbackJobModel: jobsModelFor([fixture.job]),
+				InboundEmailModel: modelFor(fixture.audit),
+				resolveArchivedHotel: async () => fixture.hotel,
+				now: () => new Date("2026-08-09T06:01:00.000Z"),
+			}
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.reason, "queued_commercial_evidence_invalid");
+	});
+
+	await t.test("room mapping near miss", async () => {
+		const fixture = await queuedTripFixture();
+		const bridge = await loadHotelRunnerQueuedEmailCommercialBridge(
+			{
+				normalized: fixture.normalized,
+				provider: "trip",
+				hotel: fixture.hotel,
+				config: fixture.config,
+			},
+			{
+				FallbackJobModel: jobsModelFor([fixture.job]),
+				InboundEmailModel: modelFor(fixture.audit),
+				resolveArchivedHotel: async () => fixture.hotel,
+				now: () => new Date("2026-08-09T06:01:00.000Z"),
+			}
+		);
+		const result = validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+			bridge,
+			{
+				hotel: fixture.hotel,
+				resolvedRooms: [
+					{
+						roomDetails: { _id: "64b000000000000000000498" },
+						mapping: { localRoomConfigId: "64b000000000000000000498" },
+					},
+				],
+			}
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.reason, "queued_room_identity_mismatch");
+	});
+});
+
+test("same-currency queued Agoda commercial evidence remains eligible for API-first creation", async () => {
+	const fixture = await queuedTripFixture();
+	const confirmationNumber = "2039878308";
+	const inbound = authenticatedInbound({
+		inboundEmailId: String(fixture.audit._id),
+		provider: "agoda",
+		trustedTransportProvider: "agoda",
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		hotelName: "Zad Ajyad",
+		roomName: "Double Room",
+		checkinDate: "2026-08-09",
+		checkoutDate: "2026-08-10",
+	});
+	fixture.audit.provider = "agoda";
+	fixture.audit.confirmationNumber = confirmationNumber;
+	fixture.audit.normalizedReservation = inbound;
+	fixture.audit.senderAuthentication.trustedProvider = "agoda";
+	fixture.job.provider = "agoda";
+	fixture.job.lookupConfirmationNumber = confirmationNumber;
+	fixture.job.confirmationNumber = confirmationNumber;
+	fixture.job.identityKey = `agoda:${confirmationNumber}`;
+	Object.assign(
+		fixture.job,
+		createArchiveFingerprint({
+			identity: {
+				hotelId: fixture.config.hotelId,
+				provider: "agoda",
+				confirmationNumber,
+			},
+			audit: fixture.audit,
+		})
+	);
+	fixture.normalized = {
+		...fixture.normalized,
+		providerNumber: confirmationNumber,
+		channel: "agodaycs5",
+		channelDisplay: "Agoda",
+		sourceDisplay: "Agoda",
+		currency: "SAR",
+		totalCents: 5882,
+	};
+	const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+		{
+			normalized: fixture.normalized,
+			provider: "agoda",
+			hotel: fixture.hotel,
+			config: fixture.config,
+		},
+		{
+			FallbackJobModel: jobsModelFor([fixture.job]),
+			InboundEmailModel: modelFor(fixture.audit),
+			resolveArchivedHotel: async () => fixture.hotel,
+			now: () => new Date("2026-08-09T06:01:00.000Z"),
+		}
+	);
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(result.amountRole, "payout");
+	assert.equal(result.evidence.grossTotalSar, 95.06);
+	assert.equal(result.evidence.payoutTotalSar, 58.82);
+});
+
+test("queued Agoda allocation-only review lets verified HotelRunner mappings own heterogeneous rooms", async () => {
+	const fixture = await queuedTripFixture();
+	const confirmationNumber = "2039878308";
+	const secondRoomId = "64b000000000000000000406";
+	const inbound = authenticatedInbound({
+		inboundEmailId: String(fixture.audit._id),
+		provider: "agoda",
+		trustedTransportProvider: "agoda",
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		hotelName: "Zad Ajyad",
+		roomName: "Multiple room allocation",
+		checkinDate: "2026-08-09",
+		checkoutDate: "2026-08-13",
+		roomCount: 2,
+		amount: 588,
+		totalAmountSar: 588,
+		sourceAmount: 588,
+		totalPayoutSar: 363.78,
+		netAfterExpensesTotal: 363.78,
+		paymentSummary: {
+			sourceCurrency: "SAR",
+			sourceTotalGuestPaymentAmount: 588,
+			sourceTotalPayoutAmount: 363.78,
+			totalGuestPaymentAmount: 588,
+			totalPayoutAmount: 363.78,
+			currency: "SAR",
+			exchangeRateToSar: 1,
+			exchangeRateSource: "identity",
+		},
+		requiresManualReview: true,
+		ambiguousMultiRoomEvidence: true,
+		blocksUnmappedReservationCreation: true,
+		manualReviewReasons: [
+			"Agoda email contains multiple rooms; automatic partial-room creation is disabled and the booking requires room review.",
+		],
+	});
+	Object.assign(fixture.audit, {
+		provider: "agoda",
+		confirmationNumber,
+		normalizedReservation: inbound,
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "agoda",
+		},
+	});
+	Object.assign(fixture.job, {
+		provider: "agoda",
+		lookupConfirmationNumber: confirmationNumber,
+		confirmationNumber,
+		identityKey: `agoda:${confirmationNumber}`,
+	});
+	Object.assign(
+		fixture.job,
+		createArchiveFingerprint({
+			identity: {
+				hotelId: fixture.config.hotelId,
+				provider: "agoda",
+				confirmationNumber,
+			},
+			audit: fixture.audit,
+		})
+	);
+	fixture.hotel.roomCountDetails.push({
+		_id: secondRoomId,
+		roomType: "tripleRooms",
+		displayName: "Triple Room",
+		activeRoom: true,
+	});
+	fixture.normalized = {
+		...fixture.normalized,
+		providerNumber: confirmationNumber,
+		channel: "agodaycs5",
+		channelDisplay: "Agoda",
+		sourceDisplay: "Agoda",
+		checkoutDate: "2026-08-13",
+		totalRooms: 2,
+		rooms: [{}, {}],
+		currency: "SAR",
+		totalCents: 36378,
+	};
+	const bridge = await loadHotelRunnerQueuedEmailCommercialBridge(
+		{
+			normalized: fixture.normalized,
+			provider: "agoda",
+			hotel: fixture.hotel,
+			config: fixture.config,
+		},
+		{
+			FallbackJobModel: jobsModelFor([fixture.job]),
+			InboundEmailModel: modelFor(fixture.audit),
+			resolveArchivedHotel: async () => fixture.hotel,
+			now: () => new Date("2026-08-09T06:01:00.000Z"),
+		}
+	);
+	assert.equal(bridge.ok, true, JSON.stringify(bridge));
+	assert.equal(bridge.amountRole, "payout");
+	assert.equal(bridge.evidence.grossTotalSar, 588);
+	assert.equal(bridge.evidence.payoutTotalSar, 363.78);
+	const verifiedRooms = validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+		bridge,
+		{
+			hotel: fixture.hotel,
+			resolvedRooms: [
+				{
+					roomDetails: fixture.hotel.roomCountDetails[0],
+					mapping: { localRoomConfigId: fixture.roomId },
+				},
+				{
+					roomDetails: fixture.hotel.roomCountDetails[1],
+					mapping: { localRoomConfigId: secondRoomId },
+				},
+			],
+		}
+	);
+	assert.equal(verifiedRooms.ok, true, JSON.stringify(verifiedRooms));
 });

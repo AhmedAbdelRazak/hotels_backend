@@ -11,6 +11,7 @@ const {
 	safeSnippet,
 	normalizeWhitespace,
 	evaluateTrustedSenderAuthentication,
+	resolveHotel,
 } = require("../services/otaReservationMapper");
 const {
 	orchestrateInboundReservationEmail,
@@ -42,6 +43,13 @@ const {
 const {
 	notifyAirbnbOtaInboundWhatsapp,
 } = require("../services/airbnbOtaWhatsappNotifier");
+const { getHotelRunnerConfig } = require("../services/hotelrunnerConfig");
+const {
+	DIRECT_OTA_PROVIDERS,
+	canonicalProvider,
+	createHotelRunnerFirstOtaFallbackCoordinator,
+	safeErrorMessage: safeHotelRunnerFallbackError,
+} = require("../services/hotelrunnerFirstOtaFallback");
 
 let simpleParser = null;
 try {
@@ -81,6 +89,8 @@ const duplicateBlockingEmailStatuses = [
 	"status_updated",
 	"duplicate_reservation",
 	"not_reservation",
+	"awaiting_hotelrunner",
+	"parsed_awaiting_hotelrunner",
 ];
 
 const shortHash = (value = "") => String(value || "").slice(0, 12);
@@ -587,6 +597,490 @@ const finalizeRecord = async (
 		.exec();
 };
 
+let hotelRunnerFirstFallbackCoordinatorCache = null;
+let hotelRunnerFirstFallbackCoordinatorCacheKey = "";
+
+const normalizedObjectId = (value) =>
+	String(value?._id || value || "").trim().toLowerCase();
+
+const canonicalInboundTransportProvider = (value) => {
+	const key = String(value || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+	if (key === "hotelrunner" || key === "hotelrunnercom") return "hotelrunner";
+	return canonicalProvider(value);
+};
+
+const hotelRunnerFirstFallbackCoordinatorKey = (config = {}) =>
+	[
+		config.hotelId || "",
+		config.hrIdFingerprint || "",
+		config.otaEmailFallbackGraceMs || "",
+		config.otaEmailFallbackLeaseMs || "",
+		config.otaEmailFallbackProofTtlMs || "",
+		config.otaEmailFallbackMaxAttempts || "",
+	].join(":");
+
+const getHotelRunnerFirstFallbackCoordinator = (config) => {
+	const key = hotelRunnerFirstFallbackCoordinatorKey(config);
+	if (
+		hotelRunnerFirstFallbackCoordinatorCache &&
+		hotelRunnerFirstFallbackCoordinatorCacheKey === key
+	) {
+		return hotelRunnerFirstFallbackCoordinatorCache;
+	}
+	const coordinator = createHotelRunnerFirstOtaFallbackCoordinator({
+		config,
+		graceMs: config.otaEmailFallbackGraceMs,
+		leaseMs: config.otaEmailFallbackLeaseMs,
+		negativeProofTtlMs: config.otaEmailFallbackProofTtlMs,
+		maxAttempts: config.otaEmailFallbackMaxAttempts,
+	});
+	hotelRunnerFirstFallbackCoordinatorCache = coordinator;
+	hotelRunnerFirstFallbackCoordinatorCacheKey = key;
+	return coordinator;
+};
+
+const resetHotelRunnerFirstFallbackCoordinatorForTests = () => {
+	hotelRunnerFirstFallbackCoordinatorCache = null;
+	hotelRunnerFirstFallbackCoordinatorCacheKey = "";
+};
+
+const hasSourceBackedHotelIdentity = (normalized = {}) => {
+	const presence =
+		normalized.sourcePresence && typeof normalized.sourcePresence === "object"
+			? normalized.sourcePresence
+			: {};
+	return (
+		presence.hotelName === true &&
+		Boolean(String(normalized.hotelId || normalized.hotelName || "").trim())
+	);
+};
+
+const buildHotelRunnerResolvedHotelProof = (hotel = {}) => ({
+	version: 1,
+	hotelId: normalizedObjectId(hotel._id),
+	belongsTo: normalizedObjectId(hotel.belongsTo),
+	currency: String(hotel.currency || "SAR").trim().toUpperCase(),
+	activateHotel: hotel.activateHotel === true,
+	xHotelProActive: hotel.xHotelProActive !== false,
+});
+
+const hotelRunnerFirstPreliminaryGate = ({
+	normalized = {},
+	inboundRecord,
+	config,
+} = {}) => {
+	const parsedProvider = canonicalProvider(normalized.provider);
+	const transportProvider = canonicalInboundTransportProvider(
+		normalized.trustedTransportProvider
+	);
+	const authentication =
+		inboundRecord?.senderAuthentication || normalized.senderAuthentication || {};
+	const authenticatedProvider = canonicalInboundTransportProvider(
+		authentication.trustedProvider
+	);
+	const authenticatedAligned = !!(
+		normalized.sourceSenderAuthenticated === true &&
+		normalized.sourceSenderTrusted === true &&
+		authentication.authenticatedAligned === true
+	);
+	const directTransport = !!(
+		authenticatedAligned &&
+		DIRECT_OTA_PROVIDERS.has(parsedProvider) &&
+		transportProvider === parsedProvider &&
+		authenticatedProvider === parsedProvider
+	);
+	const embeddedProviders = Array.from(
+		new Set(
+			(Array.isArray(normalized.hotelRunnerCommercialSourceProviders)
+				? normalized.hotelRunnerCommercialSourceProviders
+				: []
+			)
+				.map(canonicalProvider)
+				.filter((provider) => DIRECT_OTA_PROVIDERS.has(provider))
+		)
+	);
+	const embeddedProvider =
+		embeddedProviders.length === 1 ? embeddedProviders[0] : "";
+	const hotelRunnerRelay = !!(
+		authenticatedAligned &&
+		transportProvider === "hotelrunner" &&
+		authenticatedProvider === "hotelrunner" &&
+		embeddedProvider &&
+		(!DIRECT_OTA_PROVIDERS.has(parsedProvider) ||
+			parsedProvider === embeddedProvider) &&
+		normalized.hotelRunnerBookingSourceConflict !== true &&
+		normalized.hotelRunnerTripIdentityConflict !== true &&
+		normalized.hotelRunnerNonTripIdentityConflict !== true &&
+		normalized.hotelRunnerProviderSpecificBookingIdConflict !== true
+	);
+	if (!directTransport && !hotelRunnerRelay) {
+		return { eligible: false, reason: "not_authenticated_direct_ota" };
+	}
+	const provider = hotelRunnerRelay ? embeddedProvider : parsedProvider;
+	const handlingMode = hotelRunnerRelay
+		? "hotelrunner_relay_audit_only"
+		: "direct_ota_queue";
+	if (
+		String(normalized.intent || "").trim().toLowerCase() !== "new_reservation" ||
+		String(normalized.eventType || "").trim().toLowerCase() !== "new"
+	) {
+		return { eligible: false, reason: "not_new_reservation" };
+	}
+	const sourcePresence = normalized.sourcePresence || {};
+	if (
+		!String(normalized.confirmationNumber || normalized.reservationId || "").trim() ||
+		(sourcePresence.confirmationNumber !== true &&
+			sourcePresence.reservationId !== true)
+	) {
+		return { eligible: false, reason: "confirmation_not_source_backed" };
+	}
+	if (!hasSourceBackedHotelIdentity(normalized)) {
+		return { eligible: false, reason: "hotel_not_source_backed" };
+	}
+	if (!ObjectId.isValid(String(config?.hotelId || "").trim())) {
+		return { eligible: false, reason: "hotelrunner_property_not_configured" };
+	}
+	const queueAvailable = !!(
+		config?.configured === true && config?.projectionEnabled === true
+	);
+	return {
+		eligible: true,
+		provider,
+		handlingMode,
+		queueAvailable,
+		queueUnavailableReason: queueAvailable
+			? ""
+			: "hotelrunner_projection_unavailable",
+		normalizedReservation: normalized,
+	};
+};
+
+const resolveHotelRunnerFirstInboundEligibility = async (
+	{ normalized = {}, inboundRecord, config = getHotelRunnerConfig() } = {},
+	{ resolveHotelDetails = resolveHotel } = {}
+) => {
+	const preliminary = hotelRunnerFirstPreliminaryGate({
+		normalized,
+		inboundRecord,
+		config,
+	});
+	if (!preliminary.eligible) return preliminary;
+	const hotel = await resolveHotelDetails(normalized);
+	if (!hotel) return { eligible: false, reason: "hotel_not_resolved" };
+	if (normalizedObjectId(hotel._id) !== normalizedObjectId(config.hotelId)) {
+		return { eligible: false, reason: "different_hotelrunner_property" };
+	}
+	if (
+		hotel.activateHotel !== true ||
+		hotel.xHotelProActive === false ||
+		!normalizedObjectId(hotel.belongsTo)
+	) {
+		return { eligible: false, reason: "hotelrunner_property_not_active" };
+	}
+	return {
+		eligible: true,
+		provider: preliminary.provider,
+		handlingMode: preliminary.handlingMode,
+		queueAvailable: preliminary.queueAvailable,
+		queueUnavailableReason: preliminary.queueUnavailableReason,
+		normalizedReservation: preliminary.normalizedReservation,
+		hotel,
+	};
+};
+
+const markHotelRunnerFirstFallbackAudit = async (recordId, fields = {}) =>
+	InboundEmail.findByIdAndUpdate(
+		recordId,
+		{ $set: fields },
+		{ new: true }
+	)
+		.lean()
+		.exec();
+
+const buildHotelRunnerAwaitingReconciliation = ({
+	hotel,
+	normalized,
+} = {}) => ({
+	status: "awaiting_hotelrunner",
+	actionTaken: "queued",
+	skipReason: "",
+	automationComment:
+		"Authenticated direct-OTA reservation was archived for HotelRunner-first processing.",
+	reservationId: null,
+	hotelId: hotel?._id || null,
+	pmsConfirmationNumber: "",
+	provider: canonicalProvider(normalized?.provider),
+	confirmationNumber:
+		normalized?.confirmationNumber || normalized?.reservationId || "",
+	warnings: [],
+	errors: [],
+	hotelRunnerFirst: true,
+});
+
+const buildHotelRunnerRelayAuditOnlyReconciliation = ({
+	hotel,
+	normalized,
+	provider,
+} = {}) => ({
+	status: "needs_review",
+	actionTaken: "skipped",
+	skipReason: "hotelrunner_relay_audit_only",
+	automationComment:
+		"Authenticated HotelRunner relay was archived for audit only; API push remains authoritative and the relay cannot create or price a reservation.",
+	reservationId: null,
+	hotelId: hotel?._id || null,
+	pmsConfirmationNumber: "",
+	provider,
+	confirmationNumber:
+		normalized?.confirmationNumber || normalized?.reservationId || "",
+	warnings: [],
+	errors: [],
+	hotelRunnerFirst: true,
+	hotelRunnerRelayAuditOnly: true,
+});
+
+const archiveAndEnqueueHotelRunnerFirstInbound = async (
+	{
+		inboundRecord,
+		email,
+		normalized,
+		orchestration,
+		config = getHotelRunnerConfig(),
+	} = {},
+	dependencies = {}
+) => {
+	const eligibility = await resolveHotelRunnerFirstInboundEligibility(
+		{ normalized, inboundRecord, config },
+		{ resolveHotelDetails: dependencies.resolveHotelDetails || resolveHotel }
+	);
+	if (!eligibility.eligible) return { handled: false, eligibility };
+
+	const persistAudit = dependencies.persistAudit || finalizeRecord;
+	if (eligibility.handlingMode === "hotelrunner_relay_audit_only") {
+		const reconciliation = buildHotelRunnerRelayAuditOnlyReconciliation({
+			hotel: eligibility.hotel,
+			normalized,
+			provider: eligibility.provider,
+		});
+		const audited = await persistAudit(inboundRecord._id, {
+			provider: eligibility.provider,
+			providerLabel: normalized.providerLabel || "HotelRunner",
+			intent: "new_reservation",
+			eventType: "new",
+			processingStatus: "needs_review",
+			confirmationNumber:
+				normalized.confirmationNumber || normalized.reservationId || "",
+			hotelName: normalized.hotelName || "",
+			roomName: normalized.roomName || "",
+			...buildInboundExtractionFields(normalized, reconciliation),
+			hotelId: eligibility.hotel._id,
+			reservationMongoId: null,
+			normalizedReservation: normalized,
+			emailContext: orchestration.emailContext || {},
+			orchestratorDecision: orchestration.decision || {},
+			reconciliation,
+			parseWarnings: normalized.warnings || [],
+			parseErrors: normalized.errors || [],
+			reconcileWarnings: [],
+			reconcileErrors: [],
+			safeSnippet:
+				orchestration.safeSnippet ||
+				safeSnippet(`${email?.subject || ""}\n${email?.text || ""}`, 800),
+			hotelRunnerFirstFallback: {
+				eligible: false,
+				status: "hotelrunner_relay_audit_only",
+				archiveReadyAt: new Date(),
+				enqueueAttemptedAt: null,
+				queuedAt: null,
+				jobId: null,
+				collision: false,
+				lastErrorCode: "",
+				lastErrorMessage: "",
+				resolvedHotelProof: buildHotelRunnerResolvedHotelProof(
+					eligibility.hotel
+				),
+			},
+		});
+		if (!audited?._id) {
+			const error = new Error(
+				"The HotelRunner relay audit could not be persisted safely."
+			);
+			error.code = "HOTELRUNNER_RELAY_AUDIT_PERSIST_FAILED";
+			throw error;
+		}
+		return {
+			handled: true,
+			eligibility,
+			reconciliation,
+			record: audited,
+			relayAuditOnly: true,
+			queuedResult: null,
+			collision: false,
+		};
+	}
+
+	const archiveReadyAt = new Date();
+	const reconciliation = buildHotelRunnerAwaitingReconciliation({
+		hotel: eligibility.hotel,
+		normalized,
+	});
+	const queueUnavailable = eligibility.queueAvailable !== true;
+	const queueUnavailableError = queueUnavailable
+		? Object.assign(
+				new Error(
+					"HotelRunner-first projection is unavailable for the configured property; the archived OTA email was held without inline reservation mutation."
+				),
+				{
+					code: "HOTELRUNNER_FIRST_PROJECTION_UNAVAILABLE",
+					retryable: true,
+				}
+			)
+		: null;
+	const archived = await persistAudit(inboundRecord._id, {
+		provider: eligibility.provider,
+		providerLabel: normalized.providerLabel || "",
+		intent: "new_reservation",
+		eventType: "new",
+		processingStatus: "awaiting_hotelrunner",
+		confirmationNumber:
+			normalized.confirmationNumber || normalized.reservationId || "",
+		hotelName: normalized.hotelName || "",
+		roomName: normalized.roomName || "",
+		...buildInboundExtractionFields(normalized, reconciliation),
+		hotelId: eligibility.hotel._id,
+		reservationMongoId: null,
+		normalizedReservation: normalized,
+		emailContext: orchestration.emailContext || {},
+		orchestratorDecision: orchestration.decision || {},
+		reconciliation,
+		parseWarnings: normalized.warnings || [],
+		parseErrors: normalized.errors || [],
+		reconcileWarnings: [],
+		reconcileErrors: [],
+		safeSnippet:
+			orchestration.safeSnippet ||
+			safeSnippet(`${email?.subject || ""}\n${email?.text || ""}`, 800),
+		hotelRunnerFirstFallback: {
+			eligible: true,
+			status: queueUnavailable ? "recovery_pending" : "archive_ready",
+			archiveReadyAt,
+			enqueueAttemptedAt: queueUnavailable ? archiveReadyAt : null,
+			queuedAt: null,
+			jobId: null,
+			collision: false,
+			lastErrorCode: queueUnavailable
+				? queueUnavailableError.code
+				: "",
+			lastErrorMessage: queueUnavailable
+				? queueUnavailableError.message
+				: "",
+			resolvedHotelProof: buildHotelRunnerResolvedHotelProof(
+				eligibility.hotel
+			),
+		},
+	});
+	if (!archived?._id) {
+		const error = new Error(
+			"The normalized OTA inbound audit could not be persisted before queueing."
+		);
+		error.code = "HOTELRUNNER_FALLBACK_ARCHIVE_PERSIST_FAILED";
+		throw error;
+	}
+	if (queueUnavailable) {
+		return {
+			handled: true,
+			eligibility,
+			reconciliation,
+			record: archived,
+			enqueueError: queueUnavailableError,
+			errorCode: queueUnavailableError.code,
+			errorMessage: queueUnavailableError.message,
+		};
+	}
+
+	const enqueueAttemptedAt = new Date();
+	const markAudit = dependencies.markAudit || markHotelRunnerFirstFallbackAudit;
+	try {
+		const enqueueArchivedEmail =
+			dependencies.enqueueArchivedEmail ||
+			getHotelRunnerFirstFallbackCoordinator(config).enqueueArchivedEmail;
+		const queuedResult = await enqueueArchivedEmail({
+			inboundEmailId: String(archived._id),
+			hotelId: String(eligibility.hotel._id),
+			provider: eligibility.provider,
+			confirmationNumber:
+				normalized.confirmationNumber || normalized.reservationId || "",
+		});
+		const jobId = normalizedObjectId(queuedResult?.job?._id);
+		const collision = queuedResult?.collision === true;
+		const markerFields = {
+			"hotelRunnerFirstFallback.status": collision
+				? "identity_collision"
+				: "enqueued",
+			"hotelRunnerFirstFallback.enqueueAttemptedAt": enqueueAttemptedAt,
+			"hotelRunnerFirstFallback.queuedAt": new Date(),
+			"hotelRunnerFirstFallback.jobId": jobId || null,
+			"hotelRunnerFirstFallback.collision": collision,
+			"hotelRunnerFirstFallback.lastErrorCode": "",
+			"hotelRunnerFirstFallback.lastErrorMessage": "",
+		};
+		if (collision) {
+			markerFields.processingStatus = "needs_review";
+			markerFields.reconciliation = {
+				...reconciliation,
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "hotelrunner_fallback_identity_collision",
+				automationComment:
+					"The HotelRunner-first queue found a conflicting archived email for this OTA identity.",
+				errors: [
+					"A conflicting archived OTA email already owns this HotelRunner fallback identity.",
+				],
+			};
+			markerFields.reconcileErrors = markerFields.reconciliation.errors;
+		}
+		const marked = await markAudit(archived._id, markerFields).catch((error) => {
+			console.error(
+				"[ota-inbound] HotelRunner-first queue marker update failed safely:",
+				error.message
+			);
+			return null;
+		});
+		return {
+			handled: true,
+			eligibility,
+			reconciliation: collision
+				? markerFields.reconciliation
+				: reconciliation,
+			record: marked || archived,
+			queuedResult,
+			collision,
+		};
+	} catch (error) {
+		const errorCode = String(
+			error?.code || "HOTELRUNNER_FALLBACK_ENQUEUE_FAILED"
+		).slice(0, 140);
+		const errorMessage = safeHotelRunnerFallbackError(error);
+		const marked = await markAudit(archived._id, {
+			"hotelRunnerFirstFallback.status": "recovery_pending",
+			"hotelRunnerFirstFallback.enqueueAttemptedAt": enqueueAttemptedAt,
+			"hotelRunnerFirstFallback.lastErrorCode": errorCode,
+			"hotelRunnerFirstFallback.lastErrorMessage": errorMessage,
+		}).catch(() => null);
+		return {
+			handled: true,
+			eligibility,
+			reconciliation,
+			record: marked || archived,
+			enqueueError: error,
+			errorCode,
+		};
+	}
+};
+
 const buildForwardDecisionAudit = (decision = {}) => ({
 	shouldForward: !!decision.shouldForward,
 	reason: String(decision.reason || "").toLowerCase(),
@@ -844,6 +1338,103 @@ exports.handleSendGridInbound = async (req, res) => {
 			warnings: normalized.warnings || [],
 			errors: normalized.errors || [],
 		});
+
+		const hotelRunnerFirst = await archiveAndEnqueueHotelRunnerFirstInbound({
+			inboundRecord,
+			email,
+			normalized,
+			orchestration,
+		});
+		if (hotelRunnerFirst.handled) {
+			const queuedRecord = hotelRunnerFirst.record || inboundRecord;
+			if (hotelRunnerFirst.relayAuditOnly) {
+				logInbound("hotelrunner_relay.audit_only", {
+					inboundEmailId: String(inboundRecord._id),
+					hotelId: normalizedObjectId(
+						hotelRunnerFirst.eligibility?.hotel?._id
+					),
+					provider: hotelRunnerFirst.eligibility?.provider || "",
+					confirmationNumber: normalized.confirmationNumber || "",
+				});
+				emitInboundEmailUpdated(req, queuedRecord, {
+					processingStatus: "needs_review",
+					provider: hotelRunnerFirst.eligibility?.provider || "",
+					intent: normalized.intent,
+					confirmationNumber: normalized.confirmationNumber,
+					hotelId: hotelRunnerFirst.eligibility?.hotel?._id,
+				});
+				const response = res.status(200).send("OK");
+				void handleImportantInboundForwarding({
+					req,
+					record: queuedRecord,
+					email,
+					normalized,
+					reconciliation: hotelRunnerFirst.reconciliation,
+				}).catch((error) =>
+					console.error(
+						"[SendGrid Inbound] relay-audit forwarding failed safely:",
+						error.message
+					)
+				);
+				return response;
+			}
+			if (hotelRunnerFirst.enqueueError) {
+				logInbound("hotelrunner_first.enqueue_failed", {
+					inboundEmailId: String(inboundRecord._id),
+					hotelId: normalizedObjectId(hotelRunnerFirst.eligibility?.hotel?._id),
+					provider: normalized.provider || "",
+					confirmationNumber: normalized.confirmationNumber || "",
+					errorCode: hotelRunnerFirst.errorCode || "",
+				});
+				emitInboundEmailUpdated(req, queuedRecord, {
+					processingStatus: "awaiting_hotelrunner",
+					provider: normalized.provider,
+					intent: normalized.intent,
+					confirmationNumber: normalized.confirmationNumber,
+					hotelId: hotelRunnerFirst.eligibility?.hotel?._id,
+				});
+				// The complete normalized audit remains the durable recovery input and
+				// retains its dedupe claim. A transient 503 asks SendGrid to retry while
+				// the HotelRunner worker can also recover the orphaned archive.
+				res.set("Retry-After", "60");
+				return res
+					.status(503)
+					.send("HotelRunner-first inbound queue is temporarily unavailable");
+			}
+
+			logInbound("hotelrunner_first.queued", {
+				inboundEmailId: String(inboundRecord._id),
+				jobId: normalizedObjectId(hotelRunnerFirst.queuedResult?.job?._id),
+				hotelId: normalizedObjectId(hotelRunnerFirst.eligibility?.hotel?._id),
+				provider: normalized.provider || "",
+				confirmationNumber: normalized.confirmationNumber || "",
+				collision: hotelRunnerFirst.collision === true,
+			});
+			emitInboundEmailUpdated(req, queuedRecord, {
+				processingStatus: hotelRunnerFirst.reconciliation.status,
+				provider: normalized.provider,
+				intent: normalized.intent,
+				confirmationNumber: normalized.confirmationNumber,
+				hotelId: hotelRunnerFirst.eligibility?.hotel?._id,
+			});
+			const response = res.status(200).send("OK");
+			// Important-email forwarding is independent of reservation creation. It
+			// may run after acceptance, but reservation refresh and creation WhatsApp
+			// notifications must wait for the background coordinator's final result.
+			void handleImportantInboundForwarding({
+				req,
+				record: queuedRecord,
+				email,
+				normalized,
+				reconciliation: hotelRunnerFirst.reconciliation,
+			}).catch((error) =>
+				console.error(
+					"[SendGrid Inbound] queued-email forwarding failed safely:",
+					error.message
+				)
+			);
+			return response;
+		}
 
 		logInbound("reconcile.start", {
 			inboundEmailId: String(inboundRecord._id),
@@ -1171,3 +1762,14 @@ exports.releaseInboundEmailRetryClaim = async (req, res) => {
 		return res.status(500).json({ error: "Could not release the retry claim." });
 	}
 };
+
+// Focused exports keep the HotelRunner-first gate/order independently testable
+// without exposing a production dependency-injection switch on the HTTP route.
+exports.archiveAndEnqueueHotelRunnerFirstInbound =
+	archiveAndEnqueueHotelRunnerFirstInbound;
+exports.hotelRunnerFirstPreliminaryGate = hotelRunnerFirstPreliminaryGate;
+exports.resolveHotelRunnerFirstInboundEligibility =
+	resolveHotelRunnerFirstInboundEligibility;
+exports.resetHotelRunnerFirstFallbackCoordinatorForTests =
+	resetHotelRunnerFirstFallbackCoordinatorForTests;
+exports.duplicateBlockingEmailStatuses = [...duplicateBlockingEmailStatuses];

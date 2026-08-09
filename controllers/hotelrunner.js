@@ -17,6 +17,14 @@ const {
 	safeErrorMessage,
 } = require("../services/hotelrunnerEventService");
 const {
+	buildWorkerRevisionHealth,
+	getBackendStartupRevision,
+	inspectGitCheckout,
+} = require("../services/hotelrunnerWorkerRevision");
+const {
+	buildHotelRunnerProjectionEligibilityFilter,
+} = require("../services/hotelrunnerFirstOtaFallback");
+const {
 	assignedHotelIds,
 	isConfiguredSuperAdmin,
 } = require("../services/adminReservationCycleScope");
@@ -472,18 +480,11 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 			Number.isFinite(config.projectionNotBefore.getTime())
 				? config.projectionNotBefore
 				: null;
-		const eligibleProjectionFacts = {
-			source: "push",
-			...(projectionCutoff
-				? {
-					receivedAt: { $gte: projectionCutoff },
-					sourceUpdatedAt: { $gte: projectionCutoff },
-				  }
-				: {}),
-		};
+		const eligibleProjectionFacts =
+			buildHotelRunnerProjectionEligibilityFilter(projectionCutoff);
 		const eligibleEventMatch = {
 			hotelId: hotel._id,
-			...eligibleProjectionFacts,
+			$and: [eligibleProjectionFacts],
 		};
 		const noneligibleEventMatch = {
 			hotelId: hotel._id,
@@ -524,7 +525,15 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 				HotelRunnerSyncState.findOne({ hotelId: hotel._id }).lean(),
 				HotelRunnerEvent.countDocuments(noneligibleEventMatch),
 			]);
-		return res.json({
+		const revisionHealth = buildWorkerRevisionHealth({
+			config,
+			syncState,
+			backendRevision: getBackendStartupRevision(),
+			currentCheckout: inspectGitCheckout(),
+		});
+		const responseStatus =
+			revisionHealth.required && !revisionHealth.healthy ? 503 : 200;
+		return res.status(responseStatus).json({
 			configuration: {
 				tokenConfigured: Boolean(config.token),
 				hrIdConfigured: Boolean(config.hrId),
@@ -546,6 +555,7 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 			),
 			latestCallback: latestEvent || null,
 			latestProcessed: latestProcessed || null,
+			revisionHealth,
 			worker: syncState
 				? {
 						status: syncState.status,
@@ -555,6 +565,13 @@ exports.hotelRunnerAdminStatus = async (req, res) => {
 						nextPullAt: syncState.nextPullAt,
 						lastRoomListSyncAt: syncState.lastRoomListSyncAt,
 						metrics: syncState.metrics || {},
+						releaseSha: syncState.workerReleaseSha || null,
+						releaseTreeSha: syncState.workerReleaseTreeSha || null,
+						instanceId: syncState.workerInstanceId || null,
+						startedAt: syncState.workerStartedAt || null,
+						heartbeatAt: syncState.workerHeartbeatAt || null,
+						stoppedAt: syncState.workerStoppedAt || null,
+						stopReason: syncState.workerStopReason || null,
 				  }
 				: null,
 		});

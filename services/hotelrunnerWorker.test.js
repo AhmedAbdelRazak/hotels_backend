@@ -5,6 +5,8 @@ process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+	TARGETED_LOOKUP_MARKER_PATH,
+	buildProjectionEligibilityFilter,
 	createHotelRunnerWorker,
 	normalizedFromStoredEvent,
 } = require("./hotelrunnerWorker");
@@ -101,9 +103,10 @@ test("projection claims exclude every event archived before the activation cutof
 	});
 
 	await worker.claimEvent();
-	assert.equal(captured.filter.receivedAt.$gte, cutoff);
-	assert.equal(captured.filter.sourceUpdatedAt.$gte, cutoff);
-	assert.equal(captured.filter.source, "push");
+	const eligibility = captured.filter.$and[0];
+	const push = eligibility.$or.find((branch) => branch.source === "push");
+	assert.equal(push.receivedAt.$gte, cutoff);
+	assert.equal(push.sourceUpdatedAt.$gte, cutoff);
 });
 
 test("an idle worker probes without churning the projection lease", async () => {
@@ -133,6 +136,7 @@ test("an idle worker probes without churning the projection lease", async () => 
 			pullEnabled: false,
 		},
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel,
 			SyncStateModel,
 			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
@@ -170,6 +174,7 @@ test("a database property lease serializes projection across duplicate workers",
 		},
 	};
 	const dependencies = {
+		otaFallbackCoordinator: null,
 		EventModel: {},
 		SyncStateModel,
 		createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
@@ -209,6 +214,7 @@ test("projection lease renewal fails closed after ownership is lost", async () =
 		},
 		instanceId: "projection-heartbeat-worker",
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel: {},
 			SyncStateModel: {
 				updateOne(filter, update) {
@@ -246,6 +252,7 @@ test("event projection assertion is an owned-processing CAS and fails closed", a
 		},
 		instanceId: "event-cas-worker",
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel: {
 				updateOne(filter, update) {
 					capturedFilter = filter;
@@ -288,6 +295,7 @@ test("finish and retry surface event lease loss and never count a false completi
 		},
 		instanceId: "lost-event-lease-worker",
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel: {
 				updateOne: () => ({ exec: async () => ({ matchedCount: 0 }) }),
 			},
@@ -452,6 +460,14 @@ test("a callback conflict in the pre-project window preserves the active first p
 			});
 		},
 	};
+	const eventPersistenceDependencies = {
+		EventModel,
+		markHotelRunnerFallbackApiObserved: async () => ({
+			eligible: true,
+			ordered: false,
+			decision: "no_active_job",
+		}),
+	};
 	await persistHotelRunnerDelivery(
 		{
 			config,
@@ -459,7 +475,7 @@ test("a callback conflict in the pre-project window preserves the active first p
 			rawReservation: originalPayload,
 			receivedAt: new Date("2026-08-06T12:00:01.000Z"),
 		},
-		{ EventModel }
+		eventPersistenceDependencies
 	);
 	let callbackConflict = null;
 	let projected = 0;
@@ -471,6 +487,7 @@ test("a callback conflict in the pre-project window preserves the active first p
 		config,
 		instanceId,
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel,
 			SyncStateModel,
 			HotelModel: {
@@ -493,7 +510,7 @@ test("a callback conflict in the pre-project window preserves the active first p
 								},
 								receivedAt: new Date("2026-08-06T12:00:02.000Z"),
 							},
-							{ EventModel }
+							eventPersistenceDependencies
 						);
 						assert.equal(event.leaseOwner, instanceId);
 						return { _id: hotelId, belongsTo: "64b000000000000000000002" };
@@ -623,6 +640,7 @@ test("every ordinary and recovery claim is scoped to the configured property", a
 		config: { configured: true, hotelId, pullEnabled: false },
 		instanceId: "property-scoped-worker",
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel,
 			SyncStateModel: {},
 			createPullSync: () => ({ runIfDue: async () => ({ status: "disabled" }) }),
@@ -806,6 +824,7 @@ test("a shared-identity quarantine is terminal and does not burn retry attempts"
 		},
 		instanceId: event.leaseOwner,
 		dependencies: {
+			otaFallbackCoordinator: null,
 			EventModel,
 			SyncStateModel: {
 				updateOne: () => query({ matchedCount: 1 }),
@@ -912,4 +931,349 @@ test("an expired eighth claim gets one idempotent recovery and cannot remain stu
 	assert.equal(failed.status, "failed");
 	assert.equal(failed.errorCode, "HOTELRUNNER_FINAL_RECOVERY_LEASE_EXPIRED");
 	assert.equal(Object.hasOwn(failed, "leaseOwner"), false);
+});
+
+test("only cutoff-eligible pushes and fully bound targeted lookup events can project", () => {
+	const cutoff = new Date("2026-08-09T12:00:00.000Z");
+	const filter = buildProjectionEligibilityFilter(cutoff);
+	assert.equal(filter.$or.length, 2);
+
+	const push = filter.$or.find((branch) => branch.source === "push");
+	assert.deepEqual(push, {
+		source: "push",
+		receivedAt: { $gte: cutoff },
+		sourceUpdatedAt: { $gte: cutoff },
+	});
+
+	const pull = filter.$or.find((branch) => branch.source?.$in);
+	assert.deepEqual(pull.source, { $in: ["pull", "push"] });
+	assert.equal(pull[`${TARGETED_LOOKUP_MARKER_PATH}.version`], 1);
+	assert.equal(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.origin`],
+		"targeted_identity_lookup"
+	);
+	assert.equal(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.projectable`],
+		true
+	);
+	assert.deepEqual(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.jobId`],
+		{ $exists: true, $type: "string", $ne: "" }
+	);
+	assert.deepEqual(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.provider`].$in,
+		["agoda", "airbnb", "booking", "expedia", "hotels", "trip"]
+	);
+	assert.deepEqual(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.confirmationNumber`],
+		{ $exists: true, $type: "string", $ne: "" }
+	);
+	assert.equal(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.archiveFingerprint`].$regex.source,
+		"^[a-f0-9]{64}$"
+	);
+	assert.deepEqual(
+		pull[`${TARGETED_LOOKUP_MARKER_PATH}.markedAt`],
+		{ $type: "date" }
+	);
+	assert.ok(
+		Object.keys(pull).length > 2,
+		"targeted source plus projectable:true alone must never admit an event"
+	);
+});
+
+function createFallbackWorkerHarness({
+	event = null,
+	eventAfterLease = null,
+	fallbackDue = true,
+	leaseAvailable = true,
+	recoveryMakesDue = false,
+} = {}) {
+	const hotelId = "64b000000000000000000001";
+	const instanceId = "fallback-property-worker";
+	const order = [];
+	const state = { hotelId };
+	let due = fallbackDue;
+	let fallbackRuns = 0;
+	let recoveryRuns = 0;
+	let ensureIndexRuns = 0;
+	const query = (resolve) => ({
+		select() {
+			return this;
+		},
+		exec: async () => (typeof resolve === "function" ? resolve() : resolve),
+	});
+	const EventModel = {
+		exists() {
+			return query(() =>
+				event && ["pending", "retry", "processing"].includes(event.status)
+					? { _id: event._id }
+					: null
+			);
+		},
+		findOneAndUpdate(filter, update) {
+			return query(() => {
+				if (filter.status?.$in && event?.status === "pending") {
+					Object.assign(event, update.$set || {});
+					event.attempts = Number(event.attempts || 0) + 1;
+					order.push("event-claimed");
+					return event;
+				}
+				return null;
+			});
+		},
+		updateOne(_filter, update) {
+			return query(() => {
+				if (event) {
+					Object.assign(event, update.$set || {});
+					for (const key of Object.keys(update.$unset || {})) delete event[key];
+				}
+				return { matchedCount: 1 };
+			});
+		},
+	};
+	const SyncStateModel = {
+		updateOne(filter, update) {
+			return query(() => {
+				if (
+					filter.projectionLeaseOwner &&
+					state.projectionLeaseOwner !== filter.projectionLeaseOwner
+				) {
+					return { matchedCount: 0 };
+				}
+				Object.assign(state, update.$set || {});
+				for (const key of Object.keys(update.$unset || {})) delete state[key];
+				if (update.$unset?.projectionLeaseOwner) order.push("lease-released");
+				return { matchedCount: 1 };
+			});
+		},
+		findOneAndUpdate(_filter, update) {
+			return query(() => {
+				if (!leaseAvailable) return null;
+				Object.assign(state, update.$set || {});
+				order.push("lease-claimed");
+				if (!event && eventAfterLease) event = eventAfterLease;
+				return { ...state };
+			});
+		},
+	};
+	const otaFallbackCoordinator = {
+		async ensureIndexes() {
+			ensureIndexRuns += 1;
+			return true;
+		},
+		async hasDueWork() {
+			return due;
+		},
+		async recoverOrphanedArchivedEmails() {
+			assert.equal(state.projectionLeaseOwner, instanceId);
+			recoveryRuns += 1;
+			order.push("fallback-recovery");
+			if (recoveryMakesDue) due = true;
+			return { scanned: 1, enqueued: recoveryMakesDue ? 1 : 0 };
+		},
+		async runOnce() {
+			assert.equal(state.projectionLeaseOwner, instanceId);
+			fallbackRuns += 1;
+			order.push("fallback-run");
+			due = false;
+			return { _id: `fallback-${fallbackRuns}` };
+		},
+	};
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId,
+			hrIdFingerprint: "a".repeat(64),
+			projectionEnabled: true,
+			projectionNotBefore: new Date("2026-08-09T00:00:00.000Z"),
+			pullEnabled: false,
+			otaEmailFallbackGraceMs: 180_000,
+			otaEmailFallbackLeaseMs: 300_000,
+			otaEmailFallbackProofTtlMs: 120_000,
+			otaEmailFallbackMaxAttempts: 12,
+		},
+		instanceId,
+		dependencies: {
+			EventModel,
+			SyncStateModel,
+			otaFallbackCoordinator,
+			HotelModel: {
+				findOne: () => ({
+					select() {
+						return this;
+					},
+					lean() {
+						return this;
+					},
+					exec: async () => ({
+						_id: hotelId,
+						belongsTo: "64b000000000000000000002",
+					}),
+				}),
+			},
+			projectReservation: async () => {
+				order.push("event-projected");
+				return { status: "created" };
+			},
+			createPullSync: () => ({
+				runIfDue: async () => ({ status: "disabled" }),
+			}),
+		},
+	});
+	return {
+		worker,
+		order,
+		state,
+		counts: () => ({ fallbackRuns, recoveryRuns, ensureIndexRuns }),
+	};
+}
+
+test("an eligible HotelRunner event always projects before a due email fallback", async () => {
+	const payload = {
+		issues: [],
+		rooms: [],
+	};
+	const event = {
+		_id: "target-event",
+		hotelId: "64b000000000000000000001",
+		status: "pending",
+		attempts: 0,
+		messageUid: "target-event-message",
+		hotelRunnerReservationId: "target-hotelrunner-reservation",
+		payloadHash: "b".repeat(64),
+		canonicalHash: "c".repeat(64),
+		sourceUpdatedAt: new Date("2026-08-09T12:00:00.000Z"),
+		payload,
+		toObject() {
+			return { ...this, payload };
+		},
+	};
+	const harness = createFallbackWorkerHarness({ event, fallbackDue: true });
+	assert.equal(await harness.worker.runOnce(), true);
+	assert.deepEqual(harness.order, [
+		"lease-claimed",
+		"event-claimed",
+		"event-projected",
+		"fallback-recovery",
+		"lease-released",
+	]);
+	assert.equal(harness.counts().fallbackRuns, 0);
+	assert.equal(harness.counts().recoveryRuns, 1);
+});
+
+test("an event archived after the readiness probe still preempts fallback under lease", async () => {
+	const payload = { issues: [], rooms: [] };
+	const eventAfterLease = {
+		_id: "racing-target-event",
+		hotelId: "64b000000000000000000001",
+		status: "pending",
+		attempts: 0,
+		messageUid: "racing-target-message",
+		hotelRunnerReservationId: "racing-target-hotelrunner-reservation",
+		payloadHash: "e".repeat(64),
+		canonicalHash: "f".repeat(64),
+		sourceUpdatedAt: new Date("2026-08-09T12:01:00.000Z"),
+		payload,
+		toObject() {
+			return { ...this, payload };
+		},
+	};
+	const harness = createFallbackWorkerHarness({
+		eventAfterLease,
+		fallbackDue: true,
+	});
+	assert.equal(await harness.worker.runOnce(), true);
+	assert.deepEqual(harness.order, [
+		"lease-claimed",
+		"event-claimed",
+		"event-projected",
+		"fallback-recovery",
+		"lease-released",
+	]);
+	assert.equal(harness.counts().fallbackRuns, 0);
+});
+
+test("due orphan recovery cannot be starved by an existing fallback backlog", async () => {
+	const harness = createFallbackWorkerHarness({ fallbackDue: true });
+	assert.equal(await harness.worker.runOnce(), true);
+	assert.equal(harness.counts().fallbackRuns, 1);
+	assert.equal(harness.counts().recoveryRuns, 1);
+	assert.equal(harness.counts().ensureIndexRuns, 1);
+	assert.deepEqual(harness.order, [
+		"lease-claimed",
+		"fallback-recovery",
+		"fallback-run",
+		"lease-released",
+	]);
+});
+
+test("worker construction passes every bounded fallback limit to the coordinator", () => {
+	let captured = null;
+	const otaFallbackDependencies = { sentinel: true };
+	createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			hrIdFingerprint: "d".repeat(64),
+			projectionEnabled: true,
+			pullEnabled: false,
+			otaEmailFallbackGraceMs: 181_000,
+			otaEmailFallbackLeaseMs: 301_000,
+			otaEmailFallbackProofTtlMs: 121_000,
+			otaEmailFallbackMaxAttempts: 11,
+		},
+		instanceId: "fallback-limit-worker",
+		dependencies: {
+			otaFallbackDependencies,
+			createOtaFallbackCoordinator(options) {
+				captured = options;
+				return {
+					ensureIndexes: async () => true,
+					hasDueWork: async () => false,
+					recoverOrphanedArchivedEmails: async () => ({ scanned: 0 }),
+					runOnce: async () => null,
+				};
+			},
+			createPullSync: () => ({
+				runIfDue: async () => ({ status: "disabled" }),
+			}),
+		},
+	});
+	assert.equal(captured.instanceId, "fallback-limit-worker");
+	assert.equal(captured.graceMs, 181_000);
+	assert.equal(captured.leaseMs, 301_000);
+	assert.equal(captured.negativeProofTtlMs, 121_000);
+	assert.equal(captured.maxAttempts, 11);
+	assert.equal(captured.dependencies, otaFallbackDependencies);
+});
+
+test("orphan recovery and its recovered fallback both stay inside the property lease", async () => {
+	const harness = createFallbackWorkerHarness({
+		fallbackDue: false,
+		recoveryMakesDue: true,
+	});
+	assert.equal(await harness.worker.runOnce(), true);
+	assert.deepEqual(harness.order, [
+		"lease-claimed",
+		"fallback-recovery",
+		"fallback-run",
+		"lease-released",
+	]);
+	assert.deepEqual(harness.counts(), {
+		fallbackRuns: 1,
+		recoveryRuns: 1,
+		ensureIndexRuns: 1,
+	});
+});
+
+test("a worker that cannot own the property lease cannot run email fallback", async () => {
+	const harness = createFallbackWorkerHarness({
+		fallbackDue: true,
+		leaseAvailable: false,
+	});
+	assert.equal(await harness.worker.runOnce(), false);
+	assert.equal(harness.counts().fallbackRuns, 0);
+	assert.equal(harness.counts().recoveryRuns, 0);
+	assert.deepEqual(harness.order, []);
 });

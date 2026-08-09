@@ -2136,7 +2136,8 @@ const captureReservationAvailabilitySnapshot = (
 
 const createReservationWithAvailabilitySnapshot = async (
 	reservationData = {},
-	source = "reservation_import"
+	source = "reservation_import",
+	options = {}
 ) => {
 	const inventoryValidation = await validateReservationInventoryForCreate(
 		reservationData,
@@ -2147,6 +2148,12 @@ const createReservationWithAvailabilitySnapshot = async (
 		inventoryValidation,
 		source
 	);
+	if (typeof options.beforeInsert === "function") {
+		// HotelRunner-first fallback uses this as its cross-process identity
+		// linearization point. Inventory reads are complete, and the returned
+		// promise is the final await before the Mongo reservation insert begins.
+		await options.beforeInsert({ reservationData, inventoryValidation });
+	}
 	return Reservations.create(reservationData);
 };
 

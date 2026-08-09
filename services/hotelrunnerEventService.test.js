@@ -298,6 +298,16 @@ function createEventModel() {
 	};
 }
 
+const eventDependencies = (EventModel, overrides = {}) => ({
+	EventModel,
+	markHotelRunnerFallbackApiObserved: async () => ({
+		eligible: true,
+		ordered: false,
+		decision: "no_active_job",
+	}),
+	...overrides,
+});
+
 test("stored and logged errors redact credentials and connection URI userinfo", () => {
 	const message = safeErrorMessage(
 		new Error(
@@ -309,6 +319,53 @@ test("stored and logged errors redact credentials and connection URI userinfo", 
 	assert.equal(message.includes("api-secret"), false);
 	assert.equal(message.includes("property-secret"), false);
 	assert.match(message, /\[REDACTED\]/);
+});
+
+test("push ingress decision is durable before event insert and a marker failure is retryable", async () => {
+	const EventModel = createEventModel();
+	const observations = [];
+	const context = {
+		config: {
+			hrIdFingerprint: "synthetic-property-fingerprint",
+			callbackMaxReservations: 100,
+		},
+		hotel: { _id: "64b000000000000000000001" },
+		rawReservation: rawReservation(),
+		source: "push",
+		receivedAt: new Date("2026-08-06T10:01:00.000Z"),
+	};
+	const markerError = new Error("synthetic ingress marker outage");
+	markerError.code = "HOTELRUNNER_FALLBACK_API_ORDER_UNCERTAIN";
+	markerError.retryable = true;
+	await assert.rejects(
+		persistHotelRunnerDelivery(
+			context,
+			eventDependencies(EventModel, {
+				markHotelRunnerFallbackApiObserved: async (observation) => {
+					observations.push(observation);
+					throw markerError;
+				},
+			})
+		),
+		(error) => error === markerError && error.retryable === true
+	);
+	assert.equal(EventModel.byKey.size, 0);
+	assert.equal(observations.length, 1);
+	assert.equal(observations[0].provider, "bookingcom");
+	assert.equal(observations[0].confirmationNumber, "BOOKING-1");
+	assert.match(observations[0].observationKey, /^[a-f0-9]{64}$/);
+
+	await persistHotelRunnerDelivery(
+		context,
+		eventDependencies(EventModel, {
+			markHotelRunnerFallbackApiObserved: async (observation) => {
+				observations.push(observation);
+				return { eligible: true, ordered: true, decision: "api_observed" };
+			},
+		})
+	);
+	assert.equal(EventModel.byKey.size, 1);
+	assert.equal(observations.length, 2);
 });
 
 test("same delivery UID is idempotent and a changed payload is quarantined", async () => {
@@ -324,11 +381,11 @@ test("same delivery UID is idempotent and a changed payload is quarantined", asy
 	};
 	const first = await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:01:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	const duplicate = await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:02:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	assert.equal(first.duplicate, false);
 	assert.equal(duplicate.duplicate, true);
@@ -341,7 +398,7 @@ test("same delivery UID is idempotent and a changed payload is quarantined", asy
 			rawReservation: rawReservation({ note: "different payload, same UID" }),
 			receivedAt: new Date("2026-08-06T10:03:00.000Z"),
 		},
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	const stored = Array.from(EventModel.byKey.values())[0];
 	assert.equal(conflict.integrityConflict, true);
@@ -354,7 +411,7 @@ test("same delivery UID is idempotent and a changed payload is quarantined", asy
 
 	const originalAfterConflict = await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:04:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	assert.equal(originalAfterConflict.status, "quarantined");
 	assert.equal(originalAfterConflict.revived, false);
@@ -375,7 +432,7 @@ test("a conflicting delivery cannot revoke an actively processing event lease", 
 	};
 	await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:01:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	const stored = Array.from(EventModel.byKey.values())[0];
 	Object.assign(stored, {
@@ -391,7 +448,7 @@ test("a conflicting delivery cannot revoke an actively processing event lease", 
 			rawReservation: rawReservation({ note: "racing conflicting payload" }),
 			receivedAt: new Date("2026-08-06T10:02:00.000Z"),
 		},
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 
 	assert.equal(conflict.integrityConflict, true);
@@ -448,7 +505,7 @@ test("needs-mapping and non-owned processing conflicts are quarantined", async (
 			};
 			await persistHotelRunnerDelivery(
 				{ ...context, receivedAt: new Date("2026-08-06T09:59:00.000Z") },
-				{ EventModel }
+				eventDependencies(EventModel)
 			);
 			const stored = Array.from(EventModel.byKey.values())[0];
 			Object.assign(stored, scenario.state);
@@ -459,7 +516,7 @@ test("needs-mapping and non-owned processing conflicts are quarantined", async (
 					rawReservation: rawReservation({ note: scenario.name }),
 					receivedAt: new Date("2026-08-06T10:01:00.000Z"),
 				},
-				{ EventModel }
+				eventDependencies(EventModel)
 			);
 
 			assert.equal(conflict.status, "quarantined");
@@ -486,7 +543,7 @@ test("a conflict arriving after projection raises attention without losing its r
 	};
 	await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:01:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	const stored = Array.from(EventModel.byKey.values())[0];
 	const preservedResult = { status: "created", changedPaths: ["status"] };
@@ -504,7 +561,7 @@ test("a conflict arriving after projection raises attention without losing its r
 			rawReservation: rawReservation({ note: "late conflicting payload" }),
 			receivedAt: new Date("2026-08-06T10:03:00.000Z"),
 		},
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 
 	assert.equal(conflict.status, "attention");
@@ -531,7 +588,7 @@ test("exact redelivery revives a failed event but never creates another row", as
 	};
 	await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:01:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	const stored = Array.from(EventModel.byKey.values())[0];
 	Object.assign(stored, {
@@ -548,7 +605,7 @@ test("exact redelivery revives a failed event but never creates another row", as
 
 	const redelivery = await persistHotelRunnerDelivery(
 		{ ...context, receivedAt: new Date("2026-08-06T10:04:00.000Z") },
-		{ EventModel }
+		eventDependencies(EventModel)
 	);
 	assert.equal(redelivery.duplicate, true);
 	assert.equal(redelivery.revived, true);
@@ -599,18 +656,18 @@ test("a partially stored callback batch is safe to retry without duplicate event
 		receivedAt: new Date("2026-08-06T10:04:00.000Z"),
 	};
 	await assert.rejects(
-		persistHotelRunnerBatch(batch, {
+		persistHotelRunnerBatch(batch, eventDependencies(EventModel, {
 			EventModel,
 			skipIndexInitialization: true,
-		}),
+		})),
 		/synthetic mid-batch storage interruption/
 	);
 	assert.equal(EventModel.byKey.size, 1);
 
-	const retryResults = await persistHotelRunnerBatch(batch, {
+	const retryResults = await persistHotelRunnerBatch(batch, eventDependencies(EventModel, {
 		EventModel,
 		skipIndexInitialization: true,
-	});
+	}));
 	assert.equal(retryResults.length, 2);
 	assert.equal(retryResults[0].duplicate, true);
 	assert.equal(retryResults[1].duplicate, false);

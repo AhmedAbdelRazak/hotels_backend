@@ -47,6 +47,23 @@ const hotelRunnerSyncStateSchema = new mongoose.Schema(
 		projectionLeaseOwner: { type: String, trim: true, default: "" },
 		projectionLeaseAcquiredAt: { type: Date, default: null },
 		projectionLeaseUntil: { type: Date, default: null, index: true },
+		workerReleaseSha: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
+		workerReleaseTreeSha: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
+		workerInstanceId: { type: String, trim: true, default: "" },
+		workerStartedAt: { type: Date, default: null },
+		workerHeartbeatAt: { type: Date, default: null },
+		workerStoppedAt: { type: Date, default: null },
+		workerStopReason: { type: String, trim: true, default: "" },
 		lastErrorCode: { type: String, trim: true, default: "" },
 		lastErrorMessage: { type: String, trim: true, default: "" },
 		disabledConfigFingerprint: {

@@ -143,8 +143,9 @@ async function persistHotelRunnerDelivery(
 		source = "push",
 		receivedAt = new Date(),
 	} = {},
-	{ EventModel = HotelRunnerEvent } = {}
+	dependencies = {}
 ) {
+	const { EventModel = HotelRunnerEvent } = dependencies;
 	const prepared = eventInsertDocument({
 		config,
 		hotel,
@@ -152,6 +153,24 @@ async function persistHotelRunnerDelivery(
 		source,
 		receivedAt,
 	});
+	if (prepared.document.source === "push") {
+		const markApiObserved =
+			dependencies.markHotelRunnerFallbackApiObserved ||
+			require("./hotelrunnerFallbackIngressGate")
+				.markHotelRunnerFallbackApiObserved;
+		// This durable decision is deliberately ordered before the event upsert.
+		// If it cannot be recorded, callback persistence throws and the HTTP layer
+		// returns 503 so HotelRunner redelivers instead of ACKing an unordered push.
+		await markApiObserved({
+			hotelId: prepared.document.hotelId,
+			provider: prepared.normalized.channel,
+			confirmationNumber: prepared.normalized.providerNumber,
+			observationKey: prepared.document.eventKey,
+			payloadHash: prepared.document.payloadHash,
+			source: prepared.document.source,
+			observedAt: receivedAt,
+		});
+	}
 	const event = await EventModel.findOneAndUpdate(
 		{ eventKey: prepared.document.eventKey },
 		{
