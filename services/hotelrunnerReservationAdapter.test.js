@@ -1293,7 +1293,7 @@ test("review mode links an email-first OTA review without releasing or duplicati
 	assert.equal(system.reservations[0].commission_ota, null);
 });
 
-test("Trip source-currency API lifecycle claims one email reservation without inventing OTA commission", async () => {
+test("Trip source-currency API lifecycle cannot bridge property money without verified evidence", async () => {
 	const system = createInMemoryProjectionSystem();
 	system.config.requireOtaReview = true;
 	const providerNumber = "1539366616295913";
@@ -1361,18 +1361,16 @@ test("Trip source-currency API lifecycle claims one email reservation without in
 		system.dependencies
 	);
 
-	assert.equal(result.status, "updated");
+	assert.equal(result.status, "quarantined");
+	assert.equal(result.code, "hotelrunner_currency_requires_review");
 	assert.equal(system.reservations.length, 1);
 	assert.equal(String(system.reservations[0]._id), String(existing._id));
 	assert.equal(system.reservations[0].total_amount, 70.43);
 	assert.equal(system.reservations[0].currency, "SAR");
-	assert.equal(system.reservations[0].commission, 0);
+	assert.equal(system.reservations[0].commission, 15);
 	assert.equal(system.reservations[0].commission_ota, null);
 	assert.equal(system.reservations[0].state, "OTA Platform Review");
-	assert.equal(
-		system.reservations[0].supplierData.hotelRunner.transport,
-		"hotelrunner_api"
-	);
+	assert.equal(system.reservations[0].supplierData.hotelRunner, undefined);
 });
 
 test("cross-currency API event waits visibly for its email identity bridge instead of creating a second reservation", async () => {

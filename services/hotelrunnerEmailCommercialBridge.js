@@ -37,6 +37,9 @@ const HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION = [
 	"normalizedReservation.sourceAmount",
 	"normalizedReservation.sourceCurrency",
 	"normalizedReservation.currency",
+	"normalizedReservation.propertyCurrency",
+	"normalizedReservation.propertyConversionVerified",
+	"normalizedReservation.currencyConversionEvidence",
 	"normalizedReservation.totalPayoutSar",
 	"normalizedReservation.netAfterExpensesTotal",
 	"normalizedReservation.otaCommissionSar",
@@ -366,9 +369,10 @@ async function loadHotelRunnerEmailCommercialBridge(
 	if (!hotelRunnerAmount) return reject("hotelrunner_amount_invalid");
 
 	const evidence = explicitCommercialEvidence(existing, inbound, record._id);
-	const grossTotalSar = positiveAmount(
-		evidence?.grossTotalSar ?? inbound.totalAmountSar
-	);
+	// A provider/source amount can still prove transport identity without proving
+	// property money. Never surface a stored fallback conversion as commercial
+	// SAR: only the fully verified evidence contract may provide this value.
+	const grossTotalSar = positiveAmount(evidence?.grossTotalSar);
 	const base = {
 		ok: true,
 		reason: "",

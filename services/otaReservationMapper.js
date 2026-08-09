@@ -36,9 +36,6 @@ const {
 
 dayjs.extend(customParseFormat);
 
-const USD_TO_SAR = Number(
-	process.env.OTA_USD_TO_SAR_RATE || process.env.USD_TO_SAR_RATE || 3.75
-);
 const MIN_REAL_CALENDAR_ROOT_PRICE = Number(
 	process.env.OTA_MIN_REAL_CALENDAR_ROOT_PRICE || 0.01
 );
@@ -54,43 +51,13 @@ const MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR =
 const MAX_OTA_INBOUND_ROOM_COUNT = 250;
 const MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS = 20000;
 
-const DEFAULT_SAR_EXCHANGE_RATES = {
-	SAR: 1,
-	USD: USD_TO_SAR,
-	AED: 1.021,
-	QAR: 1.03,
-	BHD: 9.95,
-	OMR: 9.74,
-	KWD: 12.2,
-	EUR: 4.1,
-	GBP: 4.75,
-	CHF: 4.2,
-	CAD: 2.75,
-	AUD: 2.45,
-	JOD: 5.29,
-	EGP: 0.078,
-	MAD: 0.38,
-	TRY: 0.12,
-	INR: 0.045,
-	PKR: 0.013,
-	PHP: 0.067,
-	IDR: 0.00023,
-	MYR: 0.8,
-	SGD: 2.8,
-	CNY: 0.52,
-	JPY: 0.025,
-	THB: 0.1,
-};
-
 const MONEY_CURRENCY_CODES = Array.from(
-	new Set([
-		...Object.keys(DEFAULT_SAR_EXCHANGE_RATES),
-		...`AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CLP CNY COP CRC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IQD IRR ISK JMD JOD JPY KES KGS KHR KMF KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VES VND VUV WST XAF XCD XOF XPF YER ZAR ZMW ZWG`.split(
+	new Set(
+		`AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CLP CNY COP CRC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IQD IRR ISK JMD JOD JPY KES KGS KHR KMF KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VES VND VUV WST XAF XCD XOF XPF YER ZAR ZMW ZWG`.split(
 			/\s+/
-		),
-	])
+		)
+	)
 );
-const STABLE_DEFAULT_RATE_CURRENCIES = new Set(["USD", "AED", "QAR", "BHD", "OMR"]);
 const EXCHANGE_RATE_CACHE_TTL_MS = Number(
 	process.env.OTA_EXCHANGE_RATE_CACHE_TTL_MS || 6 * 60 * 60 * 1000
 );
@@ -237,6 +204,7 @@ const EXPLICIT_HOTEL_ALIAS_GROUPS = [
 		"Zyd Ajyad",
 		"Zad Agyad",
 		"Zad Ajyad",
+		"Zad Ajyad Hotel",
 		"ZAD AJYAD",
 	],
 	[
@@ -930,10 +898,7 @@ function getSarExchangeRate(currency) {
 	if (configured[code]) {
 		return { code, rate: configured[code], source: "configured" };
 	}
-	if (DEFAULT_SAR_EXCHANGE_RATES[code]) {
-		return { code, rate: DEFAULT_SAR_EXCHANGE_RATES[code], source: "fallback_default" };
-	}
-	return { code, rate: 0, source: "missing" };
+	return { code, rate: null, source: "missing" };
 }
 
 async function fetchWithHardTimeout(
@@ -1252,38 +1217,42 @@ function getSarConversionMeta(amount, currency) {
 		return {
 			sourceAmount: 0,
 			sourceCurrency: exchange.code,
-			exchangeRateToSar: exchange.rate || 0,
+			exchangeRateToSar: exchange.rate ?? null,
 			exchangeRateSource: exchange.source,
-			totalAmountSar: 0,
+			totalAmountSar: exchange.rate ? 0 : null,
 			convertedAt: new Date().toISOString(),
 		};
 	}
 	return {
 		sourceAmount: numericAmount,
 		sourceCurrency: exchange.code,
-		exchangeRateToSar: exchange.rate || 0,
+		exchangeRateToSar: exchange.rate ?? null,
 		exchangeRateSource: exchange.source,
-		totalAmountSar: exchange.rate ? round2(numericAmount * exchange.rate) : 0,
+		totalAmountSar: exchange.rate
+			? round2(numericAmount * exchange.rate)
+			: null,
 		convertedAt: new Date().toISOString(),
 	};
 }
 
 function getUsdToSarExchangeRate() {
 	const exchange = getSarExchangeRate("USD");
-	const fallbackRate = Number.isFinite(USD_TO_SAR) && USD_TO_SAR > 0 ? USD_TO_SAR : 3.75;
-	const rate = Number(exchange.rate || fallbackRate);
+	const rate = Number(exchange.rate);
 	return {
 		code: "USD",
-		rate: Number.isFinite(rate) && rate > 0 ? rate : fallbackRate,
-		source: exchange.rate ? exchange.source : "fallback_default",
+		rate: Number.isFinite(rate) && rate > 0 ? rate : null,
+		source: Number.isFinite(rate) && rate > 0 ? exchange.source : "missing",
 	};
 }
 
 function sarToUsdAmount(amountSar) {
-	const numericSar = Number(amountSar || 0);
-	if (!Number.isFinite(numericSar) || numericSar < 0) return 0;
+	if (amountSar === null || amountSar === undefined || amountSar === "") {
+		return null;
+	}
+	const numericSar = Number(amountSar);
+	if (!Number.isFinite(numericSar) || numericSar < 0) return null;
 	const usdExchange = getUsdToSarExchangeRate();
-	return usdExchange.rate ? round2(numericSar / usdExchange.rate) : 0;
+	return usdExchange.rate ? round2(numericSar / usdExchange.rate) : null;
 }
 
 function withUsdConversionMeta(conversion = {}) {
@@ -1349,9 +1318,9 @@ async function getSarConversionMetaAsync(
 		return {
 			sourceAmount: 0,
 			sourceCurrency: exchange.code,
-			exchangeRateToSar: exchange.rate || 0,
+			exchangeRateToSar: exchange.rate ?? null,
 			exchangeRateSource: exchange.source,
-			totalAmountSar: 0,
+			totalAmountSar: exchange.rate ? 0 : null,
 			convertedAt,
 			currencyConversionEvidence: trustedEvidence,
 		};
@@ -1359,9 +1328,11 @@ async function getSarConversionMetaAsync(
 	return {
 		sourceAmount: numericAmount,
 		sourceCurrency: exchange.code,
-		exchangeRateToSar: exchange.rate || 0,
+		exchangeRateToSar: exchange.rate ?? null,
 		exchangeRateSource: exchange.source,
-		totalAmountSar: exchange.rate ? round2(numericAmount * exchange.rate) : 0,
+		totalAmountSar: exchange.rate
+			? round2(numericAmount * exchange.rate)
+			: null,
 		convertedAt,
 		currencyConversionEvidence: trustedEvidence,
 	};
@@ -1937,6 +1908,20 @@ function extractExplicitFactLabelValues(text = "", labels = [], field = "") {
 			) {
 				break;
 			}
+			const followingLine = stripExplicitFactMarkdown(lines[index + 1] || "");
+			if (
+				field === "roomName" &&
+				value &&
+				followingLine &&
+				!lineStartsWithExplicitFactLabel(followingLine) &&
+				/\|\s*\d+\s+room\(s\)/i.test(followingLine)
+			) {
+				// Trip.com can wrap one structured `Room Type` value immediately
+				// before its `| N room(s)` table columns, then repeat the same value
+				// unwrapped. Rejoin only that source-shaped continuation so the
+				// generic repeated-fact guard compares the actual room identity.
+				value = `${value} ${followingLine}`;
+			}
 			if (
 				!value &&
 				lines[index + 1] &&
@@ -1995,7 +1980,11 @@ function normalizeExplicitHotelFactValue(value = "") {
 }
 
 function normalizeExplicitRoomFactValue(value = "") {
-	return normalizeRoomSignalText(cleanFieldValue(value))
+	const roomIdentity = cleanFieldValue(value).replace(
+		/\s*\|\s*\d+\s+room\(s\)[\s\S]*$/i,
+		""
+	);
+	return normalizeRoomSignalText(roomIdentity)
 		.split(" ")
 		.filter(Boolean)
 		.map((token) => {
@@ -4217,6 +4206,21 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 	const payoutConversion = pricingIsConsistent
 		? getSarConversionMeta(payout.amount, currency)
 		: {};
+	const guestTotalSar =
+		guestConversion.totalAmountSar === null ||
+		guestConversion.totalAmountSar === undefined
+			? null
+			: Number(guestConversion.totalAmountSar);
+	const payoutTotalSar =
+		payoutConversion.totalAmountSar === null ||
+		payoutConversion.totalAmountSar === undefined
+			? null
+			: Number(payoutConversion.totalAmountSar);
+	const exchangeRateToSar =
+		guestConversion.exchangeRateToSar === null ||
+		guestConversion.exchangeRateToSar === undefined
+			? null
+			: Number(guestConversion.exchangeRateToSar);
 	const nightlyPricingSource = pricingIsConsistent
 		? extractDirectTripNightlySourceRows(text, {
 				dateRange: generateDateRange(checkinDate, checkoutDate),
@@ -4229,9 +4233,9 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 	const nightlyPricingSar = convertDirectTripNightlyPricing(
 		nightlyPricingSource,
 		{
-			totalGuestAmountSar: Number(guestConversion.totalAmountSar || 0),
-			totalPayoutAmountSar: Number(payoutConversion.totalAmountSar || 0),
-			exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+			totalGuestAmountSar: guestTotalSar ?? 0,
+			totalPayoutAmountSar: payoutTotalSar ?? 0,
+			exchangeRateToSar: exchangeRateToSar ?? 0,
 		}
 	);
 	const prepaid =
@@ -4268,23 +4272,23 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 		amountText: pricingIsConsistent ? `${currency} ${finalRate.amount}` : "",
 		amount: pricingIsConsistent ? finalRate.amount : 0,
 		currency: pricingIsConsistent ? currency : "",
-		totalAmountSar: Number(guestConversion.totalAmountSar || 0),
+		totalAmountSar: guestTotalSar,
 		sourceAmount: pricingIsConsistent ? finalRate.amount : 0,
 		sourceCurrency: pricingIsConsistent ? currency : "",
-		exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+		exchangeRateToSar,
 		exchangeRateSource: guestConversion.exchangeRateSource || "",
 		amountConvertedAt: guestConversion.convertedAt || "",
-		totalPayoutSar: Number(payoutConversion.totalAmountSar || 0),
-		netAfterExpensesTotal: Number(payoutConversion.totalAmountSar || 0),
+		totalPayoutSar: payoutTotalSar,
+		netAfterExpensesTotal: payoutTotalSar,
 		paymentSummary: pricingIsConsistent
 			? {
 					sourceCurrency: currency,
 					sourceTotalGuestPaymentAmount: finalRate.amount,
 					sourceTotalPayoutAmount: payout.amount,
-					totalGuestPaymentAmount: Number(guestConversion.totalAmountSar || 0),
-					totalPayoutAmount: Number(payoutConversion.totalAmountSar || 0),
+					totalGuestPaymentAmount: guestTotalSar,
+					totalPayoutAmount: payoutTotalSar,
 					currency: "SAR",
-					exchangeRateToSar: Number(guestConversion.exchangeRateToSar || 0),
+					exchangeRateToSar,
 					exchangeRateSource: guestConversion.exchangeRateSource || "",
 					amountConvertedAt: guestConversion.convertedAt || "",
 			  }
@@ -11271,9 +11275,9 @@ function directHotelRunnerCommercialEnrichmentSet(
 	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
 		{
 			...normalized,
-			propertyCurrency: String(existing.currency || "SAR").toUpperCase(),
+			propertyCurrency: "SAR",
 		},
-		{ propertyCurrency: String(existing.currency || "SAR").toUpperCase() }
+		{ propertyCurrency: "SAR" }
 	);
 	const explicitCommission =
 		otaCommercialEvidence?.roles?.explicitOtaCommission?.propertyAmount ??
@@ -11285,6 +11289,7 @@ function directHotelRunnerCommercialEnrichmentSet(
 		// amount is written only from the complete, authenticated evidence above.
 		commission: 0,
 		commission_ota: explicitCommission,
+		currency: "SAR",
 		total_amount: evidence.grossTotalSar,
 		pickedRoomsType: pricing.rooms,
 		pickedRoomsPricing: pricing.rooms,
@@ -11334,7 +11339,7 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 	evidence = {}
 ) {
 	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
-	const propertyCurrency = String(document.currency || "SAR").trim().toUpperCase();
+	const propertyCurrency = "SAR";
 	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
 		{ ...normalized, propertyCurrency },
 		{ propertyCurrency }
@@ -11346,6 +11351,7 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 			: round2(evidence.otaCommissionSar));
 	document.commission = 0;
 	document.commission_ota = explicitCommission;
+	document.currency = "SAR";
 	document.total_amount = evidence.grossTotalSar;
 	document.adminPricing = {
 		...(document.adminPricing || {}),
@@ -13629,7 +13635,11 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 			? conversion.totalAmountSar
 			: null;
 		next.amount = propertyConversionVerified ? conversion.totalAmountSar : null;
-		next.currency = propertyConversionVerified ? "SAR" : sourceCurrency;
+		// `currency` is the operational/property-money currency. The original
+		// provider currency remains explicit in `sourceCurrency`; an unavailable
+		// trusted conversion therefore means unknown SAR money, never USD money in
+		// an operational field and never a synthetic numeric zero.
+		next.currency = "SAR";
 		next.exchangeRateToSar = conversion.exchangeRateToSar;
 		next.exchangeRateSource = conversion.exchangeRateSource;
 		next.sourceExchangeRateToSar = conversion.exchangeRateToSar;
@@ -13640,12 +13650,8 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 		if (trustedEvidence) next.currencyConversionEvidence = trustedEvidence;
 		else delete next.currencyConversionEvidence;
 
-		if (
-			conversion.sourceCurrency !== "SAR" &&
-			conversion.exchangeRateSource === "fallback_default" &&
-			!propertyConversionVerified
-		) {
-			const warning = `Trusted live SAR exchange evidence is unavailable for ${conversion.sourceCurrency}; source-currency amounts were retained without materializing fallback property money.`;
+		if (conversion.sourceCurrency !== "SAR" && !propertyConversionVerified) {
+			const warning = `Trusted live SAR exchange evidence is unavailable for ${conversion.sourceCurrency}; source-currency amounts were retained without materializing property money.`;
 			if (!next.warnings.includes(warning)) next.warnings.push(warning);
 		}
 		if (
@@ -13695,7 +13701,7 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 				? conversion.totalAmountSar
 				: null,
 			totalPayoutAmount: payoutAmountSar,
-			currency: propertyConversionVerified ? "SAR" : null,
+			currency: "SAR",
 			propertyCurrency: "SAR",
 			propertyConversionVerified,
 			exchangeRateToSar: conversion.exchangeRateToSar,
@@ -13723,6 +13729,8 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 	} else if (sourceCurrencyConflict) {
 		next.propertyCurrency = "SAR";
 		next.propertyConversionVerified = false;
+		next.amount = null;
+		next.currency = "SAR";
 		next.totalAmountSar = null;
 		next.totalPayoutSar = null;
 		next.netAfterExpensesTotal = null;
@@ -13757,14 +13765,6 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 		vcc.amountToChargeConvertedAt = vccConversion.convertedAt;
 		next.vcc = vcc;
 
-		if (
-			vccConversion.sourceCurrency !== "SAR" &&
-			vccConversion.exchangeRateSource === "fallback_default" &&
-			!STABLE_DEFAULT_RATE_CURRENCIES.has(vccConversion.sourceCurrency)
-		) {
-			const warning = `Using fallback SAR exchange rate for VCC amount ${vccConversion.sourceCurrency}; configure OTA_${vccConversion.sourceCurrency}_TO_SAR_RATE or EXCHANGE_RATE for exact production accounting.`;
-			if (!next.warnings.includes(warning)) next.warnings.push(warning);
-		}
 		if (
 			vccConversion.sourceCurrency !== "SAR" &&
 			vccConversion.exchangeRateSource === "missing"

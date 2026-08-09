@@ -34,6 +34,7 @@ const {
 	directAfterRelayInventoryConflict,
 	directAfterRelayUnmappedReviewGuard,
 	directHotelRunnerEmailCommercialGuard,
+	directHotelRunnerCommercialEnrichmentSet,
 	detectPaymentCollectionModel,
 	detectProvider,
 	detectStatusToApply,
@@ -1622,7 +1623,61 @@ test("privacy redaction preserves labeled OTA identities but still removes card 
 	assert.equal(isWeakOtaConfirmationValue("1651516732730092"), false);
 });
 
-test("direct Trip.com templates retain authenticated source pricing without canonicalizing fallback FX", () => {
+const wrappedDirectTripRoomEmail = ({
+	confirmationNumber = "1567953940758068",
+	guestGross = "16.83",
+	hotelPayout = "15.89",
+	newReservation = false,
+} = {}) => ({
+	from: "Trip.com <ebooking@trip.com>",
+	to: "ota@example.com",
+	subject: `${newReservation ? "New " : ""}Booking no. # ${confirmationNumber} #`,
+	messageId: `trip-${confirmationNumber}@mail.trip.com`,
+	sourceReceivedAt: "2026-08-09T05:47:21.899Z",
+	senderAuthentication: {
+		authenticatedAligned: true,
+		trustedProvider: "trip",
+		method: "dkim",
+	},
+	text: [
+		`Booking no. # ${confirmationNumber} #`,
+		"Zad Ajyad Hotel",
+		"Guest Name:",
+		"Synthetic Guest",
+		"Staying period: Aug 10, 2026 - Aug 11, 2026 | 1 night",
+		"Room Type:Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram",
+		"Flexible-before the day of arrival-Room Only-Prepay | 1 room(s)AllotmentBed",
+		"Room Type: Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram Flexible-before the day of arrival-Room Only-Prepay | 1 room(s) Allotment",
+		"Guests (estimated): 4 adults, 0 children",
+		"Payment information",
+		"Net rate | Prepaid | monthly settlement",
+		"Room rate 1 room(s) x 1 night(s)",
+		`Final room rate (incl. taxes and fees) USD ${guestGross}`,
+		`Your payout USD ${hotelPayout}`,
+		"This is a prepaid reservation. The guest has already paid for the room.",
+		"Room ratePrice details",
+	].join("\n"),
+});
+
+test("production-shaped wrapped Trip room labels remain one source-backed room", () => {
+	const normalized = extractNormalizedReservation(wrappedDirectTripRoomEmail());
+
+	assert.equal(normalized.confirmationNumber, "1567953940758068");
+	assert.equal(normalized.directTripTemplateMatched, true);
+	assert.deepEqual(normalized.genericRepeatedFactConflictFields, []);
+	assert.equal(normalized.genericRepeatedFactConflict, false);
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(normalized.sourcePresence.roomName, true);
+	assert.equal(
+		normalized.roomName,
+		"Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram Flexible-before the day of arrival-Room Only-Prepay"
+	);
+	assert.equal(normalized.sourceAmount, 16.83);
+	assert.equal(normalized.sourceCurrency, "USD");
+	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, 15.89);
+});
+
+test("direct Trip.com templates retain authenticated source pricing without materializing untrusted FX", () => {
 	const nightlySourceRows = [
 		["Aug 26", "16.06", "15.17"],
 		["Aug 27", "16.06", "15.17"],
@@ -1686,15 +1741,16 @@ test("direct Trip.com templates retain authenticated source pricing without cano
 	assert.equal(normalized.trustedTransportProvider, "trip");
 	assert.equal(normalized.sourceSenderAuthenticated, true);
 	assert.match(normalized.source.textHash, /^[a-f0-9]{64}$/);
-	assert.equal(normalized.totalAmountSar, 367.13);
-	assert.equal(normalized.totalPayoutSar, 346.72);
+	assert.equal(normalized.totalAmountSar, null);
+	assert.equal(normalized.totalPayoutSar, null);
+	assert.deepEqual(normalized.nightlyPricingSar, []);
 	assert.deepEqual(
-		normalized.nightlyPricingSar.map((row) => row.clientAmountSar),
-		[60.23, 60.23, 60.23, 60.22, 63.11, 63.11]
+		normalized.nightlyPricingSource.map((row) => row.clientAmount),
+		[16.06, 16.06, 16.06, 16.06, 16.83, 16.83]
 	);
 	assert.deepEqual(
-		normalized.nightlyPricingSar.map((row) => row.payoutAmountSar),
-		[56.89, 56.89, 56.89, 56.89, 59.58, 59.58]
+		normalized.nightlyPricingSource.map((row) => row.payoutAmount),
+		[15.17, 15.17, 15.17, 15.17, 15.89, 15.89]
 	);
 	assert.equal(normalized.paymentCollectionModel, "ota_collect");
 	assert.equal(normalized.vcc.cardLast4, "");
@@ -1761,7 +1817,7 @@ test("direct Trip.com templates retain authenticated source pricing without cano
 	assert.equal(built.document.financeStatus, "commercial review required");
 });
 
-test("one-night direct Trip.com pricing keeps source evidence and root price while fallback FX stays non-canonical", () => {
+test("one-night direct Trip.com pricing keeps source evidence and root price while untrusted FX stays unknown", () => {
 	const normalized = extractNormalizedReservation({
 		from: "Trip.com <ebooking@trip.com>",
 		subject: "Booking no. # 1167731616604825 #",
@@ -1800,10 +1856,16 @@ test("one-night direct Trip.com pricing keeps source evidence and root price whi
 	});
 
 	assert.equal(normalized.confirmationNumber, "1167731616604825");
-	assert.equal(normalized.totalAmountSar, 60.22);
-	assert.equal(normalized.totalPayoutSar, 56.89);
-	assert.deepEqual(normalized.nightlyPricingSar, [
-		{ date: "2026-08-05", clientAmountSar: 60.22, payoutAmountSar: 56.89 },
+	assert.equal(normalized.totalAmountSar, null);
+	assert.equal(normalized.totalPayoutSar, null);
+	assert.deepEqual(normalized.nightlyPricingSar, []);
+	assert.deepEqual(normalized.nightlyPricingSource, [
+		{
+			date: "2026-08-05",
+			clientAmount: 16.06,
+			payoutAmount: 15.17,
+			currency: "USD",
+		},
 	]);
 	const built = buildReservationDocument(normalized, {
 		_id: "hotel-zad",
@@ -1901,7 +1963,7 @@ test("conflicting Trip.com guest and payout currencies disable automatic pricing
 	assert.match(normalized.manualReviewReasons.join(" "), /currencies conflict/i);
 	assert.equal(normalized.amount, 0);
 	assert.equal(normalized.totalAmountSar, 0);
-	assert.equal(normalized.totalPayoutSar, 0);
+	assert.equal(normalized.totalPayoutSar, null);
 	assert.equal(normalized.sourcePresence.amount, false);
 	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
 	assert.equal(getDeterministicExtractionSkipReason(normalized), "");
@@ -4562,7 +4624,7 @@ test("compact ExpediaCollect remains OTA collect without virtual-card evidence",
 	assert.equal(detectPaymentCollectionModel("Reference code EVC"), "unknown");
 });
 
-test("forwarded Expedia Partner Central bookings retain exact identity, stay, occupancy, and USD pricing", () => {
+test("forwarded Expedia Partner Central bookings retain exact identity, stay, occupancy, and USD source pricing", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"Mohammed Hamouda" <xhotelpro@gmail.com>',
 		to: "ota@inbound.jannatbooking.com",
@@ -4597,7 +4659,7 @@ test("forwarded Expedia Partner Central bookings retain exact identity, stay, oc
 	assert.equal(normalized.totalGuests, 3);
 	assert.equal(normalized.sourceAmount, 42.44);
 	assert.equal(normalized.sourceCurrency, "USD");
-	assert.equal(normalized.totalAmountSar, 159.15);
+	assert.equal(normalized.totalAmountSar, null);
 	assert.equal(normalized.currency, "USD");
 	assert.equal(normalized.paymentCollectionModel, "ota_collect");
 	assert.equal(normalized.paidOnline, true);
@@ -6599,7 +6661,7 @@ test("HotelRunner Expedia Arabic totals, occupancy, and six-person inventory sta
 	assert.equal(normalized.currency, "USD");
 	assert.equal(normalized.sourceAmount, 215.4);
 	assert.equal(normalized.sourceCurrency, "USD");
-	assert.equal(normalized.totalAmountSar, 807.75);
+	assert.equal(normalized.totalAmountSar, null);
 	assert.equal(normalized.sourcePresence.amount, true);
 	assert.equal(normalized.adults, 2);
 	assert.equal(normalized.children, 4);
@@ -6635,7 +6697,7 @@ test("HotelRunner Expedia Arabic totals, occupancy, and six-person inventory sta
 	assert.equal(match.matchType, "explicit_capacity");
 });
 
-test("HotelRunner Arabic ISO currencies retain foreign source evidence without canonicalizing fallback FX", () => {
+test("HotelRunner Arabic ISO currencies retain foreign source evidence without materializing untrusted FX", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"HotelRunner" <noreply@hotelrunner.com>',
 		subject: "Zad AJYAD Hotel - \u062d\u062c\u0632 \u062c\u062f\u064a\u062f #R073513682",
@@ -6653,7 +6715,7 @@ test("HotelRunner Arabic ISO currencies retain foreign source evidence without c
 	assert.equal(normalized.amount, 100);
 	assert.equal(normalized.currency, "AED");
 	assert.equal(normalized.sourceCurrency, "AED");
-	assert.equal(normalized.totalAmountSar, 102.1);
+	assert.equal(normalized.totalAmountSar, null);
 	assert.deepEqual(requiredNewReservationMissing(normalized), []);
 
 	const room = {
@@ -8386,6 +8448,196 @@ const hotelRunnerCommercialHotel = () => ({
 				? HOTELRUNNER_COMMERCIAL_ROOM_ID
 				: `64b0000000000000000000f${index + 1}`,
 	})),
+});
+
+test("a different future Trip booking derives commercial SAR values through the same shared path", async () => {
+	const confirmationNumber = "9988776655443322";
+	const sourceRoomName =
+		"Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram Flexible-before the day of arrival-Room Only-Prepay";
+	const parsed = extractNormalizedReservation(
+		wrappedDirectTripRoomEmail({
+			confirmationNumber,
+			guestGross: "21.40",
+			hotelPayout: "18.20",
+			newReservation: true,
+		})
+	);
+	const fetchedAt = "2026-08-09T06:00:00.000Z";
+	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
+	const normalized = {
+		...(await applyLiveSarConversion(parsed, {
+			apiKey: "future-booking-test-credential",
+			cache: new Map(),
+			now: () => Date.parse(fetchedAt),
+			fetchImpl: async () => ({
+				ok: true,
+				async json() {
+					return {
+						result: "success",
+						base_code: "USD",
+						target_code: "SAR",
+						conversion_rate: 3.8,
+						time_last_update_unix: Date.parse(sourceTimestamp) / 1000,
+					};
+				},
+			}),
+		})),
+		inboundEmailId: "future-trip-commercial-audit",
+	};
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-09T06:01:00.000Z"),
+	});
+
+	assert.equal(normalized.confirmationNumber, confirmationNumber);
+	assert.equal(normalized.sourceAmount, 21.4);
+	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, 18.2);
+	assert.equal(normalized.totalAmountSar, 81.32);
+	assert.equal(normalized.totalPayoutSar, 69.16);
+	assert.equal(normalized.currency, "SAR");
+	assert.equal(normalized.propertyCurrency, "SAR");
+	assert.equal(normalized.paymentSummary.currency, "SAR");
+	assert.equal(normalized.propertyConversionVerified, true);
+	assert.equal(normalized.currencyConversionEvidence.provenance.provider, "exchange_rate_api");
+	assert.ok(evidence);
+	assert.equal(evidence.otaIdentityKey, `trip:${confirmationNumber}`);
+	assert.equal(evidence.grossTotalSar, 81.32);
+	assert.equal(evidence.payoutTotalSar, 69.16);
+	assert.equal(evidence.otaExpenseTotalSar, 12.16);
+	assert.equal(evidence.otaCommissionSar, null);
+
+	const sourceRooms = [
+		{
+			room_type: "quadRooms",
+			displayName: "Quadruple Room",
+			sourceRoomName,
+			hotelRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
+			localRoomConfigId: HOTELRUNNER_COMMERCIAL_ROOM_ID,
+			count: 1,
+			pricingByDay: [
+				{
+					date: "2026-08-10",
+					price: null,
+					clientPrice: null,
+					mainPrice: null,
+					rootPrice: 75,
+					totalPriceWithCommission: null,
+					hotelRunnerSourcePrice: 18.2,
+				},
+			],
+		},
+	];
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		_id: "future-trip-hotelrunner-reservation",
+		confirmation_number: "future-trip-pms-confirmation",
+		reservation_id: confirmationNumber,
+		otaIdentityKey: `hotelrunner:${confirmationNumber}`,
+		otaCrossTransportIdentityKey: `trip:${confirmationNumber}`,
+		booking_source: "Trip.com",
+		customer_details: {
+			...base.customer_details,
+			confirmation_number2: confirmationNumber,
+			booking_source: "Trip.com",
+		},
+		checkin_date: "2026-08-10",
+		checkout_date: "2026-08-11",
+		total_amount: null,
+		sub_total: 75,
+		pickedRoomsType: structuredClone(sourceRooms),
+		pickedRoomsPricing: structuredClone(sourceRooms),
+		adminPricing: {
+			...base.adminPricing,
+			clientTotal: null,
+			rootTotal: 75,
+		},
+		ota_financial_summary: {
+			...base.ota_financial_summary,
+			clientTotal: null,
+			hotelVisibleAmount: 75,
+		},
+		supplierData: {
+			...base.supplierData,
+			supplierName: "Trip.com",
+			suppliedBookingNo: confirmationNumber,
+			otaConfirmationNumber: confirmationNumber,
+			platformConfirmationNumber: confirmationNumber,
+			otaProvider: "trip",
+			hotelRunner: {
+				...base.supplierData.hotelRunner,
+				reservationId: "future-trip-hotelrunner-id",
+			},
+		},
+	});
+	const guard = directHotelRunnerEmailCommercialGuard({
+		normalized,
+		existing,
+		hotelDetails: hotelRunnerCommercialHotel(),
+		matchedReservationBy: ["otaCrossTransportIdentityKey"],
+		evidence,
+	});
+	assert.equal(guard.ok, true, guard.reason);
+	assert.equal(guard.reportedTotalRole, "unknown");
+	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence, {
+		reportedTotalRole: guard.reportedTotalRole,
+		existing,
+		commercialPricing: guard.commercialPricing,
+	});
+	assert.equal(set.total_amount, 81.32);
+	assert.equal(set.currency, "SAR");
+	assert.equal(set.commission_ota, null);
+	assert.equal(set["adminPricing.netAfterExpensesTotal"], 69.16);
+	assert.equal(set["adminPricing.otaExpenseTotal"], 12.16);
+	assert.equal(set.pickedRoomsPricing[0].pricingByDay[0].clientPrice, 81.32);
+	assert.equal(set.pickedRoomsPricing[0].pricingByDay[0].netAfterExpenses, 69.16);
+	assert.equal(set.pickedRoomsPricing[0].pricingByDay[0].rootPrice, 75);
+	assert.equal(set.pickedRoomsPricing[0].pricingByDay[0].hotelRunnerSourcePrice, 18.2);
+});
+
+test("future foreign-currency money stays unknown SAR when trusted conversion evidence is unavailable", async () => {
+	const priorUsdRate = process.env.OTA_USD_TO_SAR_RATE;
+	const priorConfiguredRates = process.env.OTA_CURRENCY_RATES_TO_SAR;
+	delete process.env.OTA_USD_TO_SAR_RATE;
+	delete process.env.OTA_CURRENCY_RATES_TO_SAR;
+	try {
+		const parsed = extractNormalizedReservation(
+			wrappedDirectTripRoomEmail({
+				confirmationNumber: "8877665544332211",
+				guestGross: "27.35",
+				hotelPayout: "19.45",
+				newReservation: true,
+			})
+		);
+		const normalized = await applyLiveSarConversion(parsed, {
+			rateLookup: async () => null,
+		});
+
+		assert.equal(normalized.sourceAmount, 27.35);
+		assert.equal(normalized.sourceCurrency, "USD");
+		assert.equal(normalized.sourcePayoutAmount, 19.45);
+		assert.equal(normalized.sourcePayoutCurrency, "USD");
+		assert.equal(normalized.propertyCurrency, "SAR");
+		assert.equal(normalized.currency, "SAR");
+		assert.equal(normalized.paymentSummary.currency, "SAR");
+		assert.equal(normalized.propertyConversionVerified, false);
+		assert.equal(normalized.exchangeRateToSar, null);
+		assert.equal(normalized.totalAmountSar, null);
+		assert.equal(normalized.amount, null);
+		assert.equal(normalized.totalPayoutSar, null);
+		assert.equal(normalized.paymentSummary.totalGuestPaymentAmount, null);
+		assert.equal(normalized.paymentSummary.totalPayoutAmount, null);
+		assert.equal(normalized.currencyConversionEvidence, undefined);
+		assert.ok(
+			normalized.errors.includes("Missing SAR exchange rate for USD.")
+		);
+	} finally {
+		if (priorUsdRate === undefined) delete process.env.OTA_USD_TO_SAR_RATE;
+		else process.env.OTA_USD_TO_SAR_RATE = priorUsdRate;
+		if (priorConfiguredRates === undefined) {
+			delete process.env.OTA_CURRENCY_RATES_TO_SAR;
+		} else {
+			process.env.OTA_CURRENCY_RATES_TO_SAR = priorConfiguredRates;
+		}
+	}
 });
 
 test("a new authenticated provider contract adds verified PMS hotel-base provenance without dropping provider roles", () => {

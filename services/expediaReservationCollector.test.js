@@ -227,7 +227,7 @@ test("collector scheduling waits for the queued state and leaves no active start
 	assert.deepEqual(missingEvents, []);
 });
 
-test("payment evidence projection carries the exact trusted property conversion", () => {
+test("matched payment evidence carries the PMS identity and exact trusted property conversion", async () => {
 	const evidence = {
 		trusted: true,
 		verified: true,
@@ -243,9 +243,9 @@ test("payment evidence projection carries the exact trusted property conversion"
 		},
 		privateCredential: "must-not-copy",
 	};
-	const projection = __private.paymentSignalProjection({
+	const candidate = {
 		confirmationNumber: "2530158461",
-		reservationId: "reservation-id",
+		reservationId: "expedia-provider-id",
 		paymentCollectionModel: "expedia_collect",
 		currency: "SAR",
 		propertyCurrency: "SAR",
@@ -266,10 +266,31 @@ test("payment evidence projection carries the exact trusted property conversion"
 			totalGuestPaymentAmount: 549.23,
 			totalPayoutAmount: 423.45,
 		},
+	};
+	const classification = await __private.classifyCandidate(candidate, {
+		findReservation: async () => ({
+			_id: "matched-pms-reservation-id",
+			confirmation_number: "pms-confirmation",
+			reservation_status: "confirmed",
+		}),
 	});
+	const projection = __private.paymentSignalProjection(classification.item);
 
+	assert.equal(classification.bucket, "matchedExisting");
+	assert.equal(projection.confirmationNumber, "2530158461");
+	assert.equal(projection.reservationId, "matched-pms-reservation-id");
+	assert.equal(projection.currency, "SAR");
 	assert.equal(projection.propertyCurrency, "SAR");
 	assert.equal(projection.propertyConversionVerified, true);
+	assert.equal(projection.sourceCurrency, "USD");
+	assert.equal(projection.sourceAmount, 146.46);
+	assert.equal(projection.exchangeRateToSar, 3.75);
+	assert.equal(projection.exchangeRateSource, "exchange_rate_api");
+	assert.equal(projection.amountConvertedAt, "2026-08-09T06:00:00.000Z");
+	assert.equal(projection.totalGuestPaymentAmount, 549.23);
+	assert.equal(projection.sourceTotalGuestPaymentAmount, 146.46);
+	assert.equal(projection.totalPayoutAmount, 423.45);
+	assert.equal(projection.sourceTotalPayoutAmount, 112.92);
 	assert.equal(projection.sourceTotalPayoutCurrency, "USD");
 	assert.deepEqual(projection.currencyConversionEvidence, {
 		trusted: true,
@@ -308,7 +329,7 @@ test("Expedia collector preserves source money and rejects fallback FX as canoni
 
 	assert.equal(candidate.sourceAmount, 146.46);
 	assert.equal(candidate.sourceCurrency, "USD");
-	assert.equal(candidate.exchangeRateSource, "fallback_default");
+	assert.equal(candidate.exchangeRateSource, "missing");
 	assert.equal(candidate.propertyConversionVerified, false);
 	assert.equal(candidate.totalAmountSar, null);
 	assert.equal(candidate.amount, null);
@@ -450,6 +471,8 @@ test("authenticated Expedia detail gross replaces stale row money before trusted
 	assert.equal(merged.sourceAmount, 146.46);
 	assert.equal(merged.paymentSummary.sourceTotalGuestPaymentAmount, 146.46);
 	assert.equal(merged.paymentSummary.sourceTotalPayoutAmount, 112.92);
+	assert.equal(merged.commercialEvidenceConflict, false);
+	assert.deepEqual(merged.commercialEvidenceConflicts, []);
 	assert.equal(__private.hasTrustedExpediaDetailGross(merged), true);
 
 	const converted = await __private.applyTrustedCandidateSarConversion(merged, {
@@ -473,6 +496,82 @@ test("authenticated Expedia detail gross replaces stale row money before trusted
 	assert.equal(converted.paymentSummary.sourceTotalPayoutAmount, 112.92);
 	assert.equal(converted.totalAmountSar, 549.23);
 	assert.equal(converted.totalPayoutSar, 423.45);
+});
+
+test("detail merges retain prior conflicts and fail closed on malformed contracts", () => {
+	const retained = __private.mergeDetailCandidate({
+		candidate: {
+			commercialEvidenceConflict: true,
+			commercialEvidenceConflicts: ["prior_detail_conflict"],
+		},
+		detail: {
+			commercialEvidenceConflict: false,
+			commercialEvidenceConflicts: [],
+		},
+	});
+
+	assert.equal(retained.commercialEvidenceConflict, true);
+	assert.deepEqual(retained.commercialEvidenceConflicts, [
+		"prior_detail_conflict",
+	]);
+
+	const unioned = __private.mergeDetailCandidate({
+		candidate: retained,
+		detail: {
+			commercialEvidenceConflict: true,
+			commercialEvidenceConflicts: [
+				"new_detail_conflict",
+				"prior_detail_conflict",
+			],
+		},
+	});
+
+	assert.equal(unioned.commercialEvidenceConflict, true);
+	assert.deepEqual(unioned.commercialEvidenceConflicts, [
+		"new_detail_conflict",
+		"prior_detail_conflict",
+	]);
+
+	for (const detail of [
+		{},
+		{ commercialEvidenceConflict: false },
+		{
+			commercialEvidenceConflict: false,
+			commercialEvidenceConflicts: null,
+		},
+		{
+			commercialEvidenceConflict: false,
+			commercialEvidenceConflicts: ["inconsistent_false_with_reason"],
+		},
+		{
+			commercialEvidenceConflict: true,
+			commercialEvidenceConflicts: [],
+		},
+	]) {
+		const malformed = __private.mergeDetailCandidate({ detail });
+		assert.equal(malformed.commercialEvidenceConflict, true);
+		assert.ok(
+			malformed.commercialEvidenceConflicts.includes(
+				"invalid_commercial_evidence_contract"
+			)
+		);
+	}
+	const malformedPrior = __private.mergeDetailCandidate({
+		candidate: {
+			commercialEvidenceConflict: false,
+			commercialEvidenceConflicts: null,
+		},
+		detail: {
+			commercialEvidenceConflict: false,
+			commercialEvidenceConflicts: [],
+		},
+	});
+	assert.equal(malformedPrior.commercialEvidenceConflict, true);
+	assert.ok(
+		malformedPrior.commercialEvidenceConflicts.includes(
+			"invalid_commercial_evidence_contract"
+		)
+	);
 });
 
 test("Expedia collector fails closed to USD source evidence on FX outage or pair mismatch", async () => {
@@ -613,7 +712,7 @@ test("Expedia collector fails closed to USD source evidence on FX outage or pair
 		assert.equal(candidate.propertyConversionVerified, false, fixture.label);
 		assert.equal(candidate.totalAmountSar, null, fixture.label);
 		assert.equal(candidate.amount, null, fixture.label);
-		assert.equal(candidate.currency, "USD", fixture.label);
+		assert.equal(candidate.currency, "SAR", fixture.label);
 		assert.equal(candidate.totalPayoutSar, null, fixture.label);
 		assert.equal(candidate.paymentSummary.totalGuestPaymentAmount, null, fixture.label);
 		assert.equal(candidate.paymentSummary.totalPayoutAmount, null, fixture.label);
