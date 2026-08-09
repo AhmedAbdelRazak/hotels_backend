@@ -170,6 +170,63 @@ test("generic reservation updates are scoped to the actor's exact hotel", () => 
 	);
 });
 
+test("physical-room assignment requires an authorized hotel reservation editor", () => {
+	const hotel = { _id: "hotel-a", belongsTo: "owner-a" };
+	for (const actor of [
+		{ _id: "owner-a", activeUser: true },
+		{
+			_id: "reception-a",
+			activeUser: true,
+			role: 3000,
+			hotelIdsWork: ["hotel-a"],
+		},
+		{
+			_id: "reservation-a",
+			activeUser: true,
+			role: 8000,
+			hotelIdsWork: ["hotel-a"],
+		},
+		{ _id: "configured-super-admin", activeUser: true },
+	]) {
+		assert.equal(reservationAccess.canAssignReservationHousing(actor, hotel), true);
+	}
+
+	for (const actor of [
+		{
+			_id: "finance-a",
+			activeUser: true,
+			role: 6000,
+			hotelIdsWork: ["hotel-a"],
+		},
+		{
+			_id: "housekeeping-a",
+			activeUser: true,
+			role: 5000,
+			hotelIdsWork: ["hotel-a"],
+		},
+		{
+			_id: "agent-a",
+			activeUser: true,
+			role: 7000,
+			hotelIdsWork: ["hotel-a"],
+		},
+		{
+			_id: "reception-b",
+			activeUser: true,
+			role: 3000,
+			hotelIdsWork: ["hotel-b"],
+		},
+		{
+			_id: "inactive-reception-a",
+			activeUser: false,
+			role: 3000,
+			hotelIdsWork: ["hotel-a"],
+		},
+	]) {
+		assert.equal(reservationAccess.canAssignReservationHousing(actor, hotel), false);
+	}
+});
+
 test("generic reservation updates cannot forge HotelRunner or OTA authority markers", () => {
 	const payload = {
 		otaIdentityKey: "booking:forged",
