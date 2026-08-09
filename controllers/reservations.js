@@ -3596,6 +3596,7 @@ const isRestrictedOrderTakerReservationActor = (actor = {}) =>
 
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	Object.assign(exports.__test || (exports.__test = {}), {
+		canAssignReservationHousing,
 		canUpdateReservationHotelScope,
 		isOrderTakingAccount,
 		isPlatformAdminReservationActor,
@@ -5119,6 +5120,10 @@ function canUpdateReservationHotelScope(actor = {}, hotel = {}) {
 	if (!actorId || !hotelId || !ownerId) return false;
 	if (actorId === ownerId) return true;
 	return assignedHotelIdsForReservationUpdate(actor).includes(hotelId);
+}
+
+function canAssignReservationHousing(actor = {}, hotel = {}) {
+	return canEditHotelReservation(actor, hotel);
 }
 
 const requireAuthorizedReservationReportActor = async (req, res, hotelId) => {
@@ -8020,6 +8025,18 @@ exports.updateReservation = async (req, res) => {
 			return res.status(403).json({
 				error: "You are not authorized to edit reservations for this hotel.",
 				code: "reservation_update_hotel_scope_forbidden",
+			});
+		}
+		if (
+			hasExplicitHousingUpdateIntent &&
+			!canAssignReservationHousing(authorizationActor, scopedHotel)
+		) {
+			return res.status(403).json({
+				error:
+					"You are not authorized to assign physical rooms for this hotel.",
+				errorArabic:
+					"\u0644\u064a\u0633 \u0644\u062f\u064a\u0643 \u0635\u0644\u0627\u062d\u064a\u0629 \u062a\u062e\u0635\u064a\u0635 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0641\u0639\u0644\u064a\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0641\u0646\u062f\u0642.",
+				code: "reservation_room_assignment_forbidden",
 			});
 		}
 		if (
