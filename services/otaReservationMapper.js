@@ -28,20 +28,16 @@ const {
 	hasDirectHotelRunnerProjection,
 	normalizeMarker,
 } = require("./hotelrunnerOtaEmailBoundary");
+const {
+	buildAuthenticatedProviderCommercialEvidence,
+	validateOtaCommercialEvidence,
+	withHotelBaseCommercialEvidence,
+} = require("./otaCommercialEvidence");
 
 dayjs.extend(customParseFormat);
 
 const USD_TO_SAR = Number(
 	process.env.OTA_USD_TO_SAR_RATE || process.env.USD_TO_SAR_RATE || 3.75
-);
-const DEFAULT_OTA_REVIEW_DEDUCTION_RATE = clampDeductionRate(
-	process.env.OTA_REVIEW_DEFAULT_DEDUCTION_RATE,
-	0.1
-);
-const DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE = clampDeductionRate(
-	process.env.OTA_INBOUND_EMAIL_DEFAULT_DEDUCTION_RATE ||
-		process.env.OTA_EMAIL_DEFAULT_DEDUCTION_RATE,
-	0.2
 );
 const MIN_REAL_CALENDAR_ROOT_PRICE = Number(
 	process.env.OTA_MIN_REAL_CALENDAR_ROOT_PRICE || 0.01
@@ -547,12 +543,6 @@ function roomTypeMatches(roomType = "", mappedRoomType = "") {
 function round2(value) {
 	const parsed = Number(value || 0);
 	return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : 0;
-}
-
-function clampDeductionRate(value, fallback = 0) {
-	const parsed = Number(value);
-	const rate = Number.isFinite(parsed) ? parsed : Number(fallback || 0);
-	return Math.min(0.9, Math.max(0, rate));
 }
 
 function allocateAmountAcrossSlots(totalAmount, slots) {
@@ -2190,7 +2180,7 @@ function extractAgodaMoneyByLabel(text = "", label = "") {
 		)
 	);
 	const inlineMoney = parseMoney(inline?.[1] || "");
-	if (inlineMoney.amount) return inlineMoney;
+	if (inline) return { ...inlineMoney, matched: true };
 	const labelComparable = normalizeComparable(label);
 	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
 	for (let index = 0; index < lines.length; index += 1) {
@@ -2203,17 +2193,21 @@ function extractAgodaMoneyByLabel(text = "", label = "") {
 			continue;
 		}
 		const sameLine = parseMoney(line);
-		if (sameLine.amount) return sameLine;
+		if (parseMoneyCandidates(line).length) {
+			return { ...sameLine, matched: true };
+		}
 		for (
 			let nextIndex = index + 1;
 			nextIndex < Math.min(lines.length, index + 5);
 			nextIndex += 1
 		) {
 			const parsed = parseMoney(lines[nextIndex]);
-			if (parsed.amount) return parsed;
+			if (parseMoneyCandidates(lines[nextIndex]).length) {
+				return { ...parsed, matched: true };
+			}
 		}
 	}
-	return { amount: 0, currency: "" };
+	return { amount: 0, currency: "", matched: false };
 }
 
 function distinctAgodaReferenceSellRates(text = "") {
@@ -2339,10 +2333,22 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		"Reference sell rate (incl. taxes & fees)"
 	);
 	const netRate = extractAgodaMoneyByLabel(text, "Net rate (incl. taxes & fees)");
-	const amountCurrency = referenceSellRate.currency || "SAR";
-	const payoutCurrency = netRate.currency || amountCurrency;
+	const hasReferenceSellRate = Number(referenceSellRate.amount || 0) > 0;
+	const hasNetRate =
+		netRate.matched === true &&
+		Number.isFinite(Number(netRate.amount)) &&
+		Number(netRate.amount) >= 0;
+	const amountCurrency =
+		referenceSellRate.currency || (hasNetRate ? netRate.currency : "") || "";
+	const payoutCurrency = netRate.currency || "";
+	const grossAndPayoutCurrencyConflict = Boolean(
+		hasReferenceSellRate &&
+			hasNetRate &&
+			amountCurrency &&
+			payoutCurrency &&
+			amountCurrency !== payoutCurrency
+	);
 	const amountConversion = getSarConversionMeta(referenceSellRate.amount, amountCurrency);
-	const payoutConversion = getSarConversionMeta(netRate.amount, payoutCurrency);
 	const commission = extractAgodaDeductionByLabel(text, "Commission");
 	const growthProgram = extractAgodaDeductionByLabel(text, "Agoda Growth Program");
 	const taxOnCommission = extractAgodaDeductionByLabel(text, "Tax on Commission");
@@ -2469,19 +2475,33 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		guestName,
 		guestPhone,
 		nationality,
-		amount: referenceSellRate.amount || 0,
+		amount: hasReferenceSellRate ? referenceSellRate.amount : 0,
 		currency: amountCurrency,
-		totalAmountSar: amountConversion.totalAmountSar || 0,
-		sourceAmount: referenceSellRate.amount || 0,
+		totalAmountSar:
+			hasReferenceSellRate && amountCurrency === "SAR"
+				? round2(referenceSellRate.amount)
+				: null,
+		sourceAmount: hasReferenceSellRate ? referenceSellRate.amount : null,
 		sourceCurrency: amountCurrency,
+		sourcePayoutAmount: hasNetRate ? netRate.amount : null,
+		sourcePayoutCurrency: hasNetRate ? payoutCurrency : "",
 		exchangeRateToSar: amountConversion.exchangeRateToSar || 0,
 		exchangeRateSource: amountConversion.exchangeRateSource || "",
 		amountConvertedAt: amountConversion.convertedAt || "",
-		totalPayoutSar: payoutConversion.totalAmountSar || 0,
-		netAfterExpensesTotal: payoutConversion.totalAmountSar || 0,
+		totalPayoutSar:
+			hasNetRate && payoutCurrency === "SAR" ? round2(netRate.amount) : null,
+		netAfterExpensesTotal:
+			hasNetRate && payoutCurrency === "SAR" ? round2(netRate.amount) : null,
+		grossAndPayoutCurrencyConflict,
 		otaCommissionSar:
 			commission.matched && !deductionCurrencyConflict
-				? round2(commission.amount * amountConversion.exchangeRateToSar)
+				? commission.currency === "SAR"
+					? round2(commission.amount)
+					: null
+				: null,
+		otaCommissionSourceAmount:
+			commission.matched && !deductionCurrencyConflict
+				? round2(commission.amount)
 				: null,
 		otaCommissionCurrency:
 			commission.matched && !deductionCurrencyConflict
@@ -2505,10 +2525,10 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 						.map(([type, label, item]) => ({
 							type,
 							label,
-							amountSar: round2(
-								item.amount * amountConversion.exchangeRateToSar
-							),
-							currency: "SAR",
+							amountSar:
+								item.currency === "SAR" ? round2(item.amount) : null,
+							sourceAmount: round2(item.amount),
+							currency: item.currency,
 							source: "authenticated_agoda_email",
 						}))
 				: [],
@@ -2516,13 +2536,22 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		nightlyPricingSource,
 		nightlyPricingSar,
 		paymentSummary:
-			referenceSellRate.amount || netRate.amount
+			hasReferenceSellRate || hasNetRate
 				? {
 						sourceCurrency: amountCurrency,
-						sourceTotalGuestPaymentAmount: referenceSellRate.amount || 0,
-						sourceTotalPayoutAmount: netRate.amount || 0,
-						totalGuestPaymentAmount: amountConversion.totalAmountSar || 0,
-						totalPayoutAmount: payoutConversion.totalAmountSar || 0,
+						sourceTotalGuestPaymentAmount: hasReferenceSellRate
+							? referenceSellRate.amount
+							: null,
+						sourceTotalPayoutAmount: hasNetRate ? netRate.amount : null,
+						sourceTotalPayoutCurrency: hasNetRate ? payoutCurrency : "",
+						totalGuestPaymentAmount:
+							hasReferenceSellRate && amountCurrency === "SAR"
+								? round2(referenceSellRate.amount)
+								: null,
+						totalPayoutAmount:
+							hasNetRate && payoutCurrency === "SAR"
+								? round2(netRate.amount)
+								: null,
 						currency: "SAR",
 						exchangeRateToSar: amountConversion.exchangeRateToSar || 0,
 						exchangeRateSource: amountConversion.exchangeRateSource || "",
@@ -2740,7 +2769,9 @@ function extractAirbnbOccupancy(text = "") {
 function extractAirbnbMoneyAfterLabel(text = "", label = "") {
 	const labelValue = findNextLineAfterExactLabel(text, label, 4);
 	const parsed = parseMoney(labelValue);
-	if (parsed.amount) return parsed;
+	if (parseMoneyCandidates(labelValue).length) {
+		return { ...parsed, matched: true };
+	}
 	const patternLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
 	const match = String(text || "").match(
 		new RegExp(
@@ -2748,7 +2779,9 @@ function extractAirbnbMoneyAfterLabel(text = "", label = "") {
 			"i"
 		)
 	);
-	return parseMoney(match?.[1] || "");
+	return match
+		? { ...parseMoney(match[1] || ""), matched: true }
+		: { amount: 0, currency: "", matched: false };
 }
 
 function extractAirbnbHostServiceFee(text = "") {
@@ -2954,16 +2987,24 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 	const guestTotal = extractAirbnbMoneyAfterLabel(text, "Total (SAR)");
 	const payout = extractAirbnbMoneyAfterLabel(text, "You earn");
 	const hostServiceFee = extractAirbnbHostServiceFee(text);
-	const guestTotalCurrency = guestTotal.currency || "SAR";
-	const payoutCurrency = payout.currency || guestTotalCurrency || "SAR";
+	const hasGuestTotal = Number(guestTotal.amount || 0) > 0;
+	const hasPayout =
+		payout.matched === true &&
+		Number.isFinite(Number(payout.amount)) &&
+		Number(payout.amount) >= 0;
+	const guestTotalCurrency =
+		guestTotal.currency || (hasPayout ? payout.currency : "") || "";
+	const payoutCurrency = payout.currency || "";
+	const grossAndPayoutCurrencyConflict = Boolean(
+		hasGuestTotal &&
+			hasPayout &&
+			guestTotalCurrency &&
+			payoutCurrency &&
+			guestTotalCurrency !== payoutCurrency
+	);
 	const guestTotalConversion = getSarConversionMeta(
 		guestTotal.amount,
 		guestTotalCurrency
-	);
-	const payoutConversion = getSarConversionMeta(payout.amount, payoutCurrency);
-	const hostServiceFeeConversion = getSarConversionMeta(
-		hostServiceFee.amount,
-		hostServiceFee.currency || guestTotalCurrency || "SAR"
 	);
 	const hotelMapping = resolveConfiguredAirbnbHotelMapping({
 		hostLabels,
@@ -2985,17 +3026,33 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		roomName: listingTitle,
 		...stayDates,
 		...occupancy,
-		amount: guestTotal.amount || 0,
+		amount: hasGuestTotal ? guestTotal.amount : 0,
 		currency: guestTotalCurrency,
-		totalAmountSar: guestTotalConversion.totalAmountSar,
+		totalAmountSar:
+			hasGuestTotal && guestTotalCurrency === "SAR"
+				? round2(guestTotal.amount)
+				: null,
+		sourceAmount: hasGuestTotal ? guestTotal.amount : null,
+		sourceCurrency: guestTotalCurrency,
+		sourcePayoutAmount: hasPayout ? payout.amount : null,
+		sourcePayoutCurrency: hasPayout ? payoutCurrency : "",
 		exchangeRateToSar: guestTotalConversion.exchangeRateToSar,
 		exchangeRateSource: guestTotalConversion.exchangeRateSource,
 		amountConvertedAt: guestTotalConversion.convertedAt,
-		totalPayoutSar: payoutConversion.totalAmountSar,
-		netAfterExpensesTotal: payoutConversion.totalAmountSar,
+		totalPayoutSar:
+			hasPayout && payoutCurrency === "SAR" ? round2(payout.amount) : null,
+		netAfterExpensesTotal:
+			hasPayout && payoutCurrency === "SAR" ? round2(payout.amount) : null,
+		grossAndPayoutCurrencyConflict,
 		otaCommissionSar:
 			hostServiceFee.matched && !hostServiceFee.conflict
-				? hostServiceFeeConversion.totalAmountSar
+				? (hostServiceFee.currency || guestTotalCurrency) === "SAR"
+					? round2(hostServiceFee.amount)
+					: null
+				: null,
+		otaCommissionSourceAmount:
+			hostServiceFee.matched && !hostServiceFee.conflict
+				? round2(hostServiceFee.amount)
 				: null,
 		otaCommissionCurrency:
 			hostServiceFee.matched && !hostServiceFee.conflict
@@ -3007,21 +3064,30 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 				: "",
 		otaCommissionConflict: hostServiceFee.conflict === true,
 		paymentSummary:
-			guestTotal.amount || payout.amount
+			hasGuestTotal || hasPayout
 				? {
 						sourceCurrency: guestTotalCurrency,
-						sourceTotalGuestPaymentAmount: guestTotal.amount || 0,
-						sourceTotalPayoutAmount: payout.amount || 0,
-						totalGuestPaymentAmount: guestTotalConversion.totalAmountSar,
-						totalPayoutAmount: payoutConversion.totalAmountSar,
+						sourceTotalGuestPaymentAmount: hasGuestTotal
+							? guestTotal.amount
+							: null,
+						sourceTotalPayoutAmount: hasPayout ? payout.amount : null,
+						sourceTotalPayoutCurrency: hasPayout ? payoutCurrency : "",
+						totalGuestPaymentAmount:
+							hasGuestTotal && guestTotalCurrency === "SAR"
+								? round2(guestTotal.amount)
+								: null,
+						totalPayoutAmount:
+							hasPayout && payoutCurrency === "SAR"
+								? round2(payout.amount)
+								: null,
 						currency: "SAR",
 						exchangeRateToSar: guestTotalConversion.exchangeRateToSar,
 						exchangeRateSource: guestTotalConversion.exchangeRateSource,
 						amountConvertedAt: guestTotalConversion.convertedAt,
 				  }
 				: {},
-		paymentCollectionModel: guestTotal.amount ? "ota_collect" : "unknown",
-		paymentInstructions: guestTotal.amount
+		paymentCollectionModel: hasGuestTotal ? "ota_collect" : "unknown",
+		paymentInstructions: hasGuestTotal
 			? "Airbnb collected guest payment; host payout is provided by Airbnb."
 			: "",
 		sourcePresence: {
@@ -3044,24 +3110,6 @@ function isOtaHotelBoilerplateLine(value = "") {
 	);
 }
 
-function defaultOtaReviewNetTotal(
-	clientTotal = 0,
-	deductionRate = DEFAULT_OTA_REVIEW_DEDUCTION_RATE
-) {
-	const total = round2(clientTotal);
-	if (total <= 0) return 0;
-	return round2(total - defaultOtaReviewDeductionAmount(total, deductionRate));
-}
-
-function defaultOtaReviewDeductionAmount(
-	clientTotal = 0,
-	deductionRate = DEFAULT_OTA_REVIEW_DEDUCTION_RATE
-) {
-	const total = round2(clientTotal);
-	if (total <= 0) return 0;
-	return round2(total * clampDeductionRate(deductionRate));
-}
-
 function isExpediaSyncSource(normalized = {}) {
 	return normalizeComparable(normalized.source?.from || "") === "expedia sync";
 }
@@ -3082,32 +3130,14 @@ function isOtaInboundEmail(normalized = {}) {
 }
 
 function isOtaInboundTotalOutlier(normalized = {}) {
-	const totalAmountSar = Number(normalized.totalAmountSar || 0);
+	const totalAmountSar = round2(
+		normalized.totalAmountSar || normalized.amount || 0
+	);
 	return (
 		isOtaInboundEmail(normalized) &&
 		Number.isFinite(totalAmountSar) &&
 		totalAmountSar > MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR
 	);
-}
-
-function otaProviderKey(normalized = {}) {
-	return normalizeComparable(
-		normalized.provider ||
-			normalized.providerLabel ||
-			normalized.bookingSource ||
-			""
-	);
-}
-
-function isExpediaProvider(normalized = {}) {
-	return otaProviderKey(normalized).includes("expedia");
-}
-
-function resolveOtaReviewDeductionRate(normalized = {}) {
-	if (isOtaInboundEmail(normalized) && !isExpediaProvider(normalized)) {
-		return DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE;
-	}
-	return DEFAULT_OTA_REVIEW_DEDUCTION_RATE;
 }
 
 function hasExplicitOtaPayoutSar(normalized = {}) {
@@ -3117,6 +3147,247 @@ function hasExplicitOtaPayoutSar(normalized = {}) {
 		normalized.netAfterExpensesTotal,
 		paymentSummary.totalPayoutAmount,
 	].some((value) => Number(value || 0) > 0);
+}
+
+function providerCommercialSourceAligned(normalized = {}) {
+	const provider = normalizeOtaIdentityProvider(normalized.provider);
+	const transport = normalizeOtaIdentityProvider(
+		normalized.trustedTransportProvider
+	);
+	return Boolean(
+		provider &&
+		provider !== "hotelrunner" &&
+		transport === provider &&
+		normalized.sourceSenderTrusted === true &&
+		normalized.sourceSenderAuthenticated === true &&
+		normalized.requiresManualReview !== true
+	);
+}
+
+function verifiedPropertyGuestGrossSar(normalized = {}) {
+	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
+		.trim()
+		.toUpperCase();
+	const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency,
+	});
+	const role = evidence?.roles?.guestGross;
+	const value = Number(role?.propertyAmount);
+	return role?.verified === true &&
+		role.propertyCurrency === propertyCurrency &&
+		Number.isFinite(value) &&
+		value > 0
+		? round2(value)
+		: null;
+}
+
+function verifiedPropertyPayoutSar(normalized = {}) {
+	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
+		.trim()
+		.toUpperCase();
+	const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency,
+	});
+	const role = evidence?.roles?.hotelPayout;
+	const value = Number(role?.propertyAmount);
+	return role?.verified === true &&
+		role.propertyCurrency === propertyCurrency &&
+		Number.isFinite(value) &&
+		value >= 0
+		? round2(value)
+		: null;
+}
+
+function validatedOtaCommercialEvidence(value, { provider = "" } = {}) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const validation = validateOtaCommercialEvidence(value);
+	if (!validation.ok) return null;
+	const expectedProvider = provider
+		? normalizeOtaIdentityProvider(provider)
+		: value.provider;
+	return expectedProvider && value.provider === expectedProvider ? value : null;
+}
+
+function buildNormalizedOtaCommercialEvidence(
+	normalized = {},
+	{ propertyCurrency = "SAR", hotelBase = null } = {}
+) {
+	const supplied = validatedOtaCommercialEvidence(
+		normalized.otaCommercialEvidence,
+		{ provider: normalized.provider }
+	);
+	if (supplied) {
+		if (!hotelBase) return supplied;
+		try {
+			return withHotelBaseCommercialEvidence(supplied, hotelBase);
+		} catch (_error) {
+			return null;
+		}
+	}
+	if (!providerCommercialSourceAligned(normalized)) return null;
+	const provider = normalizeOtaIdentityProvider(normalized.provider);
+	const sourceHash = normalizeMarker(normalized?.source?.textHash || "");
+	const sourceTimestamp = otaSourceReceivedAt(normalized);
+	const sourceIdCandidates = [
+		normalized.inboundEmailId,
+		normalized?.source?.messageId,
+	]
+		.map((value) => normalizeId(value || ""))
+		.filter((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value));
+	// RFC message IDs commonly contain an address-shaped `@` value. The common
+	// contract intentionally excludes addresses/PII, so use the immutable body
+	// hash as an opaque source identifier when no safe audit/document ID exists.
+	const sourceId =
+		sourceIdCandidates[0] ||
+		(/^[a-f0-9]{64}$/.test(sourceHash)
+			? `ota-source-${sourceHash.slice(0, 24)}`
+			: "");
+	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const sourceCurrency = String(
+		normalized.sourceCurrency ||
+			paymentSummary.sourceCurrency ||
+			normalized.currency ||
+			(hotelBase ? propertyCurrency : "")
+	)
+		.trim()
+		.toUpperCase();
+	const rawSourceGross =
+		normalized.sourceAmount ??
+		paymentSummary.sourceTotalGuestPaymentAmount ??
+		null;
+	const rawSourcePayout =
+		paymentSummary.sourceTotalPayoutAmount ??
+		normalized.sourcePayoutAmount ??
+		null;
+	const sourcePayoutCurrency = String(
+		normalized.sourcePayoutCurrency ||
+			paymentSummary.sourceTotalPayoutCurrency ||
+			sourceCurrency
+	)
+		.trim()
+		.toUpperCase();
+	const sourceGross = Number(rawSourceGross);
+	const sourcePayout = Number(rawSourcePayout);
+	const hasSourceGross =
+		rawSourceGross !== null &&
+		rawSourceGross !== "" &&
+		Number.isFinite(sourceGross) &&
+		sourceGross > 0;
+	const hasSourcePayout =
+		rawSourcePayout !== null &&
+		rawSourcePayout !== "" &&
+		Number.isFinite(sourcePayout) &&
+		sourcePayout >= 0 &&
+		sourcePayoutCurrency === sourceCurrency;
+	if (
+		!provider ||
+		!/^[a-f0-9]{64}$/.test(sourceHash) ||
+		!sourceTimestamp ||
+		!sourceId ||
+		!/^[A-Z]{3}$/.test(sourceCurrency)
+	) {
+		return null;
+	}
+	const commissionCurrency = String(
+		normalized.otaCommissionCurrency || ""
+	)
+		.trim()
+		.toUpperCase();
+	const explicitCommission = verifiedExplicitOtaCommissionSourceAmount(normalized);
+	const nightlyEvidence = (Array.isArray(normalized.nightlyPricingSource)
+		? normalized.nightlyPricingSource
+		: []
+	)
+		.map((row) => ({
+			stayDate: row?.date,
+			...(Number(row?.clientAmount || 0) > 0
+				? {
+					guestGross: {
+						verified: true,
+						amount: Number(row.clientAmount),
+					},
+				  }
+				: {}),
+			...(Number(row?.payoutAmount || 0) > 0
+				? {
+					hotelPayout: {
+						verified: true,
+						amount: Number(row.payoutAmount),
+					},
+				  }
+				: {}),
+		}))
+		.filter(
+			(row) => row.stayDate && (row.guestGross || row.hotelPayout)
+		);
+	const deductionComponents = (Array.isArray(normalized.otaDeductionComponents)
+		? normalized.otaDeductionComponents
+		: []
+	)
+		.filter(
+			(component) =>
+				Number(component?.sourceAmount ?? component?.amountSar ?? 0) > 0 &&
+				String(component?.currency || "").trim().toUpperCase() ===
+					sourceCurrency
+		)
+		.map((component) => ({
+			verified: true,
+			componentType: component.type,
+			direction: "deduction",
+			amount: Number(component.sourceAmount ?? component.amountSar),
+		}));
+	if (
+		!hasSourceGross &&
+		!hasSourcePayout &&
+		explicitCommission === null &&
+		!nightlyEvidence.length &&
+		!deductionComponents.length &&
+		!hotelBase
+	) {
+		return null;
+	}
+	try {
+		return buildAuthenticatedProviderCommercialEvidence({
+			provider,
+			authenticatedProvider: normalizeOtaIdentityProvider(
+				normalized.trustedTransportProvider
+			),
+			sourceAuthenticated: true,
+			sourceTrusted: true,
+			sourceType:
+				normalized.commercialSourceType || "authenticated_ota_email",
+			sourceCurrency,
+			propertyCurrency,
+			bookingBasis: "reservation_total",
+			sourceHash,
+			sourceTimestamp,
+			sourceId,
+			...(hasSourceGross
+				? { guestGross: { verified: true, amount: sourceGross } }
+				: {}),
+			...(hasSourcePayout
+				? { hotelPayout: { verified: true, amount: sourcePayout } }
+				: {}),
+			...(explicitCommission !== null &&
+			commissionCurrency === sourceCurrency
+				? {
+					explicitOtaCommission: {
+						verified: true,
+						explicit: true,
+						amount: explicitCommission,
+					},
+				  }
+				: {}),
+			...(hotelBase ? { hotelBase } : {}),
+			...(nightlyEvidence.length ? { nightlyEvidence } : {}),
+			...(deductionComponents.length ? { deductionComponents } : {}),
+			...(normalized.currencyConversionEvidence
+				? { currencyConversion: normalized.currencyConversionEvidence }
+				: {}),
+		});
+	} catch (_error) {
+		return null;
+	}
 }
 
 function isOtaCollectPayment(normalized = {}) {
@@ -3129,16 +3400,6 @@ function isOtaCollectPayment(normalized = {}) {
 		collectionModel.includes("expedia collect") ||
 		collectionModel.includes("paid online") ||
 		collectionModel.includes("prepaid")
-	);
-}
-
-function shouldUseExpediaInboundClientTotalFallback(normalized = {}) {
-	return (
-		isOtaInboundEmail(normalized) &&
-		isExpediaProvider(normalized) &&
-		isOtaCollectPayment(normalized) &&
-		!hasExplicitOtaPayoutSar(normalized) &&
-		Number(normalized.totalAmountSar || normalized.amount || 0) > 0
 	);
 }
 
@@ -4769,6 +5030,7 @@ function safeOtaPaymentSummary(summary = {}) {
 		"sourceExpediaCompensationAmount",
 		"sourceAcceleratorAmount",
 		"sourceTotalPayoutAmount",
+		"sourceTotalPayoutCurrency",
 		"nightlyRateAmount",
 		"taxesAmount",
 		"totalGuestPaymentAmount",
@@ -4789,11 +5051,24 @@ function safeOtaPaymentSummary(summary = {}) {
 	}, {});
 }
 
-function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar, commissionAmountSar = 0) {
+function resolvePaymentMapping(
+	normalized = {},
+	totalAmountSar = null,
+	subTotalSar,
+	commissionAmountSar = 0
+) {
 	const providerLabel =
 		normalized.bookingSource || normalized.providerLabel || "OTA";
 	const collectionModel = normalized.paymentCollectionModel || "unknown";
-	const total = round2(totalAmountSar);
+	const parsedTotal = Number(totalAmountSar);
+	const totalKnown = Boolean(
+		totalAmountSar !== undefined &&
+			totalAmountSar !== null &&
+			String(totalAmountSar).trim() !== "" &&
+			Number.isFinite(parsedTotal) &&
+			parsedTotal >= 0
+	);
+	const total = totalKnown ? round2(parsedTotal) : null;
 	const parsedSubTotal = Number(subTotalSar);
 	const subTotal =
 		subTotalSar !== undefined &&
@@ -4829,6 +5104,32 @@ function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar,
 	}
 
 	if (collectionModel === "ota_collect") {
+		if (!totalKnown) {
+			return {
+				payment: "ota collect - amount unavailable",
+				financeStatus: "commercial review required",
+				paidAmount: null,
+				paidAmountBreakdown: {
+					...emptyPaymentBreakdown(
+						`${providerLabel} collection model reported; property-currency amount unavailable`
+					),
+					paid_online_other_platforms: null,
+				},
+				financialCycle: {
+					collectionModel: "provider_collected_unresolved",
+					status: "review_required",
+					commissionType: "amount",
+					commissionValue: commission,
+					commissionAmount: commission,
+					commissionAssigned: false,
+					pmsCollectedAmount: null,
+					hotelCollectedAmount: 0,
+					hotelPayoutDue: null,
+					commissionDueToPms: 0,
+					lastUpdatedAt: new Date(),
+				},
+			};
+		}
 		return {
 			payment: "paid online",
 			financeStatus: "paid online",
@@ -5684,13 +5985,14 @@ function extractNormalizedReservation(email) {
 		paymentCollectionModel === "virtual_card"
 			? round2(vccAmountDetails.amountToChargeSar || 0)
 			: 0;
-	const providerTotalPayoutSar = round2(
-		directTripFields.totalPayoutSar ||
-			agodaFields.totalPayoutSar ||
-			airbnbFields.totalPayoutSar ||
-			vccPayoutSar ||
-			0
-	);
+	const providerTotalPayoutSar = [
+		directTripFields.totalPayoutSar,
+		agodaFields.totalPayoutSar,
+		airbnbFields.totalPayoutSar,
+		vccPayoutSar > 0 ? vccPayoutSar : null,
+	]
+		.map((value) => (value === null || value === undefined ? null : Number(value)))
+		.find((value) => value !== null && Number.isFinite(value) && value >= 0) ?? null;
 	const providerPaymentSummaryRaw = Object.keys(
 		directTripFields.paymentSummary || {}
 	).length
@@ -5788,6 +6090,14 @@ function extractNormalizedReservation(email) {
 			"Trip.com guest-total and payout currencies conflict; no automatic pricing was accepted."
 		);
 	}
+	if (
+		agodaFields.grossAndPayoutCurrencyConflict ||
+		airbnbFields.grossAndPayoutCurrencyConflict
+	) {
+		warnings.push(
+			`${providerLabel} guest-total and payout currencies conflict; the amounts were retained as source evidence only and no cross-currency deduction was derived.`
+		);
+	}
 	if (directTripFields.roomCountConflict) {
 		warnings.push(
 			"Trip.com template contains conflicting room counts; no automatic room quantity was accepted."
@@ -5858,6 +6168,14 @@ function extractNormalizedReservation(email) {
 		amount: parsedMoney.amount,
 		currency: amountCurrency,
 		totalAmountSar: conversion.totalAmountSar,
+		propertyCurrency: "SAR",
+		propertyConversionVerified:
+			String(conversion.sourceCurrency || amountCurrency)
+				.trim()
+				.toUpperCase() === "SAR" &&
+			normalizeMarker(conversion.exchangeRateSource || "identity") ===
+				"identity" &&
+			Math.abs(Number(conversion.exchangeRateToSar || 1) - 1) <= 0.000001,
 		sourceAmount:
 			hasExplicitAggregateMoney
 				? parsedMoney.amount
@@ -5872,21 +6190,30 @@ function extractNormalizedReservation(email) {
 				  agodaFields.sourceCurrency ||
 				  airbnbFields.sourceCurrency ||
 				  "",
+		sourcePayoutAmount:
+			directTripFields.sourcePayoutAmount ??
+			agodaFields.sourcePayoutAmount ??
+			airbnbFields.sourcePayoutAmount ??
+			null,
+		sourcePayoutCurrency:
+			directTripFields.sourcePayoutCurrency ||
+			agodaFields.sourcePayoutCurrency ||
+			airbnbFields.sourcePayoutCurrency ||
+			"",
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
 		totalPayoutSar: providerTotalPayoutSar,
-		netAfterExpensesTotal: round2(
-			directTripFields.netAfterExpensesTotal ||
-				agodaFields.netAfterExpensesTotal ||
-				airbnbFields.netAfterExpensesTotal ||
-				vccPayoutSar ||
-				0
-		),
+		netAfterExpensesTotal: providerTotalPayoutSar,
 		otaCommissionSar: verifiedAirbnbCommissionEvidence
 			? airbnbFields.otaCommissionSar
 			: verifiedAgodaCommissionEvidence
 				? agodaFields.otaCommissionSar
+				: null,
+		otaCommissionSourceAmount: verifiedAirbnbCommissionEvidence
+			? airbnbFields.otaCommissionSourceAmount
+			: verifiedAgodaCommissionEvidence
+				? agodaFields.otaCommissionSourceAmount
 				: null,
 		otaCommissionCurrency: verifiedAirbnbCommissionEvidence
 			? airbnbFields.otaCommissionCurrency || "SAR"
@@ -7607,7 +7934,7 @@ function resolveRootPriceForDate(roomDetails, ymd, options = {}) {
 	return null;
 }
 
-function verifiedExplicitOtaCommissionSar(normalized = {}) {
+function verifiedExplicitOtaCommissionSourceAmount(normalized = {}) {
 	const provider = normalizeComparable(normalized.provider || "");
 	const transport = normalizeComparable(normalized.trustedTransportProvider || "");
 	const supportedSource =
@@ -7625,7 +7952,14 @@ function verifiedExplicitOtaCommissionSar(normalized = {}) {
 	) {
 		return null;
 	}
-	const value = Number(normalized.otaCommissionSar);
+	const commissionCurrency = String(normalized.otaCommissionCurrency || "")
+		.trim()
+		.toUpperCase();
+	const rawValue =
+		normalized.otaCommissionSourceAmount ??
+		(commissionCurrency === "SAR" ? normalized.otaCommissionSar : null);
+	if (rawValue === null || rawValue === undefined || rawValue === "") return null;
+	const value = Number(rawValue);
 	return Number.isFinite(value) && value >= 0 ? round2(value) : null;
 }
 
@@ -7649,23 +7983,36 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 	}
 
 	const roomCount = Math.max(1, Math.floor(Number(normalized.roomCount || 1)));
-	const totalAmountSar = round2(normalized.totalAmountSar || 0);
-	const paymentSummary = normalized.paymentSummary || {};
-	const totalPayoutSar = round2(
-		normalized.totalPayoutSar ||
-			normalized.netAfterExpensesTotal ||
-			paymentSummary.totalPayoutAmount ||
-			0
+	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
+		.trim()
+		.toUpperCase();
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		normalized,
+		{ propertyCurrency }
 	);
-	const hasExplicitPayoutTotal = totalPayoutSar > 0;
-	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
-	const fallbackNetTotalSar = defaultOtaReviewNetTotal(
-		totalAmountSar,
-		defaultDeductionRate
-	);
-	const effectiveNetAfterExpensesTotal = hasExplicitPayoutTotal
-		? round2(Math.min(totalPayoutSar, totalAmountSar || totalPayoutSar))
-		: fallbackNetTotalSar;
+	const normalizedForPricing = {
+		...normalized,
+		propertyCurrency,
+		...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
+	};
+	const totalAmountSar = verifiedPropertyGuestGrossSar(normalizedForPricing);
+	const totalPayoutSar = verifiedPropertyPayoutSar(normalizedForPricing);
+	const hasVerifiedGuestGross = totalAmountSar !== null;
+	const hasVerifiedPayout = totalPayoutSar !== null;
+	if (
+		hasVerifiedGuestGross &&
+		hasVerifiedPayout &&
+		totalPayoutSar > totalAmountSar + 0.02
+	) {
+		return {
+			ok: false,
+			code: "OTA_COMMERCIAL_PAYOUT_EXCEEDS_GROSS",
+			error:
+				"Verified OTA payout exceeds verified guest gross on the same property-currency basis.",
+		};
+	}
+	const hasComparableGrossAndPayout =
+		hasVerifiedGuestGross && hasVerifiedPayout;
 	const nightlyPricingSar = Array.isArray(normalized.nightlyPricingSar)
 		? normalized.nightlyPricingSar
 		: [];
@@ -7674,16 +8021,15 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 		normalizeComparable(normalized.trustedTransportProvider || "") ===
 			"airbnb" &&
 		normalized.sourceSenderAuthenticated === true;
-	const usesSourceNightlyPricing =
+	const usesSourceNightlyGross =
 		roomCount === 1 &&
 		nightlyPricingSar.length === dateRange.length &&
 		nightlyPricingSar.every(
 			(row, index) =>
 				row?.date === dateRange[index] &&
-				Number(row.clientAmountSar || 0) > 0 &&
-				Number(row.payoutAmountSar || 0) > 0 &&
-				Number(row.payoutAmountSar) <= Number(row.clientAmountSar) + 0.01
+				Number(row.clientAmountSar || 0) > 0
 		) &&
+		hasVerifiedGuestGross &&
 		Math.abs(
 			round2(
 				nightlyPricingSar.reduce(
@@ -7691,69 +8037,100 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 					0
 				)
 			) - totalAmountSar
-		) <= 0.01 &&
+		) <= 0.01;
+	const usesSourceNightlyPayout =
+		roomCount === 1 &&
+		nightlyPricingSar.length === dateRange.length &&
+		nightlyPricingSar.every(
+			(row, index) =>
+				row?.date === dateRange[index] &&
+				Number(row.payoutAmountSar || 0) > 0 &&
+				(!hasVerifiedGuestGross ||
+					Number(row.payoutAmountSar) <=
+						Number(row.clientAmountSar || Number.POSITIVE_INFINITY) + 0.01)
+		) &&
+		hasVerifiedPayout &&
 		Math.abs(
 			round2(
 				nightlyPricingSar.reduce(
 					(sum, row) => sum + Number(row.payoutAmountSar || 0),
 					0
 				)
-			) - effectiveNetAfterExpensesTotal
+			) - totalPayoutSar
 		) <= 0.01;
-	const slotPrices = usesSourceNightlyPricing
+	const slotPrices = usesSourceNightlyGross
 		? nightlyPricingSar.map((row) => round2(row.clientAmountSar))
-		: allocateAmountAcrossSlots(totalAmountSar, daysOfResidence * roomCount);
-	const netAfterExpensesSlots = allocateAmountAcrossSlots(
-		effectiveNetAfterExpensesTotal > 0
-			? effectiveNetAfterExpensesTotal
-			: totalAmountSar,
-		daysOfResidence * roomCount
-	);
-	if (usesSourceNightlyPricing) {
+		: hasVerifiedGuestGross
+			? allocateAmountAcrossSlots(
+					totalAmountSar,
+					daysOfResidence * roomCount
+			  )
+			: Array(daysOfResidence * roomCount).fill(null);
+	const netAfterExpensesSlots = hasVerifiedPayout
+		? allocateAmountAcrossSlots(
+				totalPayoutSar,
+				daysOfResidence * roomCount
+		  )
+		: Array(daysOfResidence * roomCount).fill(null);
+	if (usesSourceNightlyPayout) {
 		nightlyPricingSar.forEach((row, index) => {
 			netAfterExpensesSlots[index] = round2(row.payoutAmountSar);
 		});
 	}
-	const fallbackRootSlots = allocateAmountAcrossSlots(
-		fallbackNetTotalSar || totalAmountSar,
-		daysOfResidence * roomCount
-	);
 	let slotIndex = 0;
 	let sumRootPriceAllRooms = 0;
 	let sumTotalPriceAllRooms = 0;
 	let sumNetAfterExpensesAllRooms = 0;
 	let sumOtaExpenseAllRooms = 0;
 	let sumPlatformMarginAllRooms = 0;
+	let allRootPricesKnown = true;
 
 	const pickedRoomsType = Array.from({ length: roomCount }, () => {
 		const pricingByDay = dateRange.map((ymd) => {
 			const currentSlot = slotIndex;
-			const finalPrice = round2(slotPrices[currentSlot] || 0);
-			const netAfterExpenses = round2(
-				netAfterExpensesSlots[currentSlot] || finalPrice
-			);
+			const finalPrice = hasVerifiedGuestGross
+				? round2(slotPrices[currentSlot])
+				: null;
+			const netAfterExpenses = hasVerifiedPayout
+				? round2(netAfterExpensesSlots[currentSlot])
+				: null;
 			slotIndex += 1;
 			const resolvedRootPrice = resolveRootPriceForDate(roomDetails, ymd, {
 				preserveExplicitZero: preserveExplicitCalendarZero,
 			});
-			const fallbackRootPrice = round2(
-				fallbackRootSlots[currentSlot] || netAfterExpenses || finalPrice
-			);
 			const rootPrice =
-				resolvedRootPrice === null ? fallbackRootPrice : round2(resolvedRootPrice);
+				resolvedRootPrice === null ? null : round2(resolvedRootPrice);
+			if (rootPrice === null) allRootPricesKnown = false;
 			const commissionRate = 0;
-			const otaExpenseAmount = Math.max(0, round2(finalPrice - netAfterExpenses));
-			const platformMargin = round2(netAfterExpenses - rootPrice);
+			const otaExpenseAmount = hasComparableGrossAndPayout
+				? Math.max(0, round2(finalPrice - netAfterExpenses))
+				: null;
+			const platformMargin =
+				netAfterExpenses !== null && rootPrice !== null
+					? round2(netAfterExpenses - rootPrice)
+					: null;
 
-			sumRootPriceAllRooms = round2(sumRootPriceAllRooms + rootPrice);
-			sumTotalPriceAllRooms = round2(sumTotalPriceAllRooms + finalPrice);
-			sumNetAfterExpensesAllRooms = round2(
-				sumNetAfterExpensesAllRooms + netAfterExpenses
-			);
-			sumOtaExpenseAllRooms = round2(sumOtaExpenseAllRooms + otaExpenseAmount);
-			sumPlatformMarginAllRooms = round2(
-				sumPlatformMarginAllRooms + platformMargin
-			);
+			if (rootPrice !== null) {
+				sumRootPriceAllRooms = round2(sumRootPriceAllRooms + rootPrice);
+			}
+			if (finalPrice !== null) {
+				sumTotalPriceAllRooms = round2(sumTotalPriceAllRooms + finalPrice);
+			}
+			if (netAfterExpenses !== null) {
+				sumNetAfterExpensesAllRooms = round2(
+					sumNetAfterExpensesAllRooms + netAfterExpenses
+				);
+			}
+			if (otaExpenseAmount !== null) {
+				sumOtaExpenseAllRooms = round2(
+					sumOtaExpenseAllRooms + otaExpenseAmount
+				);
+			}
+			if (platformMargin !== null) {
+				sumPlatformMarginAllRooms = round2(
+					sumPlatformMarginAllRooms + platformMargin
+				);
+			}
 
 			return {
 				date: ymd,
@@ -7770,18 +8147,25 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 				platformMargin,
 			};
 		});
-		const roomTotal = round2(
-			pricingByDay.reduce(
-				(total, day) => total + Number(day.totalPriceWithCommission || 0),
-				0
-			)
+		const roomTotal = hasVerifiedGuestGross
+			? round2(
+					pricingByDay.reduce(
+						(total, day) => total + Number(day.totalPriceWithCommission),
+						0
+					)
+			  )
+			: null;
+		const roomRootKnown = pricingByDay.every(
+			(day) => day.rootPrice !== null
 		);
-		const roomRoot = round2(
-			pricingByDay.reduce(
-				(total, day) => total + Number(day.rootPrice || 0),
-				0
-			)
-		);
+		const roomRoot = roomRootKnown
+			? round2(
+					pricingByDay.reduce(
+						(total, day) => total + Number(day.rootPrice),
+						0
+					)
+			  )
+			: null;
 
 		return {
 			room_type: roomDetails.roomType,
@@ -7790,7 +8174,8 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 			sourceRoomName: normalized.roomName || "",
 			otaRoomMatchType: roomMatch.matchType || "",
 			otaRoomMatchScore: Number(roomMatch.score || 0),
-			chosenPrice: round2(roomTotal / daysOfResidence),
+			chosenPrice:
+				roomTotal === null ? null : round2(roomTotal / daysOfResidence),
 			count: 1,
 			pricingByDay,
 			totalPriceWithCommission: roomTotal,
@@ -7798,31 +8183,55 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 		};
 	});
 
-	const subTotalSar = round2(sumRootPriceAllRooms);
+	const subTotalSar = allRootPricesKnown
+		? round2(sumRootPriceAllRooms)
+		: null;
 	const commissionAmountSar = 0;
+	const platformMarginTotal =
+		hasVerifiedPayout && allRootPricesKnown
+			? round2(sumPlatformMarginAllRooms)
+			: null;
 
 	return {
 		ok: true,
 		pickedRoomsType,
 		roomCount,
 		daysOfResidence,
-		sumRootPriceAllRooms: round2(sumRootPriceAllRooms),
+		sumRootPriceAllRooms: subTotalSar,
 		subTotalSar,
-		sumTotalPriceAllRooms: round2(sumTotalPriceAllRooms),
-		netAfterExpensesTotal: round2(sumNetAfterExpensesAllRooms),
-		otaExpenseTotal: round2(sumOtaExpenseAllRooms),
-		platformMarginTotal: round2(sumPlatformMarginAllRooms),
+		sumTotalPriceAllRooms: hasVerifiedGuestGross
+			? round2(sumTotalPriceAllRooms)
+			: null,
+		netAfterExpensesTotal: hasVerifiedPayout
+			? round2(sumNetAfterExpensesAllRooms)
+			: null,
+		otaExpenseTotal: hasComparableGrossAndPayout
+			? round2(sumOtaExpenseAllRooms)
+			: null,
+		platformMarginTotal,
 		commissionAmountSar,
 		adminPricingTotals: {
 			mode: "ota_platform_sync",
-			clientTotal: round2(sumTotalPriceAllRooms),
+			clientTotal: hasVerifiedGuestGross
+				? round2(sumTotalPriceAllRooms)
+				: null,
 			rootTotal: subTotalSar,
-			netAfterExpensesTotal: round2(sumNetAfterExpensesAllRooms),
-			otaExpenseTotal: round2(sumOtaExpenseAllRooms),
-			platformMarginTotal: round2(sumPlatformMarginAllRooms),
+			netAfterExpensesTotal: hasVerifiedPayout
+				? round2(sumNetAfterExpensesAllRooms)
+				: null,
+			otaExpenseTotal: hasComparableGrossAndPayout
+				? round2(sumOtaExpenseAllRooms)
+				: null,
+			platformMarginTotal,
 			commissionAmount: commissionAmountSar,
-			defaultDeductionRate,
-			defaultDeductionApplied: !hasExplicitPayoutTotal,
+			defaultDeductionRate: null,
+			defaultDeductionApplied: false,
+			commercialResolution:
+				hasComparableGrossAndPayout
+					? "verified"
+					: hasVerifiedGuestGross || hasVerifiedPayout
+						? "partial"
+						: "unresolved",
 		},
 	};
 }
@@ -7850,11 +8259,60 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 		);
 	}
 
-	const pricing = buildPickedRoomsType({ roomDetails, normalized, roomMatch });
+	const propertyCurrency = String(hotelDetails.currency || "SAR")
+		.trim()
+		.toUpperCase();
+	const initialOtaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		normalized,
+		{ propertyCurrency }
+	);
+	const normalizedForPricing = {
+		...normalized,
+		propertyCurrency,
+		...(initialOtaCommercialEvidence
+			? { otaCommercialEvidence: initialOtaCommercialEvidence }
+			: {}),
+	};
+	const pricing = buildPickedRoomsType({
+		roomDetails,
+		normalized: normalizedForPricing,
+		roomMatch,
+	});
 	if (!pricing.ok) return pricing;
+	const evidenceBuiltAt = new Date();
+	const hotelBase =
+		pricing.subTotalSar === null
+			? null
+			: {
+					verified: true,
+					amount: pricing.subTotalSar,
+					provenance: {
+						provider: "jannat_pms",
+						sourceType: "pms_root_pricing",
+						sourceHash: hashText(
+							JSON.stringify(
+								pricing.pickedRoomsType.map((room) =>
+									(room.pricingByDay || []).map((day) => [
+										day.date,
+										day.rootPrice,
+									])
+								)
+							)
+						),
+						sourceTimestamp: evidenceBuiltAt,
+						sourceId: `pms-root-${normalizeId(
+							hotelDetails._id
+						)}-${normalizeId(roomDetails._id || "room")}`,
+					},
+			  };
+	const otaCommercialEvidence =
+		buildNormalizedOtaCommercialEvidence(normalizedForPricing, {
+			propertyCurrency,
+			hotelBase,
+		}) || initialOtaCommercialEvidence;
 
 	const isCancelled = normalized.eventType === "cancelled";
-	const totalAmountSar = Number(normalized.totalAmountSar || 0);
+	const totalAmountSar = pricing.sumTotalPriceAllRooms;
 	const providerLabel =
 		normalized.bookingSource ||
 		(normalized.providerLabel && normalized.providerLabel !== "unknown"
@@ -7897,26 +8355,21 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 		safePaymentSummary.exchangeRateSource ||
 		normalized.exchangeRateSource ||
 		"";
-	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
-	const fallbackNetAfterExpensesTotal = defaultOtaReviewNetTotal(
-		totalAmountSar,
-		defaultDeductionRate
-	);
 	const adminPricingTotals = pricing.adminPricingTotals || {
 		mode: "ota_platform_sync",
 		clientTotal: totalAmountSar,
 		rootTotal: pricing.subTotalSar,
-		netAfterExpensesTotal: fallbackNetAfterExpensesTotal,
-		otaExpenseTotal: round2(totalAmountSar - fallbackNetAfterExpensesTotal),
-		platformMarginTotal: Math.max(
-			0,
-			round2(fallbackNetAfterExpensesTotal - pricing.subTotalSar)
-		),
+		netAfterExpensesTotal: null,
+		otaExpenseTotal: null,
+		platformMarginTotal: null,
 		commissionAmount: pricing.commissionAmountSar,
-		defaultDeductionRate,
-		defaultDeductionApplied: true,
+		defaultDeductionRate: null,
+		defaultDeductionApplied: false,
+		commercialResolution: "unresolved",
 	};
-	const otaCommissionSar = verifiedExplicitOtaCommissionSar(normalized);
+	const otaCommissionSar =
+		otaCommercialEvidence?.roles?.explicitOtaCommission?.propertyAmount ??
+		null;
 	const guestComment = cleanOtaGuestNote(
 		normalized.comment || normalized.guestNotes || ""
 	);
@@ -7957,7 +8410,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 			sub_total: pricing.subTotalSar,
 			total_rooms: pricing.roomCount,
 			total_amount: totalAmountSar,
-			currency: "SAR",
+			currency: propertyCurrency,
 			checkin_date: normalized.checkinDate,
 			checkout_date: normalized.checkoutDate,
 			days_of_residence: pricing.daysOfResidence,
@@ -8005,7 +8458,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 				source: automationSource,
 				provider: normalized.provider,
 				providerLabel,
-				currency: "SAR",
+				currency: propertyCurrency,
 				clientTotal: adminPricingTotals.clientTotal,
 				hotelVisibleAmount: adminPricingTotals.rootTotal,
 				netAfterExpenses: adminPricingTotals.netAfterExpensesTotal,
@@ -8035,6 +8488,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 			belongsTo: hotelDetails.belongsTo,
 			supplierData: {
 				supplierName: providerLabel,
+				...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
 				suppliedBookingNo: normalized.reservationId,
 				otaConfirmationNumber: normalized.confirmationNumber,
 				platformConfirmationNumber: normalized.confirmationNumber,
@@ -8053,7 +8507,7 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 				otaRoomMatchReason: roomMatch.aiRoomMatch?.reason || "",
 				otaRoomMatchedByModel: roomMatch.aiRoomMatch?.model || "",
 				otaCurrency: normalized.currency || "",
-				otaAmount: normalized.amount || 0,
+				otaAmount: sourceAmount || null,
 				otaAmountSar: totalAmountSar,
 				otaSourceCurrency: sourceCurrency,
 				otaSourceAmount: round2(sourceAmount),
@@ -8261,10 +8715,10 @@ function lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
 		["cancelled", "no_show", "status"].includes(normalized.eventType)
 	);
 	if (!lifecycleMutation) return false;
-	return (
-		hasDirectHotelRunnerProjection(existing) &&
-		otaSourceAuthority(normalized) < 4
-	);
+	// Source authority is role-specific. An authenticated provider portal may be
+	// stronger commercial evidence, but it must never outrank HotelRunner for
+	// lifecycle once the reservation is owned by a direct HotelRunner projection.
+	return hasDirectHotelRunnerProjection(existing);
 }
 
 const MAX_DIRECT_AFTER_RELAY_SOURCE_SKEW_MS = 15 * 60 * 1000;
@@ -8931,6 +9385,7 @@ function adminPricingHasProtectedState(existing = {}) {
 		"commissionAmount",
 		"defaultDeductionRate",
 		"defaultDeductionApplied",
+		"commercialResolution",
 		"source",
 		"provider",
 		"providerLabel",
@@ -9395,79 +9850,27 @@ function hasCaptureOrSettlementActivity(existing = {}) {
 }
 
 function hasCompleteDirectCommercialEvidence(normalized = {}) {
-	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
-	const guestTotal = round2(normalized.totalAmountSar || normalized.amount || 0);
-	const payoutTotal = round2(
-		normalized.totalPayoutSar ||
-			normalized.netAfterExpensesTotal ||
-			paymentSummary.totalPayoutAmount ||
-			0
-	);
-	const summaryGuestTotal = round2(paymentSummary.totalGuestPaymentAmount || 0);
-	const summaryPayoutTotal = round2(paymentSummary.totalPayoutAmount || 0);
-	const sourceGuestTotal = round2(
-		paymentSummary.sourceTotalGuestPaymentAmount || 0
-	);
-	const sourcePayoutTotal = round2(
-		paymentSummary.sourceTotalPayoutAmount || 0
-	);
-	const normalizedSourceAmount = round2(
-		normalized.sourceAmount || normalized.amount || 0
-	);
-	const sourceCurrency = String(
-		normalized.sourceCurrency || paymentSummary.sourceCurrency || normalized.currency || ""
-	).toUpperCase();
-	const summarySourceCurrency = String(
-		paymentSummary.sourceCurrency || ""
-	).toUpperCase();
-	const summaryCurrency = String(paymentSummary.currency || "").toUpperCase();
-	const exchangeRate = Number(
-		normalized.sourceExchangeRateToSar ||
-			paymentSummary.exchangeRateToSar ||
-			normalized.exchangeRateToSar ||
-			0
-	);
-	const sourceGuestConvertsExactly =
-		Math.abs(round2(sourceGuestTotal * exchangeRate) - guestTotal) <= 0.02;
-	const sourcePayoutConvertsExactly =
-		Math.abs(round2(sourcePayoutTotal * exchangeRate) - payoutTotal) <= 0.02;
-	const exchangeRateSources = [
-		normalized.sourceExchangeRateSource,
-		normalized.exchangeRateSource,
-		paymentSummary.exchangeRateSource,
-	]
-		.map((value) => normalizeMarker(value))
-		.filter(Boolean);
-	const verifiedExchangeRate =
-		sourceCurrency === "SAR"
-			? Math.abs(exchangeRate - 1) <= 0.000001
-			: exchangeRateSources.length > 0 &&
-			  exchangeRateSources.every((source) =>
-					["exchange_rate_api", "exchange_rate_api_cached"].includes(source)
-			  );
-	return !!(
-		hasSourceField(normalized, "amount") &&
-		hasSourceField(normalized, "paymentCollectionModel") &&
-		hasSourceField(normalized, "paymentInstructions") &&
-		guestTotal > 0 &&
-		payoutTotal > 0 &&
-		payoutTotal <= guestTotal &&
-		!normalizeWhitespace(normalized.otaPayoutFallbackReason || "") &&
-		summaryGuestTotal === guestTotal &&
-		summaryPayoutTotal === payoutTotal &&
-		sourceGuestTotal > 0 &&
-		sourcePayoutTotal > 0 &&
-		sourceCurrency &&
-		summarySourceCurrency === sourceCurrency &&
-		summaryCurrency === "SAR" &&
-		normalizedSourceAmount === sourceGuestTotal &&
-		exchangeRate > 0 &&
-		verifiedExchangeRate &&
-		sourceGuestConvertsExactly &&
-		sourcePayoutConvertsExactly &&
-		normalized.paymentCollectionModel &&
-		normalized.paymentCollectionModel !== "unknown" &&
-		normalizeWhitespace(normalized.paymentInstructions || "")
+	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
+		.trim()
+		.toUpperCase();
+	const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency,
+	});
+	const gross = evidence?.roles?.guestGross;
+	const payout = evidence?.roles?.hotelPayout;
+	return Boolean(
+		evidence?.verificationState === "verified" &&
+		gross?.verified === true &&
+		payout?.verified === true &&
+		gross.propertyCurrency === propertyCurrency &&
+		payout.propertyCurrency === propertyCurrency &&
+		Number.isFinite(Number(gross.propertyAmount)) &&
+		Number(gross.propertyAmount) > 0 &&
+		Number.isFinite(Number(payout.propertyAmount)) &&
+		Number(payout.propertyAmount) >= 0 &&
+		evidence.reconciliation?.grossAndPayoutSameCurrency === true &&
+		evidence.reconciliation?.grossAndPayoutSameBasis === true &&
+		evidence.reconciliation?.deductionDerived === true
 	);
 }
 
@@ -9565,6 +9968,8 @@ function buildHotelRunnerEmailCommercialEvidence(
 		!isOtaInboundEmail(normalized) ||
 		normalized.sourceSenderTrusted !== true ||
 		normalized.sourceSenderAuthenticated !== true ||
+		normalizeOtaIdentityProvider(normalized.trustedTransportProvider) !==
+			provider ||
 		normalized.requiresManualReview === true ||
 		!provider ||
 		!otaIdentityKey ||
@@ -9574,18 +9979,21 @@ function buildHotelRunnerEmailCommercialEvidence(
 	) {
 		return null;
 	}
-	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency: "SAR",
+	});
+	if (!otaCommercialEvidence) return null;
 	const grossTotalSar = round2(
-		normalized.totalAmountSar || normalized.amount || 0
+		otaCommercialEvidence.roles.guestGross.propertyAmount
 	);
 	const payoutTotalSar = round2(
-		normalized.totalPayoutSar ||
-			normalized.netAfterExpensesTotal ||
-			paymentSummary.totalPayoutAmount ||
-			0
+		otaCommercialEvidence.roles.hotelPayout.propertyAmount
 	);
-	const otaExpenseTotalSar = round2(grossTotalSar - payoutTotalSar);
-	const otaCommissionSar = verifiedExplicitOtaCommissionSar(normalized);
+	const otaExpenseTotalSar = round2(
+		otaCommercialEvidence.roles.deductionAggregate.propertyAmount
+	);
+	const otaCommissionSar =
+		otaCommercialEvidence.roles.explicitOtaCommission.propertyAmount;
 	let deductionComponents = (Array.isArray(normalized.otaDeductionComponents)
 		? normalized.otaDeductionComponents
 		: []
@@ -9671,6 +10079,18 @@ function commercialEvidenceAmountMatches(actual, expected) {
 function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
 	if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
 	const safe = safeOtaPaymentSummary(summary);
+	const sourceCurrency = String(safe.sourceCurrency || "").trim().toUpperCase();
+	const propertyCurrency = String(safe.currency || "").trim().toUpperCase();
+	const sourceGross = Number(safe.sourceTotalGuestPaymentAmount);
+	const sourcePayout = Number(safe.sourceTotalPayoutAmount);
+	const rate = Number(safe.exchangeRateToSar);
+	const rateSource = normalizeMarker(safe.exchangeRateSource || "");
+	const legacyConversionTrusted =
+		sourceCurrency === "SAR"
+			? Math.abs(rate - 1) <= 0.000001
+			: ["exchange_rate_api", "exchange_rate_api_cached"].includes(
+					rateSource
+			  );
 	return !!(
 		commercialEvidenceAmountMatches(
 			safe.totalGuestPaymentAmount,
@@ -9680,28 +10100,22 @@ function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
 			safe.totalPayoutAmount,
 			round2(marker.payoutTotalSar)
 		) &&
-		String(safe.currency || "").trim().toUpperCase() === "SAR" &&
-		hasCompleteDirectCommercialEvidence({
-			sourcePresence: {
-				amount: true,
-				paymentCollectionModel: true,
-				paymentInstructions: true,
-			},
-			amount: marker.grossTotalSar,
-			totalAmountSar: marker.grossTotalSar,
-			sourceAmount: safe.sourceTotalGuestPaymentAmount,
-			sourceCurrency: safe.sourceCurrency,
-			totalPayoutSar: marker.payoutTotalSar,
-			netAfterExpensesTotal: marker.payoutTotalSar,
-			currency: safe.sourceCurrency,
-			sourceExchangeRateToSar: safe.exchangeRateToSar,
-			sourceExchangeRateSource: safe.exchangeRateSource,
-			exchangeRateToSar: safe.exchangeRateToSar,
-			exchangeRateSource: safe.exchangeRateSource,
-			paymentCollectionModel: "verified_evidence",
-			paymentInstructions: "verified source evidence",
-			paymentSummary: safe,
-		})
+		propertyCurrency === "SAR" &&
+		Number.isFinite(sourceGross) &&
+		sourceGross > 0 &&
+		Number.isFinite(sourcePayout) &&
+		sourcePayout >= 0 &&
+		Number.isFinite(rate) &&
+		rate > 0 &&
+		legacyConversionTrusted &&
+		commercialEvidenceAmountMatches(
+			round2(sourceGross * rate),
+			marker.grossTotalSar
+		) &&
+		commercialEvidenceAmountMatches(
+			round2(sourcePayout * rate),
+			marker.payoutTotalSar
+		)
 	);
 }
 
@@ -10372,19 +10786,14 @@ function directHotelRunnerEmailCommercialGuard({
 	const hotelRunnerReportedTotal = directHotelRunnerAuthoritativeGrossTotal(existing);
 	const evidenceGross = Number(evidence.grossTotalSar || 0);
 	const evidencePayout = Number(evidence.payoutTotalSar || 0);
-	const provider = normalizeOtaIdentityProvider(evidence.provider);
 	const reportedTotalRole =
 		hotelRunnerReportedTotal > 0 &&
 		Math.abs(hotelRunnerReportedTotal - evidenceGross) <= 0.02
 			? "gross"
-			: provider === "agoda" &&
-			  hotelRunnerReportedTotal > 0 &&
+			: hotelRunnerReportedTotal > 0 &&
 			  Math.abs(hotelRunnerReportedTotal - evidencePayout) <= 0.02
 				? "payout"
-				: "";
-	if (!reportedTotalRole) {
-		return reject("gross_total");
-	}
+				: "unknown";
 	if (directHotelRunnerCommercialEnrichmentProtectedState(existing)) {
 		return reject("protected_state");
 	}
@@ -10579,17 +10988,27 @@ function directHotelRunnerCommercialEnrichmentSet(
 			reportedTotalRole,
 		});
 	if (!pricing) return null;
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		{
+			...normalized,
+			propertyCurrency: String(existing.currency || "SAR").toUpperCase(),
+		},
+		{ propertyCurrency: String(existing.currency || "SAR").toUpperCase() }
+	);
 	const explicitCommission =
-		evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
+		otaCommercialEvidence?.roles?.explicitOtaCommission?.propertyAmount ??
+		(evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
 			? null
-			: round2(evidence.otaCommissionSar);
+			: round2(evidence.otaCommissionSar));
 	const set = {
 		// Keep xHotelPro/platform commission separate from the OTA's fee. The OTA
 		// amount is written only from the complete, authenticated evidence above.
 		commission: 0,
 		commission_ota: explicitCommission,
+		total_amount: evidence.grossTotalSar,
 		pickedRoomsType: pricing.rooms,
 		pickedRoomsPricing: pricing.rooms,
+		"adminPricing.clientTotal": evidence.grossTotalSar,
 		"adminPricing.netAfterExpensesTotal": evidence.payoutTotalSar,
 		"adminPricing.otaExpenseTotal": evidence.otaExpenseTotalSar,
 		"adminPricing.platformMarginTotal": pricing.platformMarginTotal,
@@ -10598,6 +11017,7 @@ function directHotelRunnerCommercialEnrichmentSet(
 		"adminPricing.payoutFallbackReason": "",
 		"adminPricing.commercialVerified": true,
 		"ota_financial_summary.show": true,
+		"ota_financial_summary.clientTotal": evidence.grossTotalSar,
 		"ota_financial_summary.netAfterExpenses": evidence.payoutTotalSar,
 		"ota_financial_summary.netAfterOtaExpenses": evidence.payoutTotalSar,
 		"ota_financial_summary.otaExpenseTotal": evidence.otaExpenseTotalSar,
@@ -10621,15 +11041,10 @@ function directHotelRunnerCommercialEnrichmentSet(
 		"supplierData.otaPlatformMarginSar": pricing.platformMarginTotal,
 		"supplierData.otaPayoutFallbackReason": "",
 		"supplierData.hotelRunnerEmailCommercialEvidence": evidence,
+		...(otaCommercialEvidence
+			? { "supplierData.otaCommercialEvidence": otaCommercialEvidence }
+			: {}),
 	};
-	if (reportedTotalRole === "payout") {
-		// Agoda production pushes can report the hotel's payout in `total`.
-		// Correct only the PMS guest-facing gross fields from authenticated email
-		// evidence; supplierData.hotelRunner.pricing remains the immutable API view.
-		set.total_amount = evidence.grossTotalSar;
-		set["adminPricing.clientTotal"] = evidence.grossTotalSar;
-		set["ota_financial_summary.clientTotal"] = evidence.grossTotalSar;
-	}
 	return set;
 }
 
@@ -10639,14 +11054,22 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 	evidence = {}
 ) {
 	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const propertyCurrency = String(document.currency || "SAR").trim().toUpperCase();
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		{ ...normalized, propertyCurrency },
+		{ propertyCurrency }
+	);
 	const explicitCommission =
-		evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
+		otaCommercialEvidence?.roles?.explicitOtaCommission?.propertyAmount ??
+		(evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
 			? null
-			: round2(evidence.otaCommissionSar);
+			: round2(evidence.otaCommissionSar));
 	document.commission = 0;
 	document.commission_ota = explicitCommission;
+	document.total_amount = evidence.grossTotalSar;
 	document.adminPricing = {
 		...(document.adminPricing || {}),
+		clientTotal: evidence.grossTotalSar,
 		netAfterExpensesTotal: evidence.payoutTotalSar,
 		otaExpenseTotal: evidence.otaExpenseTotalSar,
 		commissionAmount: 0,
@@ -10657,6 +11080,7 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 	document.ota_financial_summary = {
 		...(document.ota_financial_summary || {}),
 		show: true,
+		clientTotal: evidence.grossTotalSar,
 		netAfterExpenses: evidence.payoutTotalSar,
 		netAfterOtaExpenses: evidence.payoutTotalSar,
 		otaExpenseTotal: evidence.otaExpenseTotalSar,
@@ -10670,6 +11094,7 @@ function applyHotelRunnerEmailCommercialEvidenceToDocument(
 	};
 	document.supplierData = {
 		...(document.supplierData || {}),
+		...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
 		otaPaymentSummary: paymentSummary,
 		otaTotalPayoutSar: evidence.payoutTotalSar,
 		otaExpenseTotalSar: evidence.otaExpenseTotalSar,
@@ -10762,8 +11187,98 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 			matchedReservationBy,
 		};
 	}
+	const propertyCurrency = String(existing.currency || "SAR").trim().toUpperCase();
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		{ ...normalized, propertyCurrency },
+		{ propertyCurrency }
+	);
 	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized);
 	if (!evidence) {
+		const evidenceOnlyIdentitySafe = Boolean(
+			otaCommercialEvidence &&
+			directHotelRunnerEmailIdentityMatches(
+				normalized,
+				existing,
+				matchedReservationBy
+			) &&
+			exactSourceBackedStayMatchesExisting(normalized, existing) &&
+			Number.isInteger(Number(normalized.roomCount)) &&
+			Number(normalized.roomCount) === Number(existing.total_rooms) &&
+			directHotelRunnerEmailRoomMatches(normalized, existing, hotelDetails) &&
+			directHotelRunnerEmailHotelMatches(normalized, existing, hotelDetails)
+		);
+		if (evidenceOnlyIdentitySafe) {
+			const updateResult = await Reservations.updateOne(
+				{
+					...directHotelRunnerCommercialSnapshotFilter(existing),
+					"supplierData.otaCommercialEvidence.evidenceHash": {
+						$ne: otaCommercialEvidence.evidenceHash,
+					},
+				},
+				addReservationVersionBump({
+					$set: {
+						"supplierData.otaCommercialEvidence": otaCommercialEvidence,
+					},
+					$push: {
+						reservationAuditLog: buildAuditEntry(
+							normalized,
+							"hotelrunner-commercial-evidence-attached-no-financial-mutation",
+							warnings
+						),
+					},
+				})
+			);
+			const matchedCount = Number(
+				updateResult?.matchedCount ?? updateResult?.n ?? 0
+			);
+			if (matchedCount) {
+				return {
+					status: "updated",
+					actionTaken: "commercial_evidence_attached",
+					warnings,
+					errors,
+					reservationId: existing._id,
+					hotelId: existing.hotelId,
+					pmsConfirmationNumber: existing.confirmation_number,
+					matchedReservationBy,
+					updatedFields: ["supplierData.otaCommercialEvidence"],
+				};
+			}
+			const latest = await loadReservationForCommercialEvidence(existing._id);
+			const latestEvidence = validatedOtaCommercialEvidence(
+				latest?.supplierData?.otaCommercialEvidence,
+				{ provider: normalized.provider }
+			);
+			if (latestEvidence?.evidenceHash === otaCommercialEvidence.evidenceHash) {
+				return {
+					status: "duplicate_reservation",
+					actionTaken: "skipped",
+					skipReason: "ota_commercial_evidence_already_attached",
+					warnings,
+					errors,
+					reservationId: existing._id,
+					hotelId: existing.hotelId,
+					pmsConfirmationNumber: existing.confirmation_number,
+					matchedReservationBy,
+				};
+			}
+			return {
+				status: "needs_review",
+				actionTaken: "skipped",
+				skipReason: "ota_commercial_evidence_concurrent_change",
+				automationComment:
+					"The reservation changed while source commercial evidence was being attached; no retrying overwrite was attempted.",
+				warnings,
+				errors: [
+					...errors,
+					"Concurrent reservation change blocked commercial evidence attachment.",
+				],
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 		const incompleteEvidence = hasDirectCommercialEvidenceAttempt(normalized);
 		return {
 			status: incompleteEvidence ? "needs_review" : "duplicate_reservation",
@@ -11095,16 +11610,18 @@ function authoritativeMappedRefreshDocumentGuard({
 	) {
 		return reject("root_or_commission_totals");
 	}
-	const expectedGuestTotal = round2(
-		normalized.totalAmountSar || normalized.amount || 0
-	);
-	const expectedPayout = round2(
-		normalized.totalPayoutSar ||
-			normalized.netAfterExpensesTotal ||
-			safeOtaPaymentSummary(normalized.paymentSummary).totalPayoutAmount ||
-			0
-	);
+	const commercialEvidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency: String(document.currency || "SAR").trim().toUpperCase(),
+	});
+	const expectedGuestTotal =
+		commercialEvidence?.roles?.guestGross?.propertyAmount;
+	const expectedPayout =
+		commercialEvidence?.roles?.hotelPayout?.propertyAmount;
 	if (
+		expectedGuestTotal === null ||
+		expectedGuestTotal === undefined ||
+		expectedPayout === null ||
+		expectedPayout === undefined ||
 		document?.adminPricing?.defaultDeductionApplied !== false ||
 		normalizeWhitespace(document?.adminPricing?.payoutFallbackReason || "") ||
 		normalizeWhitespace(document?.ota_financial_summary?.payoutFallbackReason || "") ||
@@ -11295,6 +11812,16 @@ function buildExistingReservationUpdateSet({
 	warnings = [],
 } = {}) {
 	const set = {};
+	const propertyCurrency = String(existing.currency || "SAR")
+		.trim()
+		.toUpperCase();
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		normalized,
+		{ propertyCurrency }
+	);
+	if (otaCommercialEvidence) {
+		set["supplierData.otaCommercialEvidence"] = otaCommercialEvidence;
+	}
 	if (
 		(isOtaInboundEmail(normalized) &&
 			hasDirectHotelRunnerProjection(existing)) ||
@@ -11367,6 +11894,33 @@ function buildExistingReservationUpdateSet({
 				delete docSet["supplierData.otaProvider"];
 			}
 			Object.assign(set, docSet);
+			// compactUpdate intentionally omits nulls for ordinary updates. A guarded
+			// authoritative rebuild is different: null is the deliberate fail-closed
+			// result for an unproven commercial role, and an older guessed value must
+			// not survive merely because the new document cannot prove it.
+			for (const [path, value] of [
+				["total_amount", document.total_amount],
+				["commission_ota", document.commission_ota],
+				["supplierData.otaAmountSar", document.supplierData?.otaAmountSar],
+				[
+					"supplierData.otaTotalPayoutSar",
+					document.supplierData?.otaTotalPayoutSar,
+				],
+				[
+					"supplierData.otaExpenseTotalSar",
+					document.supplierData?.otaExpenseTotalSar,
+				],
+				[
+					"supplierData.otaPlatformMarginSar",
+					document.supplierData?.otaPlatformMarginSar,
+				],
+				[
+					"supplierData.otaCommissionSar",
+					document.supplierData?.otaCommissionSar,
+				],
+			]) {
+				set[path] = value ?? null;
+			}
 			set.adminPricing = preserveCanonicalTransportIdentity
 				? {
 						...(document.adminPricing || {}),
@@ -11573,19 +12127,25 @@ function buildExistingReservationUpdateSet({
 			},
 			pricing: incomingAmount
 				? {
-						guestTotalSar: Number(normalized.totalAmountSar || 0),
-						sourceAmount: Number(
-							normalized.sourceAmount || normalized.amount || 0
-						),
+						guestTotalSar:
+							otaCommercialEvidence?.roles?.guestGross?.propertyAmount ??
+							null,
+						sourceAmount:
+							otaCommercialEvidence?.roles?.guestGross?.sourceAmount ??
+							(Number(normalized.sourceAmount || normalized.amount) || null),
 						sourceCurrency:
-							normalized.sourceCurrency || normalized.currency || "",
-						totalPayoutSar: Number(
-							normalized.totalPayoutSar ||
-								normalized.netAfterExpensesTotal ||
-								0
-						),
-						exchangeRateToSar: Number(normalized.exchangeRateToSar || 0),
+							otaCommercialEvidence?.sourceCurrency ||
+							normalized.sourceCurrency ||
+							normalized.currency ||
+							"",
+						totalPayoutSar:
+							otaCommercialEvidence?.roles?.hotelPayout?.propertyAmount ??
+							null,
+						exchangeRateToSar:
+							otaCommercialEvidence?.currencyConversion?.rate ?? null,
 						exchangeRateSource: normalized.exchangeRateSource || "",
+						commercialEvidenceHash:
+							otaCommercialEvidence?.evidenceHash || "",
 						paymentCollectionModel:
 							normalized.paymentCollectionModel || "",
 						paymentSummary: safeOtaPaymentSummary(normalized.paymentSummary),
@@ -11838,12 +12398,14 @@ function buildExistingReservationUpdateSet({
 	if (incomingAmount && appliesAuthoritativeRefresh) {
 		const safePaymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
 		const sourceCurrency =
+			otaCommercialEvidence?.sourceCurrency ||
 			normalized.sourceCurrency ||
 			safePaymentSummary.sourceCurrency ||
 			normalized.currency ||
 			"";
 		const sourceAmount = Number(
-			normalized.sourceAmount ||
+			otaCommercialEvidence?.roles?.guestGross?.sourceAmount ||
+				normalized.sourceAmount ||
 				safePaymentSummary.sourceTotalGuestPaymentAmount ||
 				normalized.amount ||
 				0
@@ -11860,9 +12422,19 @@ function buildExistingReservationUpdateSet({
 			safePaymentSummary.exchangeRateSource ||
 			normalized.exchangeRateSource ||
 			"";
-		setIfOtaValue(set, "supplierData.otaCurrency", normalized.currency);
-		set["supplierData.otaAmount"] = Number(normalized.amount);
-		set["supplierData.otaAmountSar"] = Number(normalized.totalAmountSar);
+		setIfOtaValue(set, "supplierData.otaCurrency", sourceCurrency);
+		if (sourceAmount > 0) {
+			set["supplierData.otaAmount"] = round2(sourceAmount);
+		}
+		const propertyGross =
+			otaCommercialEvidence?.roles?.guestGross?.propertyAmount;
+		if (
+			propertyGross !== null &&
+			propertyGross !== undefined &&
+			Number.isFinite(Number(propertyGross))
+		) {
+			set["supplierData.otaAmountSar"] = round2(propertyGross);
+		}
 		setIfOtaValue(set, "supplierData.otaSourceCurrency", sourceCurrency);
 		if (sourceAmount > 0) {
 			set["supplierData.otaSourceAmount"] = round2(sourceAmount);
@@ -11883,33 +12455,39 @@ function buildExistingReservationUpdateSet({
 		if (Object.keys(safePaymentSummary).length) {
 			set["supplierData.otaPaymentSummary"] = safePaymentSummary;
 		}
-		if (Number(safePaymentSummary.totalPayoutAmount || 0) > 0) {
-			set["supplierData.otaTotalPayoutSar"] = Number(
-				safePaymentSummary.totalPayoutAmount
-			);
-			set["supplierData.otaExpenseTotalSar"] = Math.max(
-				0,
-				round2(
-					Number(normalized.totalAmountSar || normalized.amount || 0) -
-						Number(safePaymentSummary.totalPayoutAmount || 0)
-				)
-			);
+		const propertyPayout =
+			otaCommercialEvidence?.roles?.hotelPayout?.propertyAmount;
+		const propertyDeduction =
+			otaCommercialEvidence?.roles?.deductionAggregate?.propertyAmount;
+		if (
+			propertyPayout !== null &&
+			propertyPayout !== undefined &&
+			Number.isFinite(Number(propertyPayout))
+		) {
+			set["supplierData.otaTotalPayoutSar"] = round2(propertyPayout);
 		}
-		if (Number(normalized.exchangeRateToSar || 0) > 0) {
+		if (
+			propertyDeduction !== null &&
+			propertyDeduction !== undefined &&
+			Number.isFinite(Number(propertyDeduction))
+		) {
+			set["supplierData.otaExpenseTotalSar"] = round2(propertyDeduction);
+		}
+		if (Number(otaCommercialEvidence?.currencyConversion?.rate || 0) > 0) {
 			set["supplierData.otaExchangeRateToSar"] = Number(
-				normalized.exchangeRateToSar
+				otaCommercialEvidence.currencyConversion.rate
+			);
+			setIfOtaValue(
+				set,
+				"supplierData.otaExchangeRateSource",
+				otaCommercialEvidence?.provenance?.conversion?.sourceType || ""
+			);
+			setIfOtaValue(
+				set,
+				"supplierData.otaAmountConvertedAt",
+				otaCommercialEvidence?.provenance?.conversion?.sourceTimestamp || ""
 			);
 		}
-		setIfOtaValue(
-			set,
-			"supplierData.otaExchangeRateSource",
-			normalized.exchangeRateSource
-		);
-		setIfOtaValue(
-			set,
-			"supplierData.otaAmountConvertedAt",
-			normalized.amountConvertedAt
-		);
 	}
 	if (
 		appliesAuthoritativeRefresh &&
@@ -12703,7 +13281,15 @@ async function applyLiveSarConversion(normalized = {}) {
 			amount,
 			next.currency || "SAR"
 		);
-		next.totalAmountSar = conversion.totalAmountSar;
+		const propertyConversionVerified =
+			conversion.sourceCurrency === "SAR" &&
+			conversion.exchangeRateSource === "identity" &&
+			Math.abs(Number(conversion.exchangeRateToSar) - 1) <= 0.000001;
+		next.propertyCurrency = "SAR";
+		next.propertyConversionVerified = propertyConversionVerified;
+		next.totalAmountSar = propertyConversionVerified
+			? conversion.totalAmountSar
+			: null;
 		next.exchangeRateToSar = conversion.exchangeRateToSar;
 		next.exchangeRateSource = conversion.exchangeRateSource;
 		next.amountConvertedAt = conversion.convertedAt;
@@ -12736,22 +13322,31 @@ async function applyLiveSarConversion(normalized = {}) {
 			summarySourceCurrency === conversion.sourceCurrency &&
 			Number(conversion.exchangeRateToSar || 0) > 0
 		) {
-			const payoutAmountSar = round2(
-				sourcePayoutAmount * Number(conversion.exchangeRateToSar)
-			);
+			const payoutAmountSar = propertyConversionVerified
+				? round2(
+						sourcePayoutAmount * Number(conversion.exchangeRateToSar)
+					  )
+				: null;
 			next.totalPayoutSar = payoutAmountSar;
 			next.netAfterExpensesTotal = payoutAmountSar;
 			next.paymentSummary = {
 				...paymentSummary,
-				totalGuestPaymentAmount: conversion.totalAmountSar,
+				totalGuestPaymentAmount: propertyConversionVerified
+					? conversion.totalAmountSar
+					: null,
 				totalPayoutAmount: payoutAmountSar,
-				currency: "SAR",
+				currency: propertyConversionVerified ? "SAR" : null,
+				propertyCurrency: "SAR",
+				propertyConversionVerified,
 				exchangeRateToSar: conversion.exchangeRateToSar,
 				exchangeRateSource: conversion.exchangeRateSource,
 				amountConvertedAt: conversion.convertedAt,
 			};
 		}
-		if (Array.isArray(next.nightlyPricingSource)) {
+		if (
+			propertyConversionVerified &&
+			Array.isArray(next.nightlyPricingSource)
+		) {
 			const convertedNightlyPricing = convertDirectTripNightlyPricing(
 				next.nightlyPricingSource,
 				{
@@ -14939,34 +15534,6 @@ async function reconcileOtaReservationUnqueued(inputNormalized) {
 		});
 	}
 
-	if (
-		!existing &&
-		hasCompleteCreatePayload &&
-		shouldUseExpediaInboundClientTotalFallback(normalized)
-	) {
-		const fallbackNetTotal = round2(
-			normalized.totalAmountSar || normalized.amount || 0
-		);
-		const fallbackWarning =
-			"Expedia inbound email did not include a captured payout; using the client total as net-after-OTA because Partner Central payout lookup was unavailable.";
-		if (!warnings.includes(fallbackWarning)) warnings.push(fallbackWarning);
-		normalized.warnings = Array.from(
-			new Set([...(normalized.warnings || []), fallbackWarning])
-		);
-		normalized.totalPayoutSar = fallbackNetTotal;
-		normalized.netAfterExpensesTotal = fallbackNetTotal;
-		normalized.otaPayoutFallbackReason =
-			"expedia_inbound_email_partner_central_unavailable";
-		logReconcile("pricing.expedia_inbound_client_total_fallback", {
-			confirmationNumber,
-			provider: normalized.provider || "",
-			paymentCollectionModel: normalized.paymentCollectionModel || "",
-			totalAmountSar: fallbackNetTotal,
-			sourceFrom: normalized.source?.from || "",
-			inboundEmailId: normalized.inboundEmailId || "",
-		});
-	}
-
 	const hotelDetails =
 		independentlyResolvedIncomingHotel ||
 		(await resolveHotel(
@@ -15723,9 +16290,19 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		error.code = "OTA_INBOUND_AMBIGUOUS_MULTI_ROOM";
 		throw error;
 	}
-	const totalAmountSar = round2(
-		normalized.totalAmountSar || normalized.amount || 0
+	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
+		.trim()
+		.toUpperCase();
+	const otaCommercialEvidence = buildNormalizedOtaCommercialEvidence(
+		normalized,
+		{ propertyCurrency }
 	);
+	const normalizedForPricing = {
+		...normalized,
+		propertyCurrency,
+		...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
+	};
+	const totalAmountSar = verifiedPropertyGuestGrossSar(normalizedForPricing);
 	const providerLabel =
 		normalized.bookingSource ||
 		(normalized.providerLabel && normalized.providerLabel !== "unknown"
@@ -15755,19 +16332,25 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		paymentSummary.exchangeRateSource ||
 		normalized.exchangeRateSource ||
 		"";
-	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
-	const otaCommissionSar = verifiedExplicitOtaCommissionSar(normalized);
-	const explicitNetAfterExpenses = round2(
-		normalized.totalPayoutSar ||
-			normalized.netAfterExpensesTotal ||
-			paymentSummary.totalPayoutAmount ||
-			0
-	);
-	const netAfterExpensesTotal =
-		explicitNetAfterExpenses > 0
-			? round2(Math.min(explicitNetAfterExpenses, totalAmountSar || explicitNetAfterExpenses))
-			: defaultOtaReviewNetTotal(totalAmountSar, defaultDeductionRate);
-	const otaExpenseTotal = Math.max(0, round2(totalAmountSar - netAfterExpensesTotal));
+	const otaCommissionSar =
+		otaCommercialEvidence?.roles?.explicitOtaCommission?.propertyAmount ??
+		null;
+	const netAfterExpensesTotal = verifiedPropertyPayoutSar(normalizedForPricing);
+	if (
+		totalAmountSar !== null &&
+		netAfterExpensesTotal !== null &&
+		netAfterExpensesTotal > totalAmountSar + 0.02
+	) {
+		const error = new RangeError(
+			"Verified OTA payout exceeds verified guest gross."
+		);
+		error.code = "OTA_COMMERCIAL_PAYOUT_EXCEEDS_GROSS";
+		throw error;
+	}
+	const otaExpenseTotal =
+		totalAmountSar !== null && netAfterExpensesTotal !== null
+			? Math.max(0, round2(totalAmountSar - netAfterExpensesTotal))
+			: null;
 	const roomCount = Math.max(1, Math.floor(Number(normalized.roomCount || 1)));
 	const dateRange = generateDateRange(
 		normalized.checkinDate,
@@ -15777,11 +16360,14 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		dateRange.length ||
 		calculateDaysOfResidence(normalized.checkinDate, normalized.checkoutDate);
 	const slots = Math.max(1, dateRange.length * roomCount);
-	const clientSlots = allocateAmountAcrossSlots(totalAmountSar, slots);
-	const netSlots = allocateAmountAcrossSlots(
-		netAfterExpensesTotal || totalAmountSar,
-		slots
-	);
+	const clientSlots =
+		totalAmountSar === null
+			? Array(slots).fill(null)
+			: allocateAmountAcrossSlots(totalAmountSar, slots);
+	const netSlots =
+		netAfterExpensesTotal === null
+			? Array(slots).fill(null)
+			: allocateAmountAcrossSlots(netAfterExpensesTotal, slots);
 	let slotIndex = 0;
 	const roomDisplayName =
 		normalizeWhitespace(normalized.roomName || "") || "Unmapped OTA room";
@@ -15790,8 +16376,12 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		const pricingByDay = dateRange.map((ymd) => {
 			const currentSlot = slotIndex;
 			slotIndex += 1;
-			const clientPrice = round2(clientSlots[currentSlot] || 0);
-			const netAfterExpenses = round2(netSlots[currentSlot] || clientPrice);
+			const clientPrice =
+				totalAmountSar === null ? null : round2(clientSlots[currentSlot]);
+			const netAfterExpenses =
+				netAfterExpensesTotal === null
+					? null
+					: round2(netSlots[currentSlot]);
 			return {
 				date: ymd,
 				price: clientPrice,
@@ -15803,26 +16393,33 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 				totalPriceWithoutCommission: 0,
 				netAfterExpenses,
 				netAfterOtaExpenses: netAfterExpenses,
-				otaExpenseAmount: Math.max(0, round2(clientPrice - netAfterExpenses)),
-				platformMargin: 0,
-				platformMarginRate: 0,
+				otaExpenseAmount:
+					clientPrice !== null && netAfterExpenses !== null
+						? Math.max(0, round2(clientPrice - netAfterExpenses))
+						: null,
+				platformMargin: null,
+				platformMarginRate: null,
 			};
 		});
 		return {
 			room_type: mappedRoomType,
 			displayName: roomDisplayName,
 			chosenPrice:
-				daysOfResidence > 0
+				totalAmountSar !== null && daysOfResidence > 0
 					? round2(totalAmountSar / Math.max(1, daysOfResidence * roomCount))
-					: totalAmountSar,
+					: null,
 			count: 1,
 			pricingByDay,
-			totalPriceWithCommission: round2(
-				pricingByDay.reduce(
-					(sum, day) => sum + Number(day.totalPriceWithCommission || 0),
-					0
-				)
-			),
+			totalPriceWithCommission:
+				totalAmountSar === null
+					? null
+					: round2(
+							pricingByDay.reduce(
+								(sum, day) =>
+									sum + Number(day.totalPriceWithCommission),
+								0
+							)
+						  ),
 			hotelShouldGet: 0,
 		};
 	});
@@ -15877,7 +16474,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		sub_total: 0,
 		total_rooms: roomCount,
 		total_amount: totalAmountSar,
-		currency: "SAR",
+		currency: propertyCurrency,
 		checkin_date: normalized.checkinDate,
 		checkout_date: normalized.checkoutDate,
 		days_of_residence: daysOfResidence,
@@ -15902,10 +16499,16 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			rootTotal: 0,
 			netAfterExpensesTotal,
 			otaExpenseTotal,
-			platformMarginTotal: 0,
+			platformMarginTotal: null,
 			commissionAmount: 0,
-			defaultDeductionRate,
-			defaultDeductionApplied: explicitNetAfterExpenses <= 0,
+			defaultDeductionRate: null,
+			defaultDeductionApplied: false,
+			commercialResolution:
+				totalAmountSar !== null && netAfterExpensesTotal !== null
+					? "verified"
+					: totalAmountSar !== null || netAfterExpensesTotal !== null
+						? "partial"
+						: "unresolved",
 			source: automationSource,
 			provider: normalized.provider,
 			providerLabel,
@@ -15932,13 +16535,13 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			source: automationSource,
 			provider: normalized.provider,
 			providerLabel,
-			currency: "SAR",
+			currency: propertyCurrency,
 			clientTotal: totalAmountSar,
 			hotelVisibleAmount: 0,
 			netAfterExpenses: netAfterExpensesTotal,
 			netAfterOtaExpenses: netAfterExpensesTotal,
 			otaExpenseTotal,
-			platformProfit: 0,
+			platformProfit: null,
 			commissionAmount: 0,
 			otaCommissionAmount: otaCommissionSar,
 			otaDeductionBreakdown: normalized.otaDeductionComponents || [],
@@ -15965,6 +16568,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		},
 		supplierData: {
 			supplierName: providerLabel,
+			...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
 			suppliedBookingNo: normalized.confirmationNumber,
 			otaConfirmationNumber: normalized.confirmationNumber,
 			platformConfirmationNumber: normalized.confirmationNumber,
@@ -15990,7 +16594,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaGuestNotes: guestComment,
 			otaNationality: normalized.nationality || "",
 			otaCurrency: normalized.currency || "",
-			otaAmount: normalized.amount || 0,
+			otaAmount: sourceAmount || null,
 			otaAmountSar: totalAmountSar,
 			otaSourceCurrency: sourceCurrency,
 			otaSourceAmount: round2(sourceAmount),
@@ -16007,7 +16611,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaDeductionComponents: normalized.otaDeductionComponents || [],
 			targetedPromotionsLabelPresent:
 				normalized.targetedPromotionsLabelPresent === true,
-			otaPlatformMarginSar: 0,
+			otaPlatformMarginSar: null,
 			otaExchangeRateToSar: normalized.exchangeRateToSar || 0,
 			otaExchangeRateSource: normalized.exchangeRateSource || "",
 			otaAmountConvertedAt: normalized.amountConvertedAt || "",

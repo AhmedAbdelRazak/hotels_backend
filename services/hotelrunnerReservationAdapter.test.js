@@ -30,6 +30,10 @@ const {
 	validateReservationOtaIdentityConsistency,
 } = require("./otaReservationMapper");
 const {
+	buildAuthenticatedProviderCommercialEvidence,
+	validateOtaCommercialEvidence,
+} = require("./otaCommercialEvidence");
+const {
 	isOtaPlatformReviewPending,
 	validateOtaPlatformReviewActionState,
 } = require("./otaReservationVisibility");
@@ -517,7 +521,116 @@ test("local root pricing uses the exact date, preserves zero fallback, and never
 	assert.equal(localRootPriceCents({ defaultCost: 0 }, "2026-08-12"), 0);
 });
 
-test("multi-room projection uses explicit local mappings and allocates the client total exactly", () => {
+test("Expedia HotelRunner USD total stays unresolved while six PMS root nights remain SAR 534", () => {
+	const dates = ["05", "06", "07", "08", "09", "10"].map(
+		(day) => `2026-10-${day}`
+	);
+	const normalized = {
+		messageUid: "exact-expedia-hotelrunner-event",
+		hotelRunnerReservationId: "40371346",
+		hrNumber: "R166595975",
+		providerNumber: "2530158461",
+		channel: "expedia",
+		channelDisplay: "Expedia",
+		sourceDisplay: "Expedia",
+		state: "confirmed",
+		guestName: "Redacted Guest",
+		checkinDate: "2026-10-05",
+		checkoutDate: "2026-10-11",
+		bookedAt: new Date("2026-08-09T03:00:00.000Z"),
+		sourceUpdatedAt: new Date("2026-08-09T03:01:00.000Z"),
+		payloadHash:
+			"4783f5ad70a7df6c6c432d7179b044a4045d6c555d31d7d13bada059b9fef01d",
+		currency: "USD",
+		totalCents: 11292,
+		extrasTotalCents: 0,
+		taxTotalCents: 0,
+		paidAmountCents: 11292,
+		totalGuests: 2,
+		paymentMethod: "Bank Transfer",
+		rooms: [
+			{
+				roomId: "hotelrunner-room-exact",
+				invCode: "INV-EXACT",
+				name: "Double Room",
+				namePresentation: "Double Room / Room Only",
+				adults: 2,
+				children: 0,
+				dailyPrices: dates.map((date) => ({
+					date,
+					priceCents: 1882,
+				})),
+			},
+		],
+	};
+	const roomDetails = {
+		_id: LOCAL_DOUBLE_ID,
+		roomType: "doubleRooms",
+		displayName: "Double Room",
+		defaultCost: 89,
+		pricingRate: dates.map((calendarDate) => ({
+			calendarDate,
+			rootPrice: 89,
+		})),
+	};
+	const pricing = buildPickedRoomsProjection(
+		normalized,
+		[
+			{
+				sourceRoom: normalized.rooms[0],
+				mapping: { invCode: "INV-EXACT", status: "active" },
+				roomDetails,
+			},
+		],
+		null,
+		{ propertyCurrency: "SAR" }
+	);
+
+	assert.equal(pricing.ok, true);
+	assert.equal(pricing.clientTotal, null);
+	assert.equal(pricing.sourceTotal, 112.92);
+	assert.equal(pricing.rootTotal, 534);
+	assert.ok(
+		pricing.pickedRooms[0].pricingByDay.every(
+			(day) =>
+				day.rootPrice === 89 &&
+				day.clientPrice === null &&
+				day.netAfterExpenses === null &&
+				day.hotelRunnerSourcePrice === 18.82
+		)
+	);
+
+	const document = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "event-exact-expedia" },
+		hotel: {
+			_id: "6a40b6a1a6efe70450536038",
+			belongsTo: "64b000000000000000000002",
+			currency: "SAR",
+		},
+		pricing,
+		confirmationNumber: "7255791395",
+		reservationMongoId: "6a77efde7735a50431e27126",
+	});
+	assert.equal(document.sub_total, 534);
+	assert.equal(document.total_amount, null);
+	assert.equal(document.adminPricing.clientTotal, null);
+	assert.equal(document.adminPricing.netAfterExpensesTotal, null);
+	assert.equal(
+		document.supplierData.otaCommercialEvidence.hotelRunnerReportedAmount.amount,
+		112.92
+	);
+	assert.equal(
+		document.supplierData.otaCommercialEvidence.hotelRunnerReportedAmount.role,
+		"unknown"
+	);
+	assert.equal(
+		document.supplierData.otaCommercialEvidence.roles.hotelBase.verified,
+		false
+	);
+});
+
+test("multi-room projection preserves source allocation without assigning an external OTA role", () => {
 	const normalized = normalizedMultiRoom();
 	assert.deepEqual(normalized.issues, []);
 	const pricing = buildPickedRoomsProjection(
@@ -526,7 +639,9 @@ test("multi-room projection uses explicit local mappings and allocates the clien
 	);
 
 	assert.equal(pricing.ok, true);
-	assert.equal(pricing.clientTotal, 100.01);
+	assert.equal(pricing.clientTotal, null);
+	assert.equal(pricing.sourceTotal, 100.01);
+	assert.equal(pricing.amountRole, "unknown");
 	assert.equal(pricing.rootTotal, 261);
 	assert.equal(pricing.pickedRooms.length, 2);
 	assert.deepEqual(
@@ -544,14 +659,13 @@ test("multi-room projection uses explicit local mappings and allocates the clien
 		pricing.pickedRooms.flatMap((room) =>
 			room.pricingByDay.map((day) => day.totalPriceWithCommission)
 		),
-		[10.01, 20, 30, 40]
+		[null, null, null, null]
 	);
-	assert.equal(
-		pricing.pickedRooms.reduce(
-			(sum, room) => sum + room.totalPriceWithCommission,
-			0
+	assert.deepEqual(
+		pricing.pickedRooms.flatMap((room) =>
+			room.pricingByDay.map((day) => day.hotelRunnerSourcePrice)
 		),
-		100.01
+		[100, 200, 300, 400]
 	);
 	assert.deepEqual(
 		pricing.pickedRooms[0].pricingByDay.map((day) => day.rootPrice),
@@ -626,7 +740,9 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	assert.equal(document.otaIdentityKey, "booking:booking-101");
 	assert.equal(document.otaCrossTransportIdentityKey, undefined);
 	assert.equal(document.total_rooms, 2);
-	assert.equal(document.total_amount, 100.01);
+	assert.equal(document.total_amount, null);
+	assert.equal(document.extras_total, null);
+	assert.equal(document.tax_total, null);
 	assert.equal(document.financeStatus, "not paid");
 	assert.equal(document.paid_amount, 0);
 	assert.equal(document.payment_details.captured, false);
@@ -681,6 +797,18 @@ test("new PMS documents keep HotelRunner-reported payments informational and loc
 	);
 	assert.equal(document.supplierData.otaSourceAuthority, 4);
 	assert.equal(document.supplierData.otaProvider, "booking");
+	assert.equal(document.adminPricing.sourceAmount, 100.01);
+	assert.equal(document.adminPricing.hotelRunnerAmountRole, "unknown");
+	assert.equal(
+		validateOtaCommercialEvidence(
+			document.supplierData.otaCommercialEvidence
+		).ok,
+		true
+	);
+	assert.equal(
+		document.supplierData.otaCommercialEvidence.hotelRunnerReportedAmount.role,
+		"unknown"
+	);
 	assert.equal(
 		document.supplierData.otaAutomationPipeline,
 		"hotelrunner-background-worker"
@@ -2484,6 +2612,105 @@ test("HotelRunner preserves verified email payout evidence until provider or gro
 	);
 });
 
+test("a descriptive HotelRunner update preserves valid common-only authenticated commercial evidence", async () => {
+	const system = createInMemoryProjectionSystem();
+	const initial = normalizedMultiRoom();
+	assert.equal(
+		(
+			await projectHotelRunnerReservation(
+				{
+					normalized: initial,
+					event: { payload: initial.storedPayload },
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			)
+		).status,
+		"created"
+	);
+	const reservation = system.reservations[0];
+	const commonEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "booking",
+		authenticatedProvider: "booking",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_provider_api",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "b".repeat(64),
+		sourceTimestamp: "2026-08-06T11:15:00.000Z",
+		sourceId: "booking-common-only-descriptive-test",
+		guestGross: { verified: true, amount: 100.01 },
+		hotelPayout: { verified: true, amount: 85.01 },
+	});
+	delete reservation.supplierData.hotelRunnerEmailCommercialEvidence;
+	reservation.supplierData.otaCommercialEvidence = commonEvidence;
+	reservation.supplierData.otaCommercialEvidenceStaleReason = "";
+	reservation.supplierData.otaPaymentSummary = {
+		sourceCurrency: "SAR",
+		sourceTotalGuestPaymentAmount: 100.01,
+		sourceTotalPayoutAmount: 85.01,
+		totalGuestPaymentAmount: 100.01,
+		totalPayoutAmount: 85.01,
+		currency: "SAR",
+		exchangeRateToSar: 1,
+	};
+	reservation.supplierData.otaTotalPayoutSar = 85.01;
+	reservation.supplierData.otaExpenseTotalSar = 15;
+	reservation.supplierData.otaPayoutFallbackReason = "";
+	reservation.total_amount = 100.01;
+	reservation.adminPricing.clientTotal = 100.01;
+	reservation.adminPricing.netAfterExpensesTotal = 85.01;
+	reservation.adminPricing.otaExpenseTotal = 15;
+	reservation.adminPricing.commercialVerified = true;
+	reservation.adminPricing.payoutFallbackReason = "";
+	reservation.ota_financial_summary.clientTotal = 100.01;
+	reservation.ota_financial_summary.netAfterExpenses = 85.01;
+	reservation.ota_financial_summary.netAfterOtaExpenses = 85.01;
+	reservation.ota_financial_summary.otaExpenseTotal = 15;
+	reservation.ota_financial_summary.commercialVerified = true;
+	reservation.ota_financial_summary.payoutFallbackReason = "";
+	reservation.ota_financial_summary.show = true;
+
+	const descriptive = normalizedMultiRoom({
+		message_uid: "adapter-common-only-descriptive",
+		modified: true,
+		updated_at: "2026-08-06T12:00:00.000Z",
+		guest: "Updated Descriptive Guest",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: descriptive,
+			event: { payload: descriptive.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.commercialEvidenceStale, false);
+	assert.equal(result.attentionCode, "");
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidence.evidenceHash,
+		commonEvidence.evidenceHash
+	);
+	assert.equal(validateOtaCommercialEvidence(
+		reservation.supplierData.otaCommercialEvidence
+	).ok, true);
+	assert.equal(reservation.supplierData.otaCommercialEvidenceStaleReason, "");
+	assert.equal(reservation.supplierData.otaCommercialEvidencePrevious, undefined);
+	assert.equal(reservation.total_amount, 100.01);
+	assert.equal(reservation.adminPricing.netAfterExpensesTotal, 85.01);
+	assert.equal(reservation.adminPricing.otaExpenseTotal, 15);
+	assert.equal(reservation.adminPricing.commercialVerified, true);
+	assert.equal(reservation.ota_financial_summary.show, true);
+	assert.equal(reservation.ota_financial_summary.commercialVerified, true);
+	assert.equal(reservation.supplierData.otaPayoutFallbackReason, "");
+});
+
 test("finance-protected gross changes stale payout evidence without overwriting money", async () => {
 	const system = createInMemoryProjectionSystem();
 	const initial = normalizedMultiRoom();
@@ -2620,6 +2847,22 @@ test("critical conflicts hide stale payout evidence while preserving protected f
 	);
 	const reservation = system.reservations[0];
 	attachVerifiedHotelRunnerEmailCommercialEvidence(reservation);
+	const authenticatedCommonEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "booking",
+		authenticatedProvider: "booking",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_provider_api",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "a".repeat(64),
+		sourceTimestamp: "2026-08-06T12:00:00.000Z",
+		sourceId: "booking-commercial-critical-test",
+		guestGross: { verified: true, amount: 100.01 },
+		hotelPayout: { verified: true, amount: 85.01 },
+	});
+	reservation.supplierData.otaCommercialEvidence = authenticatedCommonEvidence;
 	reservation.paypal_details = { captured_total_usd: 100.01 };
 	const protectedNet = reservation.adminPricing.netAfterExpensesTotal;
 	const protectedExpense = reservation.adminPricing.otaExpenseTotal;
@@ -2678,6 +2921,28 @@ test("critical conflicts hide stale payout evidence while preserving protected f
 	assert.equal(
 		reservation.supplierData.hotelRunnerEmailCommercialEvidence,
 		null
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidencePrevious.evidenceHash,
+		authenticatedCommonEvidence.evidenceHash
+	);
+	assert.equal(
+		validateOtaCommercialEvidence(
+			reservation.supplierData.otaCommercialEvidence
+		).ok,
+		true
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidence.sourceType,
+		"hotelrunner_webhook"
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidence.verificationState,
+		"unresolved"
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidenceStaleReason,
+		"hotelrunner_stay_or_room_changed"
 	);
 	assert.equal(
 		reservation.reservationAuditLog.at(-1).action,

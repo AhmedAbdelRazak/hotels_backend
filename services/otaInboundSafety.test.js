@@ -4,6 +4,7 @@ process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const InboundEmail = require("../models/inbound_email");
@@ -73,6 +74,14 @@ const {
 	wouldReopenTerminalOtaReservation,
 } = require("./otaReservationMapper");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
+const {
+	validateOtaCommercialEvidence,
+} = require("./otaCommercialEvidence");
+
+const immutableFixtureTextHash = (...parts) =>
+	createHash("sha256")
+		.update(parts.map((part) => String(part ?? "")).join("\n"), "utf8")
+		.digest("hex");
 
 const HOTEL_ROOMS = [
 	{ roomType: "doubleRooms", displayName: "Double Room", activeRoom: true },
@@ -1612,7 +1621,7 @@ test("privacy redaction preserves labeled OTA identities but still removes card 
 	assert.equal(isWeakOtaConfirmationValue("1651516732730092"), false);
 });
 
-test("direct Trip.com templates extract authoritative identity, stay, pricing, and prepaid facts", () => {
+test("direct Trip.com templates retain authenticated source pricing without canonicalizing fallback FX", () => {
 	const nightlySourceRows = [
 		["Aug 26", "16.06", "15.17"],
 		["Aug 27", "16.06", "15.17"],
@@ -1632,6 +1641,13 @@ test("direct Trip.com templates extract authoritative identity, stay, pricing, a
 		from: 'Trip.com <ebooking@trip.com>',
 		to: "ota@example.com",
 		subject: "Booking no. # 1651516732730092 #",
+		messageId: "trip-1651516732730092@mail.trip.com",
+		sourceReceivedAt: "2026-08-01T10:00:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "trip",
+			method: "dkim",
+		},
 		text: [
 			"Booking no. # 1651516732730092 #",
 			"Zad Ajyad Hotel",
@@ -1666,6 +1682,9 @@ test("direct Trip.com templates extract authoritative identity, stay, pricing, a
 	assert.equal(normalized.roomCount, 1);
 	assert.equal(normalized.sourceAmount, 97.9);
 	assert.equal(normalized.sourceCurrency, "USD");
+	assert.equal(normalized.trustedTransportProvider, "trip");
+	assert.equal(normalized.sourceSenderAuthenticated, true);
+	assert.match(normalized.source.textHash, /^[a-f0-9]{64}$/);
 	assert.equal(normalized.totalAmountSar, 367.13);
 	assert.equal(normalized.totalPayoutSar, 346.72);
 	assert.deepEqual(
@@ -1703,27 +1722,55 @@ test("direct Trip.com templates extract authoritative identity, stay, pricing, a
 	assert.equal(built.ok, true);
 	assert.deepEqual(
 		built.document.pickedRoomsType[0].pricingByDay.map((row) => row.clientPrice),
-		[60.23, 60.23, 60.23, 60.22, 63.11, 63.11]
+		[null, null, null, null, null, null]
 	);
 	assert.deepEqual(
 		built.document.pickedRoomsType[0].pricingByDay.map(
 			(row) => row.netAfterExpenses
 		),
-		[56.89, 56.89, 56.89, 56.89, 59.58, 59.58]
+		[null, null, null, null, null, null]
 	);
-	assert.equal(built.document.total_amount, 367.13);
+	assert.equal(built.document.total_amount, null);
 	assert.equal(built.document.sub_total, 450);
-	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 346.72);
-	assert.equal(built.document.adminPricing.otaExpenseTotal, 20.41);
-	assert.equal(built.document.adminPricing.platformMarginTotal, -103.28);
-	assert.equal(built.document.payment, "paid online");
-	assert.equal(built.document.financeStatus, "paid online");
+	assert.equal(built.document.adminPricing.clientTotal, null);
+	assert.equal(built.document.adminPricing.netAfterExpensesTotal, null);
+	assert.equal(built.document.adminPricing.otaExpenseTotal, null);
+	assert.equal(built.document.adminPricing.platformMarginTotal, null);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.guestGross
+			.sourceAmount,
+		97.9
+	);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.guestGross
+			.propertyAmount,
+		null
+	);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.hotelPayout
+			.sourceAmount,
+		92.46
+	);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.hotelPayout
+			.propertyAmount,
+		null
+	);
+	assert.equal(built.document.payment, "ota collect - amount unavailable");
+	assert.equal(built.document.financeStatus, "commercial review required");
 });
 
-test("one-night direct Trip.com pricing keeps exact guest total, payout, and root price", () => {
+test("one-night direct Trip.com pricing keeps source evidence and root price while fallback FX stays non-canonical", () => {
 	const normalized = extractNormalizedReservation({
 		from: "Trip.com <ebooking@trip.com>",
 		subject: "Booking no. # 1167731616604825 #",
+		messageId: "trip-1167731616604825@mail.trip.com",
+		sourceReceivedAt: "2026-08-01T10:05:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "trip",
+			method: "dkim",
+		},
 		text: [
 			"Booking no. # 1167731616604825 #",
 			"Zad Ajyad Hotel",
@@ -1771,11 +1818,27 @@ test("one-night direct Trip.com pricing keeps exact guest total, payout, and roo
 		],
 	});
 	assert.equal(built.ok, true);
-	assert.equal(built.document.total_amount, 60.22);
+	assert.equal(built.document.total_amount, null);
 	assert.equal(built.document.sub_total, 75);
-	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 56.89);
-	assert.equal(built.document.adminPricing.otaExpenseTotal, 3.33);
-	assert.equal(built.document.adminPricing.platformMarginTotal, -18.11);
+	assert.equal(built.document.adminPricing.clientTotal, null);
+	assert.equal(built.document.adminPricing.netAfterExpensesTotal, null);
+	assert.equal(built.document.adminPricing.otaExpenseTotal, null);
+	assert.equal(built.document.adminPricing.platformMarginTotal, null);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.guestGross
+			.sourceAmount,
+		16.06
+	);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.guestGross
+			.propertyAmount,
+		null
+	);
+	assert.equal(
+		built.document.supplierData.otaCommercialEvidence.roles.hotelPayout
+			.sourceAmount,
+		15.17
+	);
 });
 
 test("conflicting explicit Trip.com identities fail closed without selecting either booking", () => {
@@ -4603,7 +4666,7 @@ test("exchange-rate requests have a hard queue-safe timeout", async () => {
 	assert.ok(Date.now() - startedAt < 500);
 });
 
-test("HotelRunner Agoda VCC pricing uses the order total and current card balance", () => {
+test("HotelRunner Agoda VCC pricing retains reported amounts without assigning canonical commercial roles", () => {
 	const normalized = extractNormalizedReservation(hotelRunnerAgodaVccEmail);
 
 	assert.equal(normalized.provider, "agoda");
@@ -4636,14 +4699,18 @@ test("HotelRunner Agoda VCC pricing uses the order total and current card balanc
 	});
 
 	assert.equal(built.ok, true);
-	assert.equal(built.document.total_amount, 44);
+	assert.equal(built.document.total_amount, null);
 	assert.equal(built.document.sub_total, 75);
-	assert.equal(built.document.adminPricing.clientTotal, 44);
+	assert.equal(built.document.adminPricing.clientTotal, null);
 	assert.equal(built.document.adminPricing.rootTotal, 75);
-	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 44);
-	assert.equal(built.document.adminPricing.otaExpenseTotal, 0);
-	assert.equal(built.document.adminPricing.platformMarginTotal, -31);
+	assert.equal(built.document.adminPricing.netAfterExpensesTotal, null);
+	assert.equal(built.document.adminPricing.otaExpenseTotal, null);
+	assert.equal(built.document.adminPricing.platformMarginTotal, null);
 	assert.equal(built.document.adminPricing.defaultDeductionApplied, false);
+	assert.equal(built.document.supplierData.otaSourceCurrency, "SAR");
+	assert.equal(built.document.supplierData.otaSourceAmount, 44);
+	assert.equal(built.document.supplierData.otaAmountSar, null);
+	assert.equal(built.document.supplierData.otaCommercialEvidence, undefined);
 	assert.equal(built.document.payment, "credit/ debit");
 	assert.equal(built.document.financeStatus, "not paid");
 	assert.equal(built.document.paid_amount, 0);
@@ -5600,6 +5667,13 @@ test("the production Agoda six-person template keeps exact identity, room, and p
 		from: '"agoda.com" <no-reply@agoda.com>',
 		subject:
 			"Agoda Booking ID 682028095 - CONFIRMED Hotel Country: Saudi Arabia Check-in July 23, 2026 / Language_English",
+		messageId: "agoda-682028095@mail.agoda.com",
+		sourceReceivedAt: "2026-07-22T18:00:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "agoda",
+			method: "dkim",
+		},
 		text: [
 			"Booking ID 682028095 Reservation Information",
 			"PREPAID Booking confirmation",
@@ -6006,6 +6080,275 @@ test("Airbnb two-column stay dates and guest totals remain source-backed", () =>
 	);
 });
 
+const authenticatedAirbnbCommercialEmail = ({
+	confirmationNumber = "HMSAFEMONEY1",
+	guestTotal = "100.00",
+	payout = "80.00",
+	payoutCurrency = "SAR",
+	includePayout = true,
+} = {}) => ({
+	from: "Airbnb <automated@airbnb.com>",
+	to: "reservations@example.com",
+	subject: "Reservation confirmed - Commercial Evidence Guest arrives Aug 20",
+	messageId: `airbnb-${confirmationNumber}@mail.airbnb.com`,
+	sourceReceivedAt: "2026-08-08T10:00:00.000Z",
+	senderAuthentication: {
+		authenticatedAligned: true,
+		trustedProvider: "airbnb",
+		method: "dkim",
+	},
+	text: [
+		"Commercial Evidence Guest",
+		"Identity verified",
+		"DOUBLE ROOM - AJYAD HOTEL - FREE BUS",
+		"Room",
+		"Check-in Checkout",
+		"Thu, Aug 20 Fri, Aug 21",
+		"Guests",
+		"2 adults",
+		"Confirmation code",
+		confirmationNumber,
+		"Total (SAR)",
+		`SAR ${guestTotal}`,
+		"Host service fee (10%)",
+		`-SAR 10.00`,
+		...(includePayout ? ["You earn", `${payoutCurrency} ${payout}`] : []),
+	].join("\n"),
+});
+
+test("authenticated Agoda gross without payout keeps the payout role unavailable instead of synthesizing zero", () => {
+	const voucher = authenticatedAgodaCommercialVoucher({
+		bookingId: "687799901",
+		checkin: "August 20, 2026",
+		checkout: "August 21, 2026",
+		roomName: "Double Room",
+		adults: 2,
+		nightly: [],
+		gross: "100.00",
+		net: "80.00",
+		commission: "10.00",
+		growthProgram: "5.00",
+		taxOnCommission: "1.00",
+	});
+	const normalized = {
+		...extractNormalizedReservation({
+			...voucher,
+			text: voucher.text
+				.split("\n")
+				.filter((line) => !/^Net rate \(incl\. taxes & fees\)/i.test(line))
+				.join("\n"),
+		}),
+		inboundEmailId: "audit-agoda-gross-without-payout",
+	};
+
+	assert.equal(normalized.totalAmountSar, 100);
+	assert.equal(normalized.totalPayoutSar, null);
+	assert.equal(normalized.netAfterExpensesTotal, null);
+	assert.equal(normalized.sourcePayoutAmount, null);
+	assert.equal(normalized.sourcePayoutCurrency, "");
+	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, null);
+	assert.equal(normalized.paymentSummary.totalPayoutAmount, null);
+
+	const evidence = buildExistingReservationUpdateSet({ normalized })[
+		"supplierData.otaCommercialEvidence"
+	];
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+	assert.equal(evidence.verificationState, "partial");
+	assert.equal(evidence.roles.guestGross.verified, true);
+	assert.equal(evidence.roles.guestGross.propertyAmount, 100);
+	assert.equal(evidence.roles.hotelPayout.verified, false);
+	assert.equal(evidence.roles.hotelPayout.sourceAmount, null);
+	assert.equal(evidence.roles.hotelPayout.propertyAmount, null);
+	assert.equal(evidence.roles.deductionAggregate.verified, false);
+	assert.equal(evidence.roles.deductionAggregate.sourceAmount, null);
+});
+
+test("authenticated Airbnb gross without payout keeps the payout role unavailable instead of synthesizing zero", () => {
+	const normalized = {
+		...extractNormalizedReservation(
+			authenticatedAirbnbCommercialEmail({
+				confirmationNumber: "HMSAFEMONEY2",
+				includePayout: false,
+			})
+		),
+		inboundEmailId: "audit-airbnb-gross-without-payout",
+	};
+
+	assert.equal(normalized.totalAmountSar, 100);
+	assert.equal(normalized.totalPayoutSar, null);
+	assert.equal(normalized.netAfterExpensesTotal, null);
+	assert.equal(normalized.sourcePayoutAmount, null);
+	assert.equal(normalized.sourcePayoutCurrency, "");
+	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, null);
+	assert.equal(normalized.paymentSummary.totalPayoutAmount, null);
+
+	const evidence = buildExistingReservationUpdateSet({ normalized })[
+		"supplierData.otaCommercialEvidence"
+	];
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+	assert.equal(evidence.verificationState, "partial");
+	assert.equal(evidence.roles.guestGross.verified, true);
+	assert.equal(evidence.roles.guestGross.propertyAmount, 100);
+	assert.equal(evidence.roles.hotelPayout.verified, false);
+	assert.equal(evidence.roles.hotelPayout.sourceAmount, null);
+	assert.equal(evidence.roles.hotelPayout.propertyAmount, null);
+	assert.equal(evidence.roles.deductionAggregate.verified, false);
+	assert.equal(evidence.roles.deductionAggregate.sourceAmount, null);
+});
+
+test("authenticated Agoda and Airbnb explicit zero payouts remain verified zero roles", () => {
+	const agodaVoucher = authenticatedAgodaCommercialVoucher({
+		bookingId: "687799902",
+		checkin: "August 20, 2026",
+		checkout: "August 21, 2026",
+		roomName: "Double Room",
+		adults: 2,
+		nightly: [],
+		gross: "100.00",
+		net: "0.00",
+		commission: "10.00",
+		growthProgram: "5.00",
+		taxOnCommission: "1.00",
+	});
+	const cases = [
+		{
+			provider: "agoda",
+			email: agodaVoucher,
+		},
+		{
+			provider: "airbnb",
+			email: authenticatedAirbnbCommercialEmail({
+				confirmationNumber: "HMSAFEMONEY0",
+				payout: "0.00",
+			}),
+		},
+	];
+
+	for (const fixture of cases) {
+		const normalized = {
+			...extractNormalizedReservation(fixture.email),
+			inboundEmailId: `audit-${fixture.provider}-explicit-zero-payout`,
+		};
+		assert.equal(normalized.sourcePayoutAmount, 0, fixture.provider);
+		assert.equal(normalized.sourcePayoutCurrency, "SAR", fixture.provider);
+		assert.equal(normalized.totalPayoutSar, 0, fixture.provider);
+		assert.equal(normalized.netAfterExpensesTotal, 0, fixture.provider);
+		assert.equal(
+			normalized.paymentSummary.sourceTotalPayoutAmount,
+			0,
+			fixture.provider
+		);
+		assert.equal(
+			normalized.paymentSummary.totalPayoutAmount,
+			0,
+			fixture.provider
+		);
+
+		const evidence = buildExistingReservationUpdateSet({ normalized })[
+			"supplierData.otaCommercialEvidence"
+		];
+		assert.equal(validateOtaCommercialEvidence(evidence).ok, true, fixture.provider);
+		assert.equal(evidence.verificationState, "verified", fixture.provider);
+		assert.equal(evidence.roles.hotelPayout.verified, true, fixture.provider);
+		assert.equal(evidence.roles.hotelPayout.sourceAmount, 0, fixture.provider);
+		assert.equal(evidence.roles.hotelPayout.propertyAmount, 0, fixture.provider);
+		assert.equal(
+			evidence.roles.deductionAggregate.verified,
+			true,
+			fixture.provider
+		);
+		assert.equal(
+			evidence.roles.deductionAggregate.sourceAmount,
+			100,
+			fixture.provider
+		);
+	}
+});
+
+test("authenticated Agoda and Airbnb currency-mismatched payouts remain raw evidence and cannot create payout or deduction roles", () => {
+	const agodaVoucher = authenticatedAgodaCommercialVoucher({
+		bookingId: "687799903",
+		checkin: "August 20, 2026",
+		checkout: "August 21, 2026",
+		roomName: "Double Room",
+		adults: 2,
+		nightly: [],
+		gross: "100.00",
+		net: "80.00",
+		commission: "10.00",
+		growthProgram: "5.00",
+		taxOnCommission: "1.00",
+	});
+	const cases = [
+		{
+			provider: "agoda",
+			email: {
+				...agodaVoucher,
+				text: agodaVoucher.text.replace(
+					"Net rate (incl. taxes & fees) SAR 80.00",
+					"Net rate (incl. taxes & fees) USD 80.00"
+				),
+			},
+		},
+		{
+			provider: "airbnb",
+			email: authenticatedAirbnbCommercialEmail({
+				confirmationNumber: "HMSAFEMONEY3",
+				payoutCurrency: "USD",
+			}),
+		},
+	];
+
+	for (const fixture of cases) {
+		const normalized = {
+			...extractNormalizedReservation(fixture.email),
+			inboundEmailId: `audit-${fixture.provider}-currency-mismatch`,
+		};
+		assert.equal(normalized.sourceCurrency, "SAR", fixture.provider);
+		assert.equal(normalized.sourceAmount, 100, fixture.provider);
+		assert.equal(normalized.sourcePayoutAmount, 80, fixture.provider);
+		assert.equal(normalized.sourcePayoutCurrency, "USD", fixture.provider);
+		assert.equal(normalized.totalPayoutSar, null, fixture.provider);
+		assert.equal(normalized.netAfterExpensesTotal, null, fixture.provider);
+		assert.equal(
+			normalized.paymentSummary.sourceTotalPayoutAmount,
+			80,
+			fixture.provider
+		);
+		assert.equal(
+			normalized.paymentSummary.sourceTotalPayoutCurrency,
+			"USD",
+			fixture.provider
+		);
+		assert.equal(normalized.paymentSummary.totalPayoutAmount, null, fixture.provider);
+		assert.match(
+			normalized.warnings.join(" "),
+			/guest-total and payout currencies conflict.*source evidence only.*no cross-currency deduction/i,
+			fixture.provider
+		);
+
+		const evidence = buildExistingReservationUpdateSet({ normalized })[
+			"supplierData.otaCommercialEvidence"
+		];
+		assert.equal(validateOtaCommercialEvidence(evidence).ok, true, fixture.provider);
+		assert.equal(evidence.verificationState, "partial", fixture.provider);
+		assert.equal(evidence.roles.guestGross.verified, true, fixture.provider);
+		assert.equal(evidence.roles.guestGross.sourceAmount, 100, fixture.provider);
+		assert.equal(evidence.roles.hotelPayout.verified, false, fixture.provider);
+		assert.equal(evidence.roles.hotelPayout.sourceAmount, null, fixture.provider);
+		assert.equal(
+			evidence.roles.deductionAggregate.verified,
+			false,
+			fixture.provider
+		);
+		assert.equal(
+			evidence.roles.deductionAggregate.sourceAmount,
+			null,
+			fixture.provider
+		);
+	}
+});
+
 test("authenticated standalone AJYAD HOTEL Airbnb bookings map to Zad Ajyad with explicit OTA commission and PMS root pricing", () => {
 	const hotel = {
 		_id: "6a40b6a1a6efe70450536038",
@@ -6291,7 +6634,7 @@ test("HotelRunner Expedia Arabic totals, occupancy, and six-person inventory sta
 	assert.equal(match.matchType, "explicit_capacity");
 });
 
-test("HotelRunner Arabic ISO currencies convert into SAR-only canonical reservation pricing", () => {
+test("HotelRunner Arabic ISO currencies retain foreign source evidence without canonicalizing fallback FX", () => {
 	const normalized = extractNormalizedReservation({
 		from: '"HotelRunner" <noreply@hotelrunner.com>',
 		subject: "Zad AJYAD Hotel - \u062d\u062c\u0632 \u062c\u062f\u064a\u062f #R073513682",
@@ -6332,11 +6675,14 @@ test("HotelRunner Arabic ISO currencies convert into SAR-only canonical reservat
 
 	assert.equal(built.ok, true);
 	assert.equal(built.document.currency, "SAR");
-	assert.equal(built.document.total_amount, 102.1);
+	assert.equal(built.document.total_amount, null);
 	assert.equal(built.document.ota_financial_summary.currency, "SAR");
+	assert.equal(built.document.ota_financial_summary.clientTotal, null);
+	assert.equal(built.document.ota_financial_summary.netAfterExpenses, null);
 	assert.equal(built.document.supplierData.otaSourceCurrency, "AED");
 	assert.equal(built.document.supplierData.otaSourceAmount, 100);
-	assert.equal(built.document.supplierData.otaAmountSar, 102.1);
+	assert.equal(built.document.supplierData.otaAmountSar, null);
+	assert.equal(built.document.supplierData.otaCommercialEvidence, undefined);
 });
 
 test("Arabic HotelRunner multi-room messages retain all occupancy evidence for review", () => {
@@ -6954,7 +7300,19 @@ test("ordinary OTA modifications are staged without overwriting canonical guest 
 	);
 	assert.equal(
 		set["otaPlatformReview.proposedInbound"].pricing.guestTotalSar,
+		null
+	);
+	assert.equal(
+		set["otaPlatformReview.proposedInbound"].pricing.sourceAmount,
 		999
+	);
+	assert.equal(
+		set["otaPlatformReview.proposedInbound"].pricing.sourceCurrency,
+		"SAR"
+	);
+	assert.equal(
+		set["otaPlatformReview.proposedInbound"].pricing.totalPayoutSar,
+		null
 	);
 });
 
@@ -7379,10 +7737,21 @@ test("authoritative refresh requires a built document and never copies placehold
 			},
 			checkin_date: "2026-07-23",
 			checkout_date: "2026-07-24",
-			adminPricing: { clientTotal: 70 },
-			ota_financial_summary: { clientTotal: 70 },
+			total_amount: null,
+			commission_ota: null,
+			adminPricing: { clientTotal: null, netAfterExpensesTotal: null },
+			ota_financial_summary: {
+				clientTotal: null,
+				netAfterExpenses: null,
+			},
 			adminPricingVisibility: { rootOnlyForHotelManagement: true },
-			supplierData: { otaAmountSar: 70 },
+			supplierData: {
+				otaAmountSar: null,
+				otaTotalPayoutSar: null,
+				otaExpenseTotalSar: null,
+				otaPlatformMarginSar: null,
+				otaCommissionSar: null,
+			},
 		},
 	});
 	assert.equal(withDocument["customer_details.name"], "Waqas Khan");
@@ -7390,7 +7759,13 @@ test("authoritative refresh requires a built document and never copies placehold
 	assert.equal(withDocument["customer_details.email"], undefined);
 	assert.equal(withDocument["customer_details.phone"], undefined);
 	assert.equal(withDocument["customer_details.passport"], undefined);
-	assert.equal(withDocument["supplierData.otaAmountSar"], 70);
+	assert.equal(withDocument.total_amount, null);
+	assert.equal(withDocument.commission_ota, null);
+	assert.equal(withDocument["supplierData.otaAmountSar"], null);
+	assert.equal(withDocument["supplierData.otaTotalPayoutSar"], null);
+	assert.equal(withDocument["supplierData.otaExpenseTotalSar"], null);
+	assert.equal(withDocument["supplierData.otaPlatformMarginSar"], null);
+	assert.equal(withDocument["supplierData.otaCommissionSar"], null);
 	assert.equal(withDocument.booking_source, undefined);
 	assert.equal(withDocument["customer_details.booking_source"], undefined);
 });
@@ -7659,6 +8034,7 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 			children: 0,
 			sourceSenderTrusted: true,
 			sourceSenderAuthenticated: true,
+			trustedTransportProvider: "booking",
 			sourcePresence: {
 				confirmationNumber: true,
 				guestName: true,
@@ -7678,6 +8054,13 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 				messageId: "managed-hotel-new-email-message",
 				receivedAt: "2026-08-06T13:00:00.000Z",
 				timestampMethod: "rfc2822_date_header",
+				textHash: immutableFixtureTextHash(
+					"Booking.com authenticated commercial email",
+					"managed-hotel-new-email-message",
+					"MANAGED-NEW-1001",
+					100,
+					80
+				),
 			},
 		});
 		assert.equal(managedCreation.status, "created");
@@ -7687,13 +8070,17 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 		assert.equal(createdDocument.total_rooms, 1);
 		assert.equal(createdDocument.pickedRoomsType[0].room_type, "doubleRooms");
 		assert.equal(createdDocument.supplierData.otaSourceAuthority, 3);
-		assert.ok(
-			verifiedHotelRunnerEmailCommercialEvidence(createdDocument, {
-				provider: "booking",
-				grossTotalSar: 100,
-				currency: "SAR",
-			}),
-			"email-first reservations must carry verified evidence for later HotelRunner handoff"
+		const commercialEvidence =
+			createdDocument.supplierData.otaCommercialEvidence;
+		assert.equal(validateOtaCommercialEvidence(commercialEvidence).ok, true);
+		assert.equal(commercialEvidence.provider, "booking");
+		assert.equal(
+			commercialEvidence.roles.guestGross.propertyAmount,
+			100
+		);
+		assert.equal(
+			commercialEvidence.roles.hotelPayout.propertyAmount,
+			80
 		);
 		assert.equal(writes, 2);
 
@@ -7753,11 +8140,48 @@ const HOTELRUNNER_COMMERCIAL_OWNER_ID = "64b0000000000000000000e1";
 const HOTELRUNNER_COMMERCIAL_ROOM_ID = "64b0000000000000000000f1";
 
 const makeVerifiedHotelRunnerCommercialEmail = (overrides = {}) => {
+	const provider = String(overrides.provider || "booking").toLowerCase();
+	const isAgoda = provider === "agoda";
+	const basePaymentSummary = {
+		sourceCurrency: "SAR",
+		sourceTotalGuestPaymentAmount: 100,
+		sourceTotalPayoutAmount: 80,
+		totalGuestPaymentAmount: 100,
+		totalPayoutAmount: 80,
+		currency: "SAR",
+		exchangeRateToSar: 1,
+	};
+	const baseSourcePresence = {
+		confirmationNumber: true,
+		guestName: true,
+		hotelName: true,
+		roomName: true,
+		checkinDate: true,
+		checkoutDate: true,
+		amount: true,
+		roomCount: true,
+		totalGuests: true,
+		paymentCollectionModel: true,
+		paymentInstructions: true,
+	};
+	const baseSource = {
+		from: isAgoda
+			? "Agoda <no-reply@agoda.com>"
+			: "Booking.com <noreply@booking.com>",
+		subject: isAgoda
+			? "Agoda authenticated commercial confirmation for Zad Ajyad"
+			: "New reservation for Zad Ajyad",
+		messageId: isAgoda
+			? "direct-owned-commercial-message@agoda.com"
+			: "direct-owned-commercial-message",
+		receivedAt: "2026-08-06T15:00:00.000Z",
+		timestampMethod: "rfc2822_date_header",
+	};
 	const normalized = {
 		inboundEmailId: "direct-owned-commercial-email",
-		provider: "booking",
-		providerLabel: "Booking.com",
-		bookingSource: "Booking.com",
+		provider,
+		providerLabel: isAgoda ? "Agoda" : "Booking.com",
+		bookingSource: isAgoda ? "Agoda" : "Booking.com",
 		confirmationNumber: HOTELRUNNER_COMMERCIAL_CONFIRMATION,
 		reservationId: HOTELRUNNER_COMMERCIAL_CONFIRMATION,
 		intent: "new_reservation",
@@ -7777,56 +8201,46 @@ const makeVerifiedHotelRunnerCommercialEmail = (overrides = {}) => {
 		exchangeRateToSar: 1,
 		sourceExchangeRateToSar: 1,
 		paymentCollectionModel: "ota_collect",
-		paymentInstructions: "Booking.com collected by platform",
-		paymentSummary: {
-			sourceCurrency: "SAR",
-			sourceTotalGuestPaymentAmount: 100,
-			sourceTotalPayoutAmount: 80,
-			totalGuestPaymentAmount: 100,
-			totalPayoutAmount: 80,
-			currency: "SAR",
-			exchangeRateToSar: 1,
-		},
+		paymentInstructions: isAgoda
+			? "Agoda collected by platform"
+			: "Booking.com collected by platform",
+		paymentSummary: basePaymentSummary,
 		roomCount: 1,
 		totalGuests: 2,
 		adults: 2,
 		children: 0,
 		sourceSenderTrusted: true,
 		sourceSenderAuthenticated: true,
-		sourcePresence: {
-			confirmationNumber: true,
-			guestName: true,
-			hotelName: true,
-			roomName: true,
-			checkinDate: true,
-			checkoutDate: true,
-			amount: true,
-			roomCount: true,
-			totalGuests: true,
-			paymentCollectionModel: true,
-			paymentInstructions: true,
-		},
-		source: {
-			from: "Booking.com <noreply@booking.com>",
-			subject: "New reservation for Zad Ajyad",
-			messageId: "direct-owned-commercial-message",
-			receivedAt: "2026-08-06T15:00:00.000Z",
-			timestampMethod: "rfc2822_date_header",
-		},
+		trustedTransportProvider: provider,
+		sourcePresence: baseSourcePresence,
+		source: baseSource,
 		...overrides,
 	};
 	normalized.sourcePresence = {
-		...normalized.sourcePresence,
+		...baseSourcePresence,
 		...(overrides.sourcePresence || {}),
 	};
 	normalized.source = {
-		...normalized.source,
+		...baseSource,
 		...(overrides.source || {}),
 	};
 	normalized.paymentSummary = {
-		...normalized.paymentSummary,
+		...basePaymentSummary,
 		...(overrides.paymentSummary || {}),
 	};
+	if (!Object.prototype.hasOwnProperty.call(overrides.source || {}, "textHash")) {
+		normalized.source.textHash = immutableFixtureTextHash(
+			normalized.source.from,
+			normalized.source.subject,
+			normalized.source.messageId,
+			normalized.confirmationNumber,
+			normalized.checkinDate,
+			normalized.checkoutDate,
+			normalized.sourceCurrency,
+			normalized.sourceAmount,
+			normalized.paymentSummary.sourceTotalPayoutAmount
+		);
+	}
 	return normalized;
 };
 
@@ -7971,6 +8385,163 @@ const hotelRunnerCommercialHotel = () => ({
 				? HOTELRUNNER_COMMERCIAL_ROOM_ID
 				: `64b0000000000000000000f${index + 1}`,
 	})),
+});
+
+test("a new authenticated provider contract adds verified PMS hotel-base provenance without dropping provider roles", () => {
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		provider: "agoda",
+		otaCommissionSar: 10,
+		otaCommissionSourceAmount: 10,
+		otaCommissionCurrency: "SAR",
+		otaCommissionSource: "agoda_commission",
+		otaDeductionConflict: false,
+		otaDeductionComponents: [
+			{
+				type: "commission",
+				label: "Commission",
+				amountSar: 10,
+				sourceAmount: 10,
+				currency: "SAR",
+				source: "authenticated_agoda_email",
+			},
+			{
+				type: "growth_program",
+				label: "Agoda Growth Program",
+				amountSar: 5,
+				sourceAmount: 5,
+				currency: "SAR",
+				source: "authenticated_agoda_email",
+			},
+		],
+		sourcePresence: { otaCommission: true },
+	});
+	const hotel = hotelRunnerCommercialHotel();
+	hotel.roomCountDetails[0].pricingRate = ["2026-09-10", "2026-09-11"].map(
+		(calendarDate) => ({ calendarDate, rootPrice: 35, price: 40 })
+	);
+
+	const built = buildReservationDocument(normalized, hotel);
+	assert.equal(built.ok, true);
+	const evidence = built.document.supplierData.otaCommercialEvidence;
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+	assert.equal(evidence.provider, "agoda");
+	assert.equal(evidence.verificationState, "verified");
+	assert.deepEqual(
+		Object.fromEntries(
+			Object.entries(evidence.roles).map(([role, value]) => [
+				role,
+				{
+					verified: value.verified,
+					sourceAmount: value.sourceAmount,
+					propertyAmount: value.propertyAmount,
+				},
+			])
+		),
+		{
+			guestGross: { verified: true, sourceAmount: 100, propertyAmount: 100 },
+			hotelBase: { verified: true, sourceAmount: 70, propertyAmount: 70 },
+			hotelPayout: { verified: true, sourceAmount: 80, propertyAmount: 80 },
+			deductionAggregate: {
+				verified: true,
+				sourceAmount: 20,
+				propertyAmount: 20,
+			},
+			explicitOtaCommission: {
+				verified: true,
+				sourceAmount: 10,
+				propertyAmount: 10,
+			},
+		}
+	);
+	assert.equal(evidence.roles.hotelBase.evidenceType, "pms_source");
+	assert.equal(evidence.roles.hotelBase.sourceRef, "hotelBase");
+	assert.equal(evidence.provenance.primary.provider, "agoda");
+	assert.equal(evidence.provenance.primary.sourceType, "authenticated_ota_email");
+	assert.equal(evidence.provenance.hotelBase.provider, "jannat_pms");
+	assert.equal(evidence.provenance.hotelBase.sourceType, "pms_root_pricing");
+	assert.match(evidence.provenance.hotelBase.sourceHash, /^[a-f0-9]{64}$/);
+	assert.equal(
+		evidence.provenance.hotelBase.sourceId,
+		`pms-root-${HOTELRUNNER_COMMERCIAL_HOTEL_ID}-${HOTELRUNNER_COMMERCIAL_ROOM_ID}`
+	);
+	assert.deepEqual(
+		evidence.deductionComponents.map((component) => ({
+			type: component.componentType,
+			amount: component.amount.sourceAmount,
+		})),
+		[
+			{ type: "commission", amount: 10 },
+			{ type: "growth_program", amount: 5 },
+		]
+	);
+});
+
+test("source-only foreign OTA-collect creation keeps unknown payment and settlement amounts null", () => {
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		provider: "agoda",
+		amount: null,
+		totalAmountSar: null,
+		sourceAmount: 100,
+		sourceCurrency: "USD",
+		totalPayoutSar: null,
+		netAfterExpensesTotal: null,
+		currency: "USD",
+		propertyCurrency: "SAR",
+		propertyConversionVerified: false,
+		exchangeRateToSar: 0,
+		sourceExchangeRateToSar: 0,
+		paymentCollectionModel: "ota_collect",
+		paymentSummary: {
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: 100,
+			sourceTotalPayoutAmount: null,
+			totalGuestPaymentAmount: null,
+			totalPayoutAmount: null,
+			currency: null,
+			propertyCurrency: "SAR",
+			propertyConversionVerified: false,
+			exchangeRateToSar: null,
+		},
+	});
+	const hotel = hotelRunnerCommercialHotel();
+	hotel.roomCountDetails[0].pricingRate = ["2026-09-10", "2026-09-11"].map(
+		(calendarDate) => ({ calendarDate, rootPrice: 35, price: 40 })
+	);
+	const mapped = buildReservationDocument(normalized, hotel);
+	assert.equal(mapped.ok, true);
+	const documents = [
+		["mapped", mapped.document],
+		["unmapped", buildUnmappedOtaReviewReservationDocument(normalized)],
+	];
+
+	for (const [shape, document] of documents) {
+		assert.equal(document.total_amount, null, shape);
+		assert.equal(document.payment, "ota collect - amount unavailable", shape);
+		assert.equal(document.financeStatus, "commercial review required", shape);
+		assert.equal(document.paid_amount, null, shape);
+		assert.equal(
+			document.paid_amount_breakdown.paid_online_other_platforms,
+			null,
+			shape
+		);
+		assert.equal(
+			document.financial_cycle.collectionModel,
+			"provider_collected_unresolved",
+			shape
+		);
+		assert.equal(document.financial_cycle.status, "review_required", shape);
+		assert.equal(document.financial_cycle.pmsCollectedAmount, null, shape);
+		assert.equal(
+			document.financial_cycle.hotelPayoutDue,
+			shape === "mapped" ? null : 0,
+			`${shape}: an unassigned review has a known zero hotel obligation`
+		);
+		const evidence = document.supplierData.otaCommercialEvidence;
+		assert.equal(validateOtaCommercialEvidence(evidence).ok, true, shape);
+		assert.equal(evidence.roles.guestGross.sourceAmount, 100, shape);
+		assert.equal(evidence.roles.guestGross.sourceCurrency, "USD", shape);
+		assert.equal(evidence.roles.guestGross.propertyAmount, null, shape);
+	}
 });
 
 const applyDottedCommercialSet = (reservation, set = {}) => {
@@ -8119,7 +8690,6 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 			"checkin_date",
 			"checkout_date",
 			"total_rooms",
-			"total_amount",
 			"sub_total",
 			"payment",
 			"financeStatus",
@@ -8172,8 +8742,7 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 			null,
 			"the marker cannot preserve pricing when its materialized fields drift"
 		);
-		assert.deepEqual(
-			buildExistingReservationUpdateSet({
+		const generalUpdaterSet = buildExistingReservationUpdateSet({
 				normalized,
 				existing,
 				document: {
@@ -8181,9 +8750,17 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 					total_amount: 1,
 					customer_details: { name: "must-not-apply" },
 				},
-			}),
-			{},
-			"the general email updater must remain closed for a direct-owned record"
+			});
+		assert.deepEqual(
+			Object.keys(generalUpdaterSet),
+			["supplierData.otaCommercialEvidence"],
+			"the general updater may retain immutable evidence but must not mutate reservation or finance fields"
+		);
+		assert.equal(
+			validateOtaCommercialEvidence(
+				generalUpdaterSet["supplierData.otaCommercialEvidence"]
+			).ok,
+			true
 		);
 	} finally {
 		Reservations.find = originalReservationFind;
@@ -8278,7 +8855,7 @@ test("a pristine HotelRunner OTA review may receive verified commercial evidence
 	);
 });
 
-test("only canonical Agoda may treat HotelRunner reported total as verified payout", async () => {
+test("authenticated provider evidence reconciles an equal HotelRunner total without provider-specific semantics", async () => {
 	const originalReservationFind = Reservations.find;
 	const originalReservationUpdateOne = Reservations.updateOne;
 	const originalHotelFind = HotelDetails.find;
@@ -8383,16 +8960,18 @@ test("only canonical Agoda may treat HotelRunner reported total as verified payo
 			bookingNormalized,
 			{ appliedAt: new Date("2026-08-06T15:00:01.000Z") }
 		);
+		const bookingGuard = directHotelRunnerEmailCommercialGuard({
+			normalized: bookingNormalized,
+			existing: bookingExisting,
+			hotelDetails: hotelRunnerCommercialHotel(),
+			matchedReservationBy: ["otaIdentityKey"],
+			evidence: bookingEvidence,
+		});
+		assert.equal(bookingGuard.ok, true);
 		assert.equal(
-			directHotelRunnerEmailCommercialGuard({
-				normalized: bookingNormalized,
-				existing: bookingExisting,
-				hotelDetails: hotelRunnerCommercialHotel(),
-				matchedReservationBy: ["otaIdentityKey"],
-				evidence: bookingEvidence,
-			}).reason,
-			"gross_total",
-			"non-Agoda providers cannot reinterpret a reported total as payout"
+			bookingGuard.reportedTotalRole,
+			"payout",
+			"the role is reconciled by exact verified amount equality, not by OTA brand"
 		);
 	} finally {
 		Reservations.find = originalReservationFind;
@@ -8746,7 +9325,7 @@ test("a HotelRunner row that appears at the pre-create recheck is enriched in pl
 	}
 });
 
-test("direct-owned commercial enrichment fails closed on mismatch or protected state", () => {
+test("direct-owned commercial enrichment treats unmatched HotelRunner totals as unknown and still protects local state", () => {
 	const normalized = makeVerifiedHotelRunnerCommercialEmail();
 	const existing = makeDirectHotelRunnerCommercialReservation();
 	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
@@ -8761,8 +9340,7 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 		evidence,
 	};
 	assert.equal(directHotelRunnerEmailCommercialGuard(base).ok, true);
-	assert.equal(
-		directHotelRunnerEmailCommercialGuard({
+	const unmatchedHotelRunnerTotal = directHotelRunnerEmailCommercialGuard({
 			...base,
 			existing: makeDirectHotelRunnerCommercialReservation({
 				total_amount: 101,
@@ -8775,9 +9353,9 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 					clientTotal: 101,
 				},
 			}),
-		}).reason,
-		"gross_total"
-	);
+		});
+	assert.equal(unmatchedHotelRunnerTotal.ok, true);
+	assert.equal(unmatchedHotelRunnerTotal.reportedTotalRole, "unknown");
 	assert.equal(
 		directHotelRunnerEmailCommercialGuard({
 			...base,
@@ -8836,8 +9414,7 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 		"room_identity",
 		"the projected PMS room id must select exactly one active configuration"
 	);
-	assert.equal(
-		directHotelRunnerEmailCommercialGuard({
+	const missingHotelRunnerSummaryTotal = directHotelRunnerEmailCommercialGuard({
 			...base,
 			existing: makeDirectHotelRunnerCommercialReservation({
 				ota_financial_summary: {
@@ -8845,10 +9422,9 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 					clientTotal: 0,
 				},
 			}),
-		}).reason,
-		"gross_total",
-		"all three HotelRunner gross baselines must be present and agree"
-	);
+		});
+	assert.equal(missingHotelRunnerSummaryTotal.ok, true);
+	assert.equal(missingHotelRunnerSummaryTotal.reportedTotalRole, "unknown");
 	assert.equal(
 		directHotelRunnerEmailCommercialGuard({
 			...base,
@@ -8887,6 +9463,9 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 		buildHotelRunnerEmailCommercialEvidence(
 			makeVerifiedHotelRunnerCommercialEmail({
 				otaPayoutFallbackReason: "estimated_default_deduction",
+				paymentSummary: {
+					sourceTotalPayoutAmount: null,
+				},
 			})
 		),
 		null,
@@ -8925,6 +9504,26 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 			...foreignCurrency,
 			sourceExchangeRateSource: "exchange_rate_api",
 			exchangeRateSource: "exchange_rate_api",
+			currencyConversionEvidence: {
+				trusted: true,
+				verified: true,
+				sourceCurrency: "USD",
+				propertyCurrency: "SAR",
+				rate: 3.75,
+				provenance: {
+					provider: "jannat_fx",
+					sourceType: "trusted_exchange_evidence",
+					sourceHash: immutableFixtureTextHash(
+						"authenticated FX audit",
+						"USD",
+						"SAR",
+						3.75,
+						"2026-08-06T14:59:00.000Z"
+					),
+					sourceTimestamp: "2026-08-06T14:59:00.000Z",
+					sourceId: "fx-audit-usd-sar-20260806",
+				},
+			},
 			paymentSummary: {
 				...foreignCurrency.paymentSummary,
 				exchangeRateSource: "exchange_rate_api",
@@ -8934,12 +9533,13 @@ test("direct-owned commercial enrichment fails closed on mismatch or protected s
 	);
 });
 
-test("direct-owned mismatch, protected state, and incomplete evidence never reach a write", async () => {
+test("direct-owned stay mismatch and protected state block writes while partial evidence attaches provenance only", async () => {
 	const originalReservationFind = Reservations.find;
 	const originalReservationUpdateOne = Reservations.updateOne;
 	const originalHotelFind = HotelDetails.find;
 	let existing = makeDirectHotelRunnerCommercialReservation();
 	let writes = 0;
+	let writtenUpdate = null;
 	Reservations.find = () => ({
 		limit() {
 			return this;
@@ -8948,9 +9548,10 @@ test("direct-owned mismatch, protected state, and incomplete evidence never reac
 			return [existing];
 		},
 	});
-	Reservations.updateOne = async () => {
+	Reservations.updateOne = async (_filter, update) => {
 		writes += 1;
-		throw new Error("a failed direct-owned gate must not write");
+		writtenUpdate = update;
+		return { matchedCount: 1 };
 	};
 	HotelDetails.find = () => ({
 		select() {
@@ -8962,28 +9563,18 @@ test("direct-owned mismatch, protected state, and incomplete evidence never reac
 	});
 
 	try {
-		const grossMismatch = await reconcileOtaReservation(
+		const stayMismatch = await reconcileOtaReservation(
 			makeVerifiedHotelRunnerCommercialEmail({
-				amount: 101,
-				totalAmountSar: 101,
-				sourceAmount: 101,
-				paymentSummary: {
-					sourceCurrency: "SAR",
-					sourceTotalGuestPaymentAmount: 101,
-					sourceTotalPayoutAmount: 80,
-					totalGuestPaymentAmount: 101,
-					totalPayoutAmount: 80,
-					currency: "SAR",
-					exchangeRateToSar: 1,
-				},
+				checkinDate: "2026-09-11",
 			})
 		);
-		assert.equal(grossMismatch.status, "needs_review");
+		assert.equal(stayMismatch.status, "needs_review");
 		assert.equal(
-			grossMismatch.skipReason,
+			stayMismatch.skipReason,
 			"hotelrunner_email_commercial_enrichment_guard_failed"
 		);
-		assert.match(grossMismatch.errors.join(" "), /gross_total/);
+		assert.match(stayMismatch.errors.join(" "), /stay/);
+		assert.equal(writes, 0);
 
 		existing = makeDirectHotelRunnerCommercialReservation({
 			adminChangeLog: [{ field: "sub_total", by: { name: "Admin" } }],
@@ -8993,24 +9584,33 @@ test("direct-owned mismatch, protected state, and incomplete evidence never reac
 		);
 		assert.equal(protectedResult.status, "needs_review");
 		assert.match(protectedResult.errors.join(" "), /protected_state/);
+		assert.equal(writes, 0);
 
 		existing = makeDirectHotelRunnerCommercialReservation();
 		const incomplete = await reconcileOtaReservation(
 			makeVerifiedHotelRunnerCommercialEmail({
-				totalPayoutSar: 0,
-				netAfterExpensesTotal: 0,
+				totalPayoutSar: null,
+				netAfterExpensesTotal: null,
 				paymentSummary: {
-					sourceTotalPayoutAmount: 0,
-					totalPayoutAmount: 0,
+					sourceTotalPayoutAmount: null,
+					totalPayoutAmount: null,
 				},
 			})
 		);
-		assert.equal(incomplete.status, "duplicate_reservation");
-		assert.equal(
-			incomplete.skipReason,
-			"hotelrunner_direct_reservation_already_exists"
+		assert.equal(incomplete.status, "updated");
+		assert.equal(incomplete.actionTaken, "commercial_evidence_attached");
+		assert.equal(writes, 1);
+		assert.deepEqual(
+			Object.keys(writtenUpdate.$set),
+			["supplierData.otaCommercialEvidence"]
 		);
-		assert.equal(writes, 0);
+		const partialEvidence =
+			writtenUpdate.$set["supplierData.otaCommercialEvidence"];
+		assert.equal(validateOtaCommercialEvidence(partialEvidence).ok, true);
+		assert.equal(partialEvidence.verificationState, "partial");
+		assert.equal(partialEvidence.roles.guestGross.propertyAmount, 100);
+		assert.equal(partialEvidence.roles.hotelPayout.verified, false);
+		assert.equal(partialEvidence.roles.hotelPayout.propertyAmount, null);
 	} finally {
 		Reservations.find = originalReservationFind;
 		Reservations.updateOne = originalReservationUpdateOne;
@@ -9106,6 +9706,7 @@ test("a bounded authenticated direct-after-relay skew is eligible only with exac
 		amount: 182.28,
 		sourceSenderTrusted: true,
 		sourceSenderAuthenticated: true,
+		trustedTransportProvider: "agoda",
 		sourcePresence: {
 			confirmationNumber: true,
 			hotelName: true,
@@ -9118,6 +9719,12 @@ test("a bounded authenticated direct-after-relay skew is eligible only with exac
 			from: "Agoda <no-reply@agoda.com>",
 			messageId: "direct-agoda-message",
 			receivedAt: "2026-08-05T10:45:44.000Z",
+			textHash: immutableFixtureTextHash(
+				"Agoda authenticated direct-after-relay confirmation",
+				"direct-agoda-message",
+				"2038722839",
+				182.28
+			),
 		},
 	};
 	const eligible = (input = normalized, stored = existing, matched = ["a", "b"]) =>
@@ -9414,6 +10021,7 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 			children: 0,
 			sourceSenderTrusted: true,
 			sourceSenderAuthenticated: true,
+			trustedTransportProvider: "agoda",
 			sourcePresence: {
 				confirmationNumber: true,
 				reservationId: true,
@@ -9436,6 +10044,13 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 				messageId: "direct-agoda-pricing-message",
 				receivedAt: "2026-08-05T10:45:44.000Z",
 				timestampMethod: "rfc2822_date_header",
+				textHash: immutableFixtureTextHash(
+					"Agoda authenticated direct commercial confirmation",
+					"direct-agoda-pricing-message",
+					confirmationNumber,
+					182.28,
+					112.78
+				),
 			},
 		};
 		const result = await reconcileOtaReservation(normalizedDirectPricing);
@@ -9553,16 +10168,17 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 			{
 				label: "missing payout evidence",
 				mutateIncoming: (incoming) => {
-					incoming.totalPayoutSar = 0;
-					incoming.netAfterExpensesTotal = 0;
-					incoming.paymentSummary.totalPayoutAmount = 0;
-					incoming.paymentSummary.sourceTotalPayoutAmount = 0;
+					incoming.totalPayoutSar = null;
+					incoming.netAfterExpensesTotal = null;
+					incoming.paymentSummary.totalPayoutAmount = null;
+					incoming.paymentSummary.sourceTotalPayoutAmount = null;
 				},
 			},
 			{
 				label: "fallback-derived payout",
 				mutateIncoming: (incoming) => {
 					incoming.otaPayoutFallbackReason = "default_20_percent_deduction";
+					incoming.paymentSummary.sourceTotalPayoutAmount = null;
 				},
 			},
 			{
@@ -9835,6 +10451,7 @@ const directUnmappedCase = ({
 		children: 0,
 		sourceSenderTrusted: true,
 		sourceSenderAuthenticated: true,
+		trustedTransportProvider: "agoda",
 		sourcePresence: {
 			confirmationNumber: true,
 			reservationId: true,
@@ -9857,6 +10474,13 @@ const directUnmappedCase = ({
 			messageId: `direct-${confirmationNumber}@agoda.com`,
 			receivedAt: directSourceAt,
 			timestampMethod: "rfc2822_date_header",
+			textHash: immutableFixtureTextHash(
+				"Agoda authenticated direct commercial confirmation",
+				confirmationNumber,
+				directSourceAt,
+				guestTotal,
+				payoutTotal
+			),
 		},
 	};
 	return { existing, normalized };
@@ -10164,6 +10788,7 @@ test("authoritative refresh hotel guard accepts only exact active ownership or a
 		provider: "airbnb",
 		providerLabel: "Airbnb",
 		bookingSource: "Airbnb",
+		trustedTransportProvider: "airbnb",
 		hotelName: "Source listing title that is not a PMS hotel label",
 		hotelId: ZAD_UNMAPPED_HOTEL._id,
 		hotelIdMatchStrength: "exact",
@@ -10177,6 +10802,13 @@ test("authoritative refresh hotel guard accepts only exact active ownership or a
 		source: {
 			...fixture.normalized.source,
 			from: "Airbnb <automated@airbnb.com>",
+			textHash: immutableFixtureTextHash(
+				"Airbnb authenticated direct commercial confirmation",
+				fixture.normalized.confirmationNumber,
+				fixture.normalized.source.receivedAt,
+				fixture.normalized.sourceAmount,
+				fixture.normalized.paymentSummary.sourceTotalPayoutAmount
+			),
 		},
 	};
 	assert.deepEqual(evaluate(airbnb), { ok: true, roomCount: 1 });
@@ -10310,7 +10942,7 @@ test("production-shaped 3612 and 4202 direct confirmations refresh only the prot
 				assert.equal(day.rootPrice, 0);
 				assert.equal(day.totalPriceWithoutCommission, 0);
 				assert.equal(day.commissionRate, 0);
-				assert.equal(day.platformMargin, 0);
+				assert.equal(day.platformMargin, null);
 			}
 			assert.equal(set["supplierData.otaSourceAuthority"], 3);
 			assert.equal(
@@ -10550,12 +11182,12 @@ test("unmapped direct-after-relay guard fails closed for every protected drift c
 			args: {
 				normalized: {
 					...fixture.normalized,
-					totalPayoutSar: 0,
-					netAfterExpensesTotal: 0,
+					totalPayoutSar: null,
+					netAfterExpensesTotal: null,
 					paymentSummary: {
 						...fixture.normalized.paymentSummary,
-						sourceTotalPayoutAmount: 0,
-						totalPayoutAmount: 0,
+						sourceTotalPayoutAmount: null,
+						totalPayoutAmount: null,
 					},
 				},
 			},

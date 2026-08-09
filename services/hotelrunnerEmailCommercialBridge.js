@@ -23,6 +23,7 @@ const HOTELRUNNER_EMAIL_COMMERCIAL_BRIDGE_PROJECTION = [
 	"automationAction",
 	"normalizedReservation.inboundEmailId",
 	"normalizedReservation.provider",
+	"normalizedReservation.trustedTransportProvider",
 	"normalizedReservation.confirmationNumber",
 	"normalizedReservation.reservationId",
 	"normalizedReservation.sourceSenderTrusted",
@@ -377,17 +378,20 @@ async function loadHotelRunnerEmailCommercialBridge(
 		hotelRunnerAmount,
 		evidence: evidence || null,
 	};
-	if (amountMatches(hotelRunnerAmount, sourceAmount)) {
-		return { ...base, amountRole: "gross" };
+	const sourceGross = positiveAmount(
+		inbound.paymentSummary?.sourceTotalGuestPaymentAmount
+	);
+	if (amountMatches(hotelRunnerAmount, sourceGross || sourceAmount)) {
+		// An authenticated HotelRunner relay proves that the two transports refer
+		// to the same source amount, but it does not prove the commercial role of
+		// that amount. Only provider-authenticated evidence may promote it to gross.
+		return { ...base, amountRole: evidence ? "gross" : "unknown" };
 	}
 
 	const sourcePayout = positiveAmount(
 		inbound.paymentSummary?.sourceTotalPayoutAmount
 	);
 	if (sourcePayout && amountMatches(hotelRunnerAmount, sourcePayout)) {
-		if (providerKey(provider) !== "agoda") {
-			return reject("payout_role_not_supported");
-		}
 		if (!evidence) return reject("payout_evidence_required");
 		return { ...base, amountRole: "payout" };
 	}
