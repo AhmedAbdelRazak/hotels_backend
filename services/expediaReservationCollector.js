@@ -90,6 +90,17 @@ const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
 const MAX_DETAIL_PAGES_PER_HOTEL = Number(
 	process.env.OTA_EXPEDIA_SYNC_MAX_DETAIL_PAGES_PER_HOTEL || 30
 );
+const EXPEDIA_DETAIL_ENRICHMENT_BUCKETS = new Set([
+	"newReservations",
+	"statusChanged",
+	// Existing reservations still need authenticated provider detail for safe
+	// commercial enrichment. Reading the detail page remains preview-only and
+	// does not authorize the apply phase to overwrite PMS lifecycle or money.
+	"matchedExisting",
+]);
+
+const shouldFetchExpediaReservationDetails = (classification = {}) =>
+	EXPEDIA_DETAIL_ENRICHMENT_BUCKETS.has(classification?.bucket);
 const NAVIGATION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_SYNC_NAVIGATION_TIMEOUT_MS || 15_000
 );
@@ -1363,13 +1374,50 @@ const moneyNumber = (value) => {
 	return Number.isFinite(numeric) ? numeric : 0;
 };
 
-const toSarMoneyMeta = (amount, currency) =>
-	getSarConversionMeta(moneyNumber(amount), currency || "SAR");
+const optionalMoneyNumber = (...values) => {
+	for (const value of values) {
+		if (value === null || value === undefined || value === "") continue;
+		const numeric = Number(value);
+		if (Number.isFinite(numeric)) return numeric;
+	}
+	return null;
+};
 
-const convertSummaryAmountToSar = (amount, currency) => {
-	const numeric = moneyNumber(amount);
-	if (!numeric) return 0;
-	return toSarMoneyMeta(numeric, currency).totalAmountSar;
+const positiveMoneyNumber = (...values) => {
+	for (const value of values) {
+		const numeric = optionalMoneyNumber(value);
+		if (numeric !== null && numeric > 0) return numeric;
+	}
+	return 0;
+};
+
+const toSarMoneyMeta = (amount, currency) => {
+	const sourceCurrency = String(currency || "").trim().toUpperCase();
+	if (!/^[A-Z]{3}$/.test(sourceCurrency)) {
+		return {
+			sourceAmount: moneyNumber(amount),
+			sourceCurrency: "",
+			exchangeRateToSar: 0,
+			exchangeRateSource: "missing_source_currency",
+			totalAmountSar: null,
+			convertedAt: "",
+		};
+	}
+	return getSarConversionMeta(moneyNumber(amount), sourceCurrency);
+};
+
+const isVerifiedIdentitySarConversion = (conversion = {}) =>
+	conversion.sourceCurrency === "SAR" &&
+	conversion.exchangeRateSource === "identity" &&
+	Number(conversion.exchangeRateToSar) === 1;
+
+const convertSummaryAmountToVerifiedSar = (amount, currency) => {
+	const numeric = optionalMoneyNumber(amount);
+	if (numeric === null || numeric < 0) return null;
+	const conversion = toSarMoneyMeta(numeric, currency);
+	return isVerifiedIdentitySarConversion(conversion)
+		? conversion.totalAmountSar
+		: null;
 };
 
 const normalizeCandidateMoneyToSar = (candidate = {}) => {
@@ -1379,50 +1427,62 @@ const normalizeCandidateMoneyToSar = (candidate = {}) => {
 		candidate.currency ||
 		summary.sourceCurrency ||
 		summary.currency ||
-		"SAR";
-	const sourceAmount = moneyNumber(
-		candidate.sourceAmount ||
-			candidate.amount ||
-			summary.sourceTotalGuestPaymentAmount ||
-			summary.totalGuestPaymentAmount
+		"";
+	const sourceAmount = positiveMoneyNumber(
+		candidate.sourceAmount,
+		candidate.amount,
+		summary.sourceTotalGuestPaymentAmount,
+		summary.totalGuestPaymentAmount
 	);
 	const conversion = toSarMoneyMeta(sourceAmount, sourceCurrency);
 	const summaryCurrency = summary.sourceCurrency || summary.currency || sourceCurrency;
-	const sourceNightlyRateAmount = moneyNumber(
-		summary.sourceNightlyRateAmount || summary.nightlyRateAmount
+	const sourceNightlyRateAmount = optionalMoneyNumber(
+		summary.sourceNightlyRateAmount,
+		summary.nightlyRateAmount
 	);
-	const sourceTaxesAmount = moneyNumber(
-		summary.sourceTaxesAmount || summary.taxesAmount
+	const sourceTaxesAmount = optionalMoneyNumber(
+		summary.sourceTaxesAmount,
+		summary.taxesAmount
 	);
-	const sourceTotalGuestPaymentAmount = moneyNumber(
-		summary.sourceTotalGuestPaymentAmount ||
-			summary.totalGuestPaymentAmount ||
-			sourceAmount
+	const sourceTotalGuestPaymentAmount = optionalMoneyNumber(
+		summary.sourceTotalGuestPaymentAmount,
+		summary.totalGuestPaymentAmount,
+		sourceAmount > 0 ? sourceAmount : null
 	);
-	const sourceExpediaCompensationAmount = moneyNumber(
-		summary.sourceExpediaCompensationAmount || summary.expediaCompensationAmount
+	const sourceExpediaCompensationAmount = optionalMoneyNumber(
+		summary.sourceExpediaCompensationAmount,
+		summary.expediaCompensationAmount
 	);
-	const sourceAcceleratorAmount = moneyNumber(
-		summary.sourceAcceleratorAmount || summary.acceleratorAmount
+	const sourceAcceleratorAmount = optionalMoneyNumber(
+		summary.sourceAcceleratorAmount,
+		summary.acceleratorAmount
 	);
-	const sourceTotalPayoutAmount = moneyNumber(
-		summary.sourceTotalPayoutAmount || summary.totalPayoutAmount
+	const sourceTotalPayoutAmount = optionalMoneyNumber(
+		summary.sourceTotalPayoutAmount,
+		summary.totalPayoutAmount
 	);
+	const propertyConversionVerified =
+		isVerifiedIdentitySarConversion(conversion);
+	const verifiedPropertyAmount = propertyConversionVerified
+		? conversion.totalAmountSar || null
+		: null;
 
 	return {
 		...candidate,
 		sourceAmount,
 		sourceCurrency: conversion.sourceCurrency || sourceCurrency,
 		sourceAmountHint: candidate.sourceAmountHint || candidate.amountHint || "",
-		amountHint: conversion.totalAmountSar
+		amountHint: verifiedPropertyAmount
 			? `SAR ${conversion.totalAmountSar.toFixed(2)}`
-			: "",
+			: candidate.sourceAmountHint || candidate.amountHint || "",
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
-		totalAmountSar: conversion.totalAmountSar,
-		amountConvertedAt: conversion.convertedAt,
-		amount: conversion.totalAmountSar,
-		currency: "SAR",
+		propertyCurrency: "SAR",
+		propertyConversionVerified,
+		totalAmountSar: verifiedPropertyAmount,
+		amountConvertedAt: propertyConversionVerified ? conversion.convertedAt : "",
+		amount: verifiedPropertyAmount,
+		currency: propertyConversionVerified ? "SAR" : conversion.sourceCurrency,
 		paymentSummary: {
 			...summary,
 			sourceCurrency: summaryCurrency,
@@ -1432,30 +1492,37 @@ const normalizeCandidateMoneyToSar = (candidate = {}) => {
 			sourceExpediaCompensationAmount,
 			sourceAcceleratorAmount,
 			sourceTotalPayoutAmount,
-			nightlyRateAmount: convertSummaryAmountToSar(
+			nightlyRateAmount: convertSummaryAmountToVerifiedSar(
 				sourceNightlyRateAmount,
 				summaryCurrency
 			),
-			taxesAmount: convertSummaryAmountToSar(sourceTaxesAmount, summaryCurrency),
+			taxesAmount: convertSummaryAmountToVerifiedSar(
+				sourceTaxesAmount,
+				summaryCurrency
+			),
 			totalGuestPaymentAmount:
-				convertSummaryAmountToSar(sourceTotalGuestPaymentAmount, summaryCurrency) ||
-				conversion.totalAmountSar,
-			expediaCompensationAmount: convertSummaryAmountToSar(
+				convertSummaryAmountToVerifiedSar(
+					sourceTotalGuestPaymentAmount,
+					summaryCurrency
+				) ?? verifiedPropertyAmount,
+			expediaCompensationAmount: convertSummaryAmountToVerifiedSar(
 				sourceExpediaCompensationAmount,
 				summaryCurrency
 			),
-			acceleratorAmount: convertSummaryAmountToSar(
+			acceleratorAmount: convertSummaryAmountToVerifiedSar(
 				sourceAcceleratorAmount,
 				summaryCurrency
 			),
-			totalPayoutAmount: convertSummaryAmountToSar(
+			totalPayoutAmount: convertSummaryAmountToVerifiedSar(
 				sourceTotalPayoutAmount,
 				summaryCurrency
 			),
-			currency: "SAR",
+			currency: propertyConversionVerified ? "SAR" : null,
+			propertyCurrency: "SAR",
+			propertyConversionVerified,
 			exchangeRateToSar: conversion.exchangeRateToSar,
 			exchangeRateSource: conversion.exchangeRateSource,
-			amountConvertedAt: conversion.convertedAt,
+			amountConvertedAt: propertyConversionVerified ? conversion.convertedAt : "",
 		},
 	};
 };
@@ -1702,11 +1769,19 @@ const paymentDetailLabels = [
 	{ key: "acceleratorAmount", pattern: /^Accelerator\b/i },
 	{ key: "totalPayoutAmount", pattern: /^Your total payout\b/i },
 	{
-		key: "totalPayoutAmount",
+		key: "amountToChargeExpediaAmount",
 		pattern: /^Amount to charge Expedia Group\b/i,
-		auxiliary: true,
 	},
 ];
+
+const sameExplicitMoneyFact = (left, right) =>
+	Boolean(
+		left &&
+			right &&
+			String(left.currency || "").toUpperCase() ===
+				String(right.currency || "").toUpperCase() &&
+			Math.abs(Number(left.amount) - Number(right.amount)) < 0.005
+	);
 
 const matchPaymentDetailLabel = (line = "") => {
 	const text = normalizeLine(line);
@@ -1739,17 +1814,7 @@ const parseExpediaPaymentDetailsFromLines = (lines = [], fallbackCurrency = "") 
 		const line = normalizeLine(section[index]);
 		const label = matchPaymentDetailLabel(line);
 		if (label) {
-			const previous = labelEvents[labelEvents.length - 1];
-			if (
-				!(
-					label.auxiliary &&
-					previous &&
-					previous.key === label.key &&
-					previous.value === undefined
-				)
-			) {
-				labelEvents.push({ key: label.key, index });
-			}
+			labelEvents.push({ key: label.key, index });
 		}
 		const { money, consumedNext } = parsePaymentMoneyAtLine(
 			section,
@@ -1779,27 +1844,51 @@ const parseExpediaPaymentDetailsFromLines = (lines = [], fallbackCurrency = "") 
 
 	if (columnarAmounts) {
 		labelEvents.forEach((label, index) => {
-			if (output[label.key] !== undefined) return;
 			const money = amountEvents[index]?.money;
-			if (money) output[label.key] = money;
+			if (money && label.value === undefined) label.value = money;
 		});
-		return output;
+	} else {
+		labelEvents.forEach((label, index) => {
+			if (label.value !== undefined) return;
+			const nextLabelIndex =
+				labelEvents[index + 1]?.index ?? Number.POSITIVE_INFINITY;
+			const money = amountEvents.find(
+				(entry) => entry.index > label.index && entry.index < nextLabelIndex
+			)?.money;
+			if (money) label.value = money;
+		});
+
+		labelEvents.forEach((label, index) => {
+			if (label.value !== undefined) return;
+			const money = amountEvents[index]?.money;
+			if (money) label.value = money;
+		});
 	}
 
-	labelEvents.forEach((label, index) => {
-		if (output[label.key] !== undefined) return;
-		const nextLabelIndex = labelEvents[index + 1]?.index ?? Number.POSITIVE_INFINITY;
-		const money = amountEvents.find(
-			(entry) => entry.index > label.index && entry.index < nextLabelIndex
-		)?.money;
-		if (money) output[label.key] = money;
-	});
-
-	labelEvents.forEach((label, index) => {
-		if (output[label.key] !== undefined) return;
-		const money = amountEvents[index]?.money;
-		if (money) output[label.key] = money;
-	});
+	const valuesByKey = new Map();
+	for (const label of labelEvents) {
+		if (!label.value) continue;
+		if (!valuesByKey.has(label.key)) valuesByKey.set(label.key, []);
+		valuesByKey.get(label.key).push(label.value);
+		if (output[label.key] === undefined) output[label.key] = label.value;
+	}
+	const conflicts = [];
+	for (const [key, values] of valuesByKey) {
+		if (values.slice(1).some((value) => !sameExplicitMoneyFact(values[0], value))) {
+			conflicts.push(`conflicting_repeated_${key}`);
+		}
+	}
+	if (
+		output.totalPayoutAmount &&
+		output.amountToChargeExpediaAmount &&
+		!sameExplicitMoneyFact(
+			output.totalPayoutAmount,
+			output.amountToChargeExpediaAmount
+		)
+	) {
+		conflicts.push("conflicting_payout_aliases");
+	}
+	output.commercialConflicts = Array.from(new Set(conflicts)).sort();
 
 	return output;
 };
@@ -2047,6 +2136,7 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		moneyNearLabel(rawText, /Accelerator(?:\s*\([^)]*\))?/i, fallbackCurrency);
 	const totalPayout =
 		paymentDetails.totalPayoutAmount ||
+		paymentDetails.amountToChargeExpediaAmount ||
 		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 8) ||
 		moneyAfterLine(lines, /^Amount to charge Expedia Group$/i, fallbackCurrency, 6) ||
 		moneyNearLabel(
@@ -2057,13 +2147,32 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		) ||
 		moneyNearLabel(rawText, /Amount to charge Expedia Group/i, fallbackCurrency, 260);
 	const amount = totalGuestPayment || parseMoneyValue(candidate.amountHint, fallbackCurrency);
-	const bookingTableAmount = candidate.amount || 0;
+	const bookingTableAmount = optionalMoneyNumber(candidate.amount);
 	const detectedPaymentCollectionModel =
 		detectExpediaPaymentCollectionModel(rawText);
 	const paymentCollectionModel =
 		detectedPaymentCollectionModel !== "unknown"
 			? detectedPaymentCollectionModel
 			: candidate.paymentCollectionModel || "unknown";
+	const commercialEvidenceConflicts = [
+		...(Array.isArray(paymentDetails.commercialConflicts)
+			? paymentDetails.commercialConflicts
+			: []),
+	];
+	if (
+		totalGuestPayment &&
+		totalPayout &&
+		String(totalGuestPayment.currency || "").toUpperCase() !==
+			String(totalPayout.currency || "").toUpperCase()
+	) {
+		commercialEvidenceConflicts.push("gross_payout_currency_mismatch");
+	} else if (
+		totalGuestPayment &&
+		totalPayout &&
+		Number(totalPayout.amount) > Number(totalGuestPayment.amount) + 0.004
+	) {
+		commercialEvidenceConflicts.push("payout_exceeds_guest_gross");
+	}
 
 	return {
 		detailsFetched: true,
@@ -2101,20 +2210,24 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		guestNotes,
 		comment: guestNotes,
 		currency: amount?.currency || fallbackCurrency || candidate.currency || "",
-		amount: amount?.amount || candidate.amount || 0,
+		amount: amount?.amount ?? candidate.amount ?? null,
 		amountHint: amount?.raw || candidate.amountHint || "",
 		paymentCollectionModel,
+		commercialEvidenceConflict: commercialEvidenceConflicts.length > 0,
+		commercialEvidenceConflicts: Array.from(
+			new Set(commercialEvidenceConflicts)
+		).sort(),
 		paymentSummary: {
-			nightlyRateAmount: nightlyRate?.amount || 0,
-			taxesAmount: taxes?.amount || 0,
+			nightlyRateAmount: nightlyRate?.amount ?? null,
+			taxesAmount: taxes?.amount ?? null,
 			totalGuestPaymentAmount:
-				totalGuestPayment?.amount ||
-				candidate.paymentSummary?.totalGuestPaymentAmount ||
-				bookingTableAmount ||
-				0,
-			expediaCompensationAmount: expediaCompensation?.amount || 0,
-			acceleratorAmount: accelerator?.amount || 0,
-			totalPayoutAmount: totalPayout?.amount || 0,
+				totalGuestPayment?.amount ??
+				candidate.paymentSummary?.totalGuestPaymentAmount ??
+				bookingTableAmount ??
+				null,
+			expediaCompensationAmount: expediaCompensation?.amount ?? null,
+			acceleratorAmount: accelerator?.amount ?? null,
+			totalPayoutAmount: totalPayout?.amount ?? null,
 			currency:
 				totalPayout?.currency ||
 				amount?.currency ||
@@ -3371,6 +3484,17 @@ const classifyCandidate = async (
 		}
 	}
 	const statusToApply = normalizeLine(candidate.statusToApply || "").toLowerCase();
+	if (candidate.commercialEvidenceConflict === true) {
+		return {
+			bucket: "needsReview",
+			item: {
+				...candidate,
+				actionPreview: "commercial_evidence_conflict_no_write",
+				skipReason:
+					"Expedia commercial totals conflict; no lifecycle or financial write is allowed.",
+			},
+		};
+	}
 	if (!existing) {
 		if (["cancelled", "no_show"].includes(statusToApply)) {
 			return {
@@ -4091,8 +4215,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				let candidate = rowCandidate;
 				let classification = await classifyCandidate(candidate);
 				const shouldFetchDetails =
-					classification.bucket === "newReservations" ||
-					classification.bucket === "statusChanged";
+					shouldFetchExpediaReservationDetails(classification);
 				if (shouldFetchDetails) {
 					if (detailPagesFetched >= MAX_DETAIL_PAGES_PER_HOTEL) {
 						candidate = normalizeCandidateMoneyToSar({
@@ -4134,7 +4257,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					candidate = normalizeCandidateMoneyToSar({
 						...candidate,
 						detailsFetched: false,
-						detailsSkippedReason: "matched_existing_no_write_fast_path",
+						detailsSkippedReason: "detail_not_required_for_bucket",
 					});
 					classification = {
 						...classification,
@@ -4176,10 +4299,10 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 							candidate.sourceCurrency ||
 							candidate.paymentSummary?.sourceCurrency ||
 							"",
-						sourceAmount:
-							candidate.sourceAmount ||
-							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ||
-							0,
+					sourceAmount:
+						candidate.sourceAmount ??
+						candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+						null,
 						exchangeRateToSar:
 							candidate.exchangeRateToSar ||
 							candidate.paymentSummary?.exchangeRateToSar ||
@@ -4188,17 +4311,18 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 							candidate.exchangeRateSource ||
 							candidate.paymentSummary?.exchangeRateSource ||
 							"",
-						totalGuestPaymentAmount:
-							candidate.paymentSummary?.totalGuestPaymentAmount ||
-							candidate.amount ||
-							0,
-						sourceTotalGuestPaymentAmount:
-							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ||
-							candidate.sourceAmount ||
-							0,
-						totalPayoutAmount: candidate.paymentSummary?.totalPayoutAmount || 0,
-						sourceTotalPayoutAmount:
-							candidate.paymentSummary?.sourceTotalPayoutAmount || 0,
+					totalGuestPaymentAmount:
+						candidate.paymentSummary?.totalGuestPaymentAmount ??
+						candidate.amount ??
+						null,
+					sourceTotalGuestPaymentAmount:
+						candidate.paymentSummary?.sourceTotalGuestPaymentAmount ??
+						candidate.sourceAmount ??
+						null,
+					totalPayoutAmount:
+						candidate.paymentSummary?.totalPayoutAmount ?? null,
+					sourceTotalPayoutAmount:
+						candidate.paymentSummary?.sourceTotalPayoutAmount ?? null,
 						hasVirtualCardSignal:
 							candidate.paymentSignals?.hasVirtualCardSignal || false,
 						rawCardStored: false,
@@ -4416,7 +4540,9 @@ module.exports = {
 	__private: {
 		parseReservationRowCandidate,
 		parseExpediaReservationDetailText,
+		normalizeCandidateMoneyToSar,
 		lineConfirmationValueAfter,
 		classifyCandidate,
+		shouldFetchExpediaReservationDetails,
 	},
 };

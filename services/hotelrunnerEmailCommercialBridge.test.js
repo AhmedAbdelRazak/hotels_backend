@@ -20,6 +20,7 @@ function authenticatedInbound(overrides = {}) {
 	return {
 		inboundEmailId: INBOUND_ID,
 		provider: "agoda",
+		trustedTransportProvider: "agoda",
 		confirmationNumber: "687268443",
 		reservationId: "687268443",
 		sourceSenderTrusted: true,
@@ -59,7 +60,11 @@ function authenticatedInbound(overrides = {}) {
 			paymentCollectionModel: true,
 			paymentInstructions: true,
 		},
-		source: { receivedAt: "2026-08-07T15:26:53.000Z" },
+		source: {
+			receivedAt: "2026-08-07T15:26:53.000Z",
+			textHash:
+				"b75f4f44ee6f4211cfa54f69d4d347a38f38477789f86c0b9c19b67dd398e23a",
+		},
 		...overrides,
 	};
 }
@@ -207,7 +212,7 @@ test("Agoda HotelRunner payout is accepted only with the exact verified email ev
 	}
 });
 
-test("Trip HotelRunner relay can bridge exact USD gross without inventing commission evidence", async () => {
+test("Trip HotelRunner relay keeps the matching USD amount commercially unresolved", async () => {
 	const inbound = authenticatedInbound({
 		provider: "hotelrunner",
 		confirmationNumber: "1539366616295913",
@@ -257,7 +262,7 @@ test("Trip HotelRunner relay can bridge exact USD gross without inventing commis
 		{ InboundEmailModel: modelFor(inboundRecord(inbound)) }
 	);
 	assert.equal(result.ok, true);
-	assert.equal(result.amountRole, "gross");
+	assert.equal(result.amountRole, "unknown");
 	assert.equal(result.sourceCurrency, "USD");
 	assert.equal(result.sourceAmount, 18.78);
 	assert.equal(result.grossTotalSar, 70.43);
@@ -277,7 +282,7 @@ test("Trip HotelRunner relay can bridge exact USD gross without inventing commis
 	);
 	assert.deepEqual(payoutAttempt, {
 		ok: false,
-		reason: "payout_role_not_supported",
+		reason: "payout_evidence_required",
 		amountRole: "",
 	});
 });

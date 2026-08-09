@@ -22,7 +22,7 @@
 		"test:external-vcc-reconciliation": "node --test services/externalVccReconciliation.test.js services/bofaCaptureSummary.test.js",
 		"vcc:reconcile:external": "node scripts/reconcileExternalVccCapture.js",
 		"test:ota-inbound": "node --test services/otaReservationQueue.test.js services/otaInboundSafety.test.js services/otaAiRoomMatcher.test.js services/otaInboundCommunicationClassifier.test.js services/otaInboundControllerSafety.test.js services/otaInboundDedupe.test.js services/otaReservationVisibility.test.js services/airbnbOtaWhatsappNotifier.test.js services/expediaReservationApply.test.js services/expediaReservationCollector.test.js services/tripHotelRunnerRepair20260805.test.js services/agodaGuestMessageReviewRepair20260805.test.js services/otaPricingSaveIncidentRepair20260805.test.js services/recentOtaInboundRecovery20260805.test.js scripts/repairRecentOtaInbound20260805.test.js scripts/otaReviewPricingInvariants.test.js scripts/otaReviewConcurrency.test.js",
-		"test:hotelrunner": "node --test services/hotelrunner*.test.js scripts/activateApprovedHotelRunnerMappings20260807.test.js scripts/reconcileHotelRunnerPriorityCommission20260807.test.js scripts/repairAgodaCommercialEnrichment20260808.test.js",
+		"test:hotelrunner": "node --test services/hotelrunner*.test.js services/otaCommercialEvidence.test.js scripts/activateApprovedHotelRunnerMappings20260807.test.js scripts/reconcileHotelRunnerPriorityCommission20260807.test.js scripts/repairAgodaCommercialEnrichment20260808.test.js scripts/repairExpediaCommercialEnrichment20260809.test.js",
 		"hotelrunner:worker": "node workers/hotelrunnerSyncWorker.js",
 		"hotelrunner:worker:once": "node workers/hotelrunnerSyncWorker.js --once",
 		"hotelrunner:rooms:once": "node workers/hotelrunnerSyncWorker.js --rooms-only",
@@ -31,6 +31,7 @@
 		"hotelrunner:mappings:activate-approved-20260807": "node scripts/activateApprovedHotelRunnerMappings20260807.js",
 		"hotelrunner:reconcile-priority-commission-20260807": "node scripts/reconcileHotelRunnerPriorityCommission20260807.js",
 		"hotelrunner:repair-agoda-commercial-20260808": "node scripts/repairAgodaCommercialEnrichment20260808.js",
+		"hotelrunner:repair-expedia-commercial-20260809": "node scripts/repairExpediaCommercialEnrichment20260809.js",
 		"test:hotelrunner-env-gate": "node --test scripts/hotelrunnerEnvGate.test.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
