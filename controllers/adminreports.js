@@ -45,6 +45,9 @@ const {
 const {
 	verifiedHotelRunnerOtaExpense,
 } = require("../services/hotelrunnerReportPricing");
+const {
+	resolveAdminReservationFinancialTotals,
+} = require("../services/adminReservationFinancialTotals");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -107,6 +110,41 @@ const withPlatformHotelScope = (req, filter = {}) => {
 	const scopeFilter = hotelScopeFilterForRequest(req);
 	if (!scopeFilter) return filter;
 	return { $and: [filter, scopeFilter] };
+};
+
+const forceHotelManagementExportViewer = (actor = null) => {
+	const plainActor =
+		actor && typeof actor.toObject === "function"
+			? actor.toObject()
+			: actor?._doc && typeof actor._doc === "object"
+				? { ...actor._doc }
+				: actor && typeof actor === "object"
+					? { ...actor }
+					: {};
+	return { ...plainActor, __hotelManagementSourceView: true };
+};
+
+const AUTHENTICATED_EXPORT_ACTOR_FIELDS =
+	"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelIdsOwner hotelsToSupport belongsToId accountScope platformEmployee platformEmployeeType activeUser";
+
+const resolveAuthenticatedHotelExportActor = async (req = {}) => {
+	const authId = normalizeId(req.auth?._id || req.auth?.id);
+	if (!authId || !ObjectId.isValid(authId)) return null;
+	if (normalizeId(req.profile) === authId) return req.profile;
+	return User.findById(authId)
+		.select(AUTHENTICATED_EXPORT_ACTOR_FIELDS)
+		.lean()
+		.exec();
+};
+
+const hotelManagementExportScopeFilter = (actor = {}) => {
+	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
+		ObjectId.isValid(id)
+	);
+	// The hotel route is tenant-scoped even for a platform-capable account. A
+	// caller without an explicit hotel assignment receives an empty result and
+	// must use the separately authorized platform-admin route instead.
+	return { hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } };
 };
 
 const resolveReservationVisibilityActorForRequest = async (req = {}) => {
@@ -1357,6 +1395,15 @@ function monthRangeFromString(monthStr) {
 exports.exportToExcel = async (req, res) => {
 	try {
 		const userId = req.params.userId;
+		const isHotelManagementExport = /\/hotel-adminreports\//i.test(
+			String(req.originalUrl || req.url || req.path || "")
+		);
+		const authenticatedExportActor = isHotelManagementExport
+			? await resolveAuthenticatedHotelExportActor(req)
+			: req.profile;
+		const exportViewer = isHotelManagementExport
+			? forceHotelManagementExportViewer(authenticatedExportActor)
+			: req.profile;
 
 		// 1) Base filter: booking_source + createdAt >= 2024-09-01
 		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
@@ -1413,10 +1460,17 @@ exports.exportToExcel = async (req, res) => {
 		}
 
 		// 5) Fetch reservations
-		addHotelManagementReservationVisibilityToFilter(finalFilter, req.profile);
-		const reservations = await Reservations.find(
-			withPlatformHotelScope(req, finalFilter)
-		)
+		addHotelManagementReservationVisibilityToFilter(finalFilter, exportViewer);
+		const platformScopedFilter = withPlatformHotelScope(req, finalFilter);
+		const reservationFilter = isHotelManagementExport
+			? {
+					$and: [
+						platformScopedFilter,
+						hotelManagementExportScopeFilter(authenticatedExportActor),
+					],
+			  }
+			: platformScopedFilter;
+		const reservations = await Reservations.find(reservationFilter)
 			.populate("hotelId", "hotelName")
 			.populate("belongsTo", "name phone email")
 			.populate("payment_details")
@@ -1425,6 +1479,12 @@ exports.exportToExcel = async (req, res) => {
 			reservations,
 			"ADMIN RESERVATIONS EXPORT"
 		);
+		const exportReservations = isHotelManagementExport
+			? sanitizeReservationAuditLogsCollectionForViewer(
+					reservationsWithRoomDetails,
+					exportViewer
+				)
+			: reservationsWithRoomDetails;
 
 		// ------------------------- NEW: Payment Status & Filter Helpers -------------------------
 		// A) Payment Status logic with "Paid Offline"
@@ -1474,7 +1534,7 @@ exports.exportToExcel = async (req, res) => {
 		}
 
 		// C) Build "enriched" array with new payment status
-		let enrichedReservations = reservationsWithRoomDetails.map((r) => {
+		let enrichedReservations = exportReservations.map((r) => {
 			return {
 				...r,
 				payment_status: computePaymentStatus(r),
@@ -1517,8 +1577,23 @@ exports.exportToExcel = async (req, res) => {
 			}
 			roomNumberString = reservationRoomNumbers(r).join(", ");
 			if (Array.isArray(r.pickedRoomsType) && r.pickedRoomsType.length > 0) {
-				roomCount = r.pickedRoomsType.length;
+				roomCount = r.pickedRoomsType.reduce((sum, room = {}) => {
+					const count = Number(room.count);
+					return sum + (Number.isFinite(count) && count > 0 ? count : 1);
+				}, 0);
 			}
+			const resolvedFinancialTotals = isHotelManagementExport
+				? null
+				: resolveAdminReservationFinancialTotals(r);
+			const financialTotals = {
+				gross_total_amount:
+					resolvedFinancialTotals?.grossTotalAmount ?? null,
+				net_total_amount: resolvedFinancialTotals?.netTotalAmount ?? null,
+				financial_totals_currency: resolvedFinancialTotals?.currency || null,
+				gross_total_available:
+					resolvedFinancialTotals?.grossAvailable === true,
+				net_total_available: resolvedFinancialTotals?.netAvailable === true,
+			};
 
 			return {
 				confirmation_number: r.confirmation_number || "",
@@ -1530,11 +1605,13 @@ exports.exportToExcel = async (req, res) => {
 				checkout_date: r.checkout_date || null,
 				payment_status: r.payment_status || "", // from computePaymentStatus
 				total_amount: r.total_amount || 0,
+				...financialTotals,
 				paid_amount: r.paid_amount || 0,
 				paid_offline: paidOffline, // NEW field
 				room_type: roomTypeString,
 				room_number: roomNumberString,
 				room_count: roomCount,
+				booking_source: r.booking_source || "",
 				createdAt: r.createdAt || null,
 			};
 		});
