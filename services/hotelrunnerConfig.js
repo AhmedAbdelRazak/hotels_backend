@@ -137,6 +137,11 @@ function getHotelRunnerConfig(env = process.env) {
 			"HOTELRUNNER_PROJECTION_NOT_BEFORE must be a timezone-qualified ISO timestamp when HotelRunner projection is enabled."
 		);
 	}
+	if (projectionEnabled && !roomListSyncEnabled) {
+		errors.push(
+			"HOTELRUNNER_ROOM_LIST_SYNC_ENABLED must be true when HOTELRUNNER_PROJECTION_ENABLED is true."
+		);
+	}
 	if (projectionEnabled && pullEnabled) {
 		errors.push(
 			"HOTELRUNNER_PULL_ENABLED and HOTELRUNNER_PROJECTION_ENABLED cannot both be true during the push-only activation phase."

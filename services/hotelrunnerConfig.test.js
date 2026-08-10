@@ -75,10 +75,32 @@ test("projection requires a valid timezone-qualified activation cutoff", () => {
 		...baseEnvironment,
 		HOTELRUNNER_PROJECTION_ENABLED: "true",
 		HOTELRUNNER_PROJECTION_NOT_BEFORE: "2026-08-06T15:34:56+03:00",
+		HOTELRUNNER_ROOM_LIST_SYNC_ENABLED: "true",
 	});
 	assert.equal(enabled.configured, true);
 	assert.ok(enabled.projectionNotBefore instanceof Date);
 	assert.equal(enabled.projectionNotBeforeIso, "2026-08-06T12:34:56.000Z");
+});
+
+test("projection worker requires recurring room-list sync without disabling callbacks", () => {
+	const config = getHotelRunnerConfig({
+		...baseEnvironment,
+		HOTELRUNNER_PROJECTION_ENABLED: "true",
+		HOTELRUNNER_PROJECTION_NOT_BEFORE: "2026-08-06T12:34:56.000Z",
+		HOTELRUNNER_ROOM_LIST_SYNC_ENABLED: "false",
+	});
+	assert.equal(config.configured, false);
+	assert.equal(config.callbackConfigured, true);
+	assert.equal(config.projectionEnabled, true);
+	assert.equal(config.roomListSyncEnabled, false);
+	assert.equal(
+		config.errors.some(
+			(error) =>
+				error.includes("HOTELRUNNER_ROOM_LIST_SYNC_ENABLED") &&
+				error.includes("HOTELRUNNER_PROJECTION_ENABLED")
+		),
+		true
+	);
 });
 
 test("background reservation pulls are opt-in while controlled room discovery remains configured", () => {

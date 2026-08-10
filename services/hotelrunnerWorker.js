@@ -18,6 +18,9 @@ const {
 	createHotelRunnerPullSync,
 } = require("./hotelrunnerPullSync");
 const {
+	createHotelRunnerLateEvidenceRecovery,
+} = require("./hotelrunnerLateEvidenceRecovery");
+const {
 	TARGETED_LOOKUP_EVENT_MARKER_PATH: TARGETED_LOOKUP_MARKER_PATH,
 	buildHotelRunnerProjectionEligibilityFilter: buildProjectionEligibilityFilter,
 	createHotelRunnerFirstOtaFallbackCoordinator,
@@ -29,6 +32,7 @@ const PROJECTION_LEASE_HEARTBEAT_MS = 60 * 1000;
 const EVENT_POLL_MS = 1_000;
 const MAX_EVENT_ATTEMPTS = 8;
 const FALLBACK_RECOVERY_INTERVAL_MS = 30_000;
+const LATE_EVIDENCE_RECOVERY_INTERVAL_MS = 30_000;
 
 const wait = (milliseconds) =>
 	new Promise((resolve) => {
@@ -91,6 +95,7 @@ function createHotelRunnerWorker({
 	let loopPromise = null;
 	let lastPullCheckAt = 0;
 	let lastFallbackRecoveryAt = 0;
+	let lastLateEvidenceRecoveryAt = Date.now();
 	let projectionStateEnsured = false;
 	let fallbackIndexesPromise = null;
 	const fallbackCoordinator =
@@ -111,6 +116,23 @@ function createHotelRunnerWorker({
 						negativeProofTtlMs: config.otaEmailFallbackProofTtlMs,
 						maxAttempts: config.otaEmailFallbackMaxAttempts,
 						dependencies: dependencies.otaFallbackDependencies,
+				  })
+			: null;
+
+	const lateEvidenceRecovery =
+		config.configured === true && config.projectionEnabled === true
+			? Object.prototype.hasOwnProperty.call(
+					dependencies,
+					"lateEvidenceRecovery"
+			  )
+				? dependencies.lateEvidenceRecovery
+				: (
+						dependencies.createLateEvidenceRecovery ||
+						createHotelRunnerLateEvidenceRecovery
+				  )({
+						config,
+						normalizeEvent: normalizedFromStoredEvent,
+						dependencies,
 				  })
 			: null;
 
@@ -147,6 +169,25 @@ function createHotelRunnerWorker({
 			fallbackCoordinator &&
 				nowMs - lastFallbackRecoveryAt >= FALLBACK_RECOVERY_INTERVAL_MS
 		);
+	}
+
+	function isLateEvidenceRecoveryDue(nowMs = Date.now()) {
+		return Boolean(
+			lateEvidenceRecovery &&
+				nowMs - lastLateEvidenceRecoveryAt >=
+					LATE_EVIDENCE_RECOVERY_INTERVAL_MS
+		);
+	}
+
+	async function recoverLateEvidenceIfDue(nowMs = Date.now()) {
+		if (!isLateEvidenceRecoveryDue(nowMs)) return null;
+		lastLateEvidenceRecoveryAt = nowMs;
+		return lateEvidenceRecovery.scanOnce({ now: new Date(nowMs) });
+	}
+
+	async function hasLateEvidenceCandidates() {
+		if (!lateEvidenceRecovery) return false;
+		return Boolean(await lateEvidenceRecovery.hasCandidates());
 	}
 
 	async function hasFallbackWork() {
@@ -487,7 +528,7 @@ function createHotelRunnerWorker({
 		}
 	}
 
-	async function runOnce() {
+	async function runOnce(nowMs = Date.now()) {
 		if (!config.configured) {
 			const error = new Error("HotelRunner worker configuration is incomplete.");
 			error.code = "HOTELRUNNER_CONFIG_INVALID";
@@ -500,10 +541,27 @@ function createHotelRunnerWorker({
 				? await hasFallbackWork()
 				: false;
 		const fallbackRecoveryDue = isFallbackRecoveryDue();
+		const lateEvidenceRecoveryDue = isLateEvidenceRecoveryDue(nowMs);
+		const otherWorkAvailable = Boolean(
+			eventWorkAvailable || fallbackWorkAvailable || fallbackRecoveryDue
+		);
+		let lateEvidenceWorkAvailable = false;
+		if (lateEvidenceRecoveryDue && !otherWorkAvailable) {
+			try {
+				lateEvidenceWorkAvailable = await hasLateEvidenceCandidates();
+			} catch (_error) {
+				// A failed readiness probe acquires the ordinary property lease so the
+				// owned scan can retry safely and emit only its bounded machine code.
+				lateEvidenceWorkAvailable = true;
+			}
+			if (!lateEvidenceWorkAvailable) {
+				lastLateEvidenceRecoveryAt = nowMs;
+				return false;
+			}
+		}
 		if (
-			!eventWorkAvailable &&
-			!fallbackWorkAvailable &&
-			!fallbackRecoveryDue
+			!otherWorkAvailable &&
+			!lateEvidenceWorkAvailable
 		) {
 			return false;
 		}
@@ -513,6 +571,19 @@ function createHotelRunnerWorker({
 		let event = null;
 		try {
 			await heartbeat.assertOwned();
+			if (lateEvidenceRecoveryDue) {
+				try {
+					await recoverLateEvidenceIfDue(nowMs);
+				} catch (error) {
+					console.error("[hotelrunner-worker] late evidence recovery held", {
+						code: String(
+							error?.code ||
+								"HOTELRUNNER_LATE_EVIDENCE_RECOVERY_FAILED"
+						).slice(0, 100),
+					});
+				}
+				await heartbeat.assertOwned();
+			}
 			const abandonedRecovery = await failAbandonedFinalRecovery();
 			if (abandonedRecovery) return true;
 			event =
@@ -623,7 +694,7 @@ function createHotelRunnerWorker({
 	async function runCycle(nowMs = Date.now()) {
 		let didWork = false;
 		try {
-			didWork = await runOnce();
+			didWork = await runOnce(nowMs);
 		} catch (error) {
 			console.error("[hotelrunner-worker] event loop error", {
 				code: String(error?.code || "HOTELRUNNER_WORKER_ERROR").slice(0, 100),
@@ -704,6 +775,7 @@ function createHotelRunnerWorker({
 module.exports = {
 	EVENT_LEASE_MS,
 	FALLBACK_RECOVERY_INTERVAL_MS,
+	LATE_EVIDENCE_RECOVERY_INTERVAL_MS,
 	PROJECTION_LEASE_HEARTBEAT_MS,
 	EVENT_POLL_MS,
 	MAX_EVENT_ATTEMPTS,

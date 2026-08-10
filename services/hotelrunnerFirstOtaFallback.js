@@ -27,6 +27,9 @@ const {
 const {
 	reservationHasExactHotelRunnerFirstFallbackCreationMarker,
 } = require("./hotelrunnerFirstOtaFallbackProvenance");
+const {
+	isLateEvidenceIdleFailure,
+} = require("./hotelrunnerLateEvidencePolicy");
 
 const DEFAULT_GRACE_MS = 180 * 1000;
 const MIN_GRACE_MS = 30 * 1000;
@@ -52,14 +55,13 @@ const TARGETED_LOOKUP_EVENT_MARKER_PATH =
 const BLOCKED_HOTELRUNNER_EVENT_STATES = new Set([
 	"attention",
 	"failed",
-	"needs_mapping",
 	"quarantined",
 ]);
 const PENDING_HOTELRUNNER_EVENT_STATES = new Set(
 	ACTIVE_HOTELRUNNER_EVENT_STATES
 );
 const COMPLETED_MIRROR_STATES = new Set(["created", "updated", "cancelled"]);
-const BLOCKED_MIRROR_STATES = new Set(["needs_mapping", "quarantined"]);
+const BLOCKED_MIRROR_STATES = new Set(["quarantined"]);
 const DIRECT_OTA_PROVIDERS = new Set([
 	"agoda",
 	"airbnb",
@@ -648,7 +650,7 @@ async function defaultInspectLocalHotelRunnerState(
 		findManyLean(
 			EventModel,
 			{ hotelId: identity.hotelId, providerNumber: exactConfirmation },
-			"_id hotelId status source hotelRunnerReservationId providerNumber channel reservationMongoId mirrorId receivedAt sourceUpdatedAt result",
+			"_id hotelId status source hotelRunnerReservationId providerNumber channel reservationMongoId mirrorId receivedAt sourceUpdatedAt integrityReason integrityConflict errorCode leaseOwner leaseUntil result",
 			{ sourceUpdatedAt: -1 },
 			10
 		),
@@ -661,7 +663,7 @@ async function defaultInspectLocalHotelRunnerState(
 					{ providerNumberAliases: exactConfirmation },
 				],
 			},
-			"_id hotelId hotelRunnerReservationId providerNumber providerNumberAliases channel reservationMongoId projectionStatus identityConflict",
+			"_id hotelId hotelRunnerReservationId providerNumber providerNumberAliases channel reservationMongoId projectionStatus identityConflict lastErrorCode",
 			{ observedSourceUpdatedAt: -1 },
 			10
 		),
@@ -849,8 +851,23 @@ function classifyLocalHotelRunnerState(
 			return { kind: "needs_review", code: "hotelrunner_identity_evidence_conflict" };
 		}
 	}
+	const lateEvidenceWaitingEvents = raw.events.filter(
+		(event) =>
+			isLateEvidenceIdleFailure(event, {
+				projectionEligible: eventIsProjectionEligible(
+					event,
+					identity,
+					projectionNotBefore
+				),
+			})
+	);
+	const lateEvidenceWaitingEventSet = new Set(lateEvidenceWaitingEvents);
 	if (
-		raw.events.some((event) => BLOCKED_HOTELRUNNER_EVENT_STATES.has(lower(event.status))) ||
+		raw.events.some((event) =>
+				event.integrityConflict === true ||
+				(BLOCKED_HOTELRUNNER_EVENT_STATES.has(lower(event.status)) &&
+					!lateEvidenceWaitingEventSet.has(event))
+		) ||
 		raw.mirrors.some(
 			(mirror) =>
 				mirror.identityConflict === true ||
@@ -879,6 +896,66 @@ function classifyLocalHotelRunnerState(
 			reservationId: stringId(reservation._id),
 			eventId: stringId(raw.events.find((event) => event.reservationMongoId)?._id),
 			mirrorId: stringId(raw.mirrors.find((mirror) => mirror.reservationMongoId)?._id),
+		};
+	}
+	const lateEvidenceWaitingEvent = lateEvidenceWaitingEvents[0];
+	if (lateEvidenceWaitingEvent) {
+		return {
+			kind: "pending",
+			code: "hotelrunner_late_evidence_pending",
+			eventId: stringId(lateEvidenceWaitingEvent._id),
+			eventSource: lower(lateEvidenceWaitingEvent.source),
+			lookupEventProjectable: true,
+		};
+	}
+	const needsMappingEvents = raw.events.filter(
+		(event) => lower(event.status) === "needs_mapping"
+	);
+	const needsMappingMirrors = raw.mirrors.filter(
+		(mirror) => lower(mirror.projectionStatus) === "needs_mapping"
+	);
+	const staleMappingCode = "hotelrunner_room_mapping_stale";
+	const staleMappingEvents = needsMappingEvents.filter(
+		(event) =>
+			lower(event?.errorCode) === staleMappingCode &&
+			lower(event?.result?.code) === staleMappingCode
+	);
+	const staleMappingEventIds = new Set(
+		staleMappingEvents
+			.map((event) => clean(event.hotelRunnerReservationId))
+			.filter(Boolean)
+	);
+	const staleMappingMirrors = needsMappingMirrors.filter((mirror) => {
+		const errorCode = lower(mirror.lastErrorCode);
+		return (
+			errorCode === staleMappingCode ||
+			(!errorCode &&
+				staleMappingEventIds.has(clean(mirror.hotelRunnerReservationId)))
+		);
+	});
+	if (
+		needsMappingEvents.length > staleMappingEvents.length ||
+		needsMappingMirrors.length > staleMappingMirrors.length
+	) {
+		return { kind: "needs_review", code: "hotelrunner_local_record_blocked" };
+	}
+	const needsMappingEvent = staleMappingEvents[0];
+	const needsMappingMirror = staleMappingMirrors[0];
+	if (needsMappingEvent || needsMappingMirror) {
+		return {
+			kind: "pending",
+			code: "hotelrunner_mapping_pending",
+			eventId: stringId(needsMappingEvent?._id),
+			mirrorId: stringId(needsMappingMirror?._id),
+			eventSource: lower(needsMappingEvent?.source),
+			lookupEventProjectable: Boolean(
+				needsMappingEvent &&
+					eventIsProjectionEligible(
+						needsMappingEvent,
+						identity,
+						projectionNotBefore
+					)
+			),
 		};
 	}
 	const projectionEligibleEvents = raw.events.filter((event) =>

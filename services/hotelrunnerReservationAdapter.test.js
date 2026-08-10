@@ -338,8 +338,23 @@ function createInMemoryProjectionSystem() {
 				) || null
 			);
 		},
-		find() {
-			return queryResult(() => reservations);
+		find(filter = {}) {
+			return queryResult(() => {
+				if (
+					Object.prototype.hasOwnProperty.call(
+						filter,
+						"supplierData.hotelRunner.reservationId"
+					)
+				) {
+					return reservations.filter(
+						(reservation) =>
+							String(reservation.hotelId) === String(filter.hotelId) &&
+							reservation.supplierData?.hotelRunner?.reservationId ===
+								filter["supplierData.hotelRunner.reservationId"]
+					);
+		}
+				return reservations;
+			});
 		},
 		findById(id) {
 			return queryResult(
@@ -444,6 +459,317 @@ function createInMemoryProjectionSystem() {
 			return mirror;
 		},
 	};
+}
+
+function authenticatedProviderPortalHandoffFixture({
+	provider = "expedia",
+	reportedRole = "hotel_payout",
+	olderThanPortalWatermark = false,
+	providerCollected = false,
+	sourceType = "authenticated_provider_portal",
+	equalCommercialRoles = false,
+	evidenceHotelRunnerRole = "",
+} = {}) {
+	const system = createInMemoryProjectionSystem();
+	const providerNumber = `${provider}-portal-handoff-101`;
+	const providerLabel = provider === "booking" ? "Booking.com" : "Expedia";
+	const channel = provider === "booking" ? "bookingcom" : "expedia";
+	const sourceGross = 568.64;
+	const sourcePayout = equalCommercialRoles ? sourceGross : 438.4;
+	const propertyGross = 2132.4;
+	const propertyPayout = equalCommercialRoles ? propertyGross : 1644;
+	const propertyDeduction = Number((propertyGross - propertyPayout).toFixed(2));
+	const reportedAmount =
+		reportedRole === "guest_gross" ? sourceGross : sourcePayout;
+	const normalized = normalizedMultiRoom({
+		message_uid: `${provider}-portal-handoff-event`,
+		reservation_id: `hr-${provider}-portal-handoff`,
+		hr_number: `HR-${provider.toUpperCase()}-PORTAL-HANDOFF`,
+		provider_number: providerNumber,
+		channel,
+		channel_display: providerLabel,
+		source_display: providerLabel,
+		currency: "USD",
+		sub_total: reportedAmount.toFixed(2),
+		item_total: reportedAmount.toFixed(2),
+		total: reportedAmount.toFixed(2),
+		paid_amount: "0",
+		updated_at: "2026-08-06T12:00:00.000Z",
+	});
+	const pricing = buildPickedRoomsProjection(
+		normalized,
+		resolvedRooms(normalized),
+		null,
+		{ propertyCurrency: "SAR" }
+	);
+	const reservation = buildCreateReservationDocument({
+		normalized,
+		event: { _id: `${provider}-portal-handoff-create-event` },
+		hotel: system.hotel,
+		pricing,
+		confirmationNumber: `PMS-${provider.toUpperCase()}-PORTAL-HANDOFF`,
+		reservationMongoId: `64b0000000000000000000${
+			provider === "booking" ? "89" : "88"
+		}`,
+		config: {},
+	});
+	const evidence = buildAuthenticatedProviderCommercialEvidence({
+		provider,
+		authenticatedProvider: provider,
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType,
+		sourceCurrency: "USD",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: (provider === "booking" ? "b" : "e").repeat(64),
+		sourceTimestamp: "2026-08-06T15:00:00.000Z",
+		sourceId: `${provider}-provider-portal-handoff`,
+		guestGross: { verified: true, amount: sourceGross },
+		hotelPayout: { verified: true, amount: sourcePayout },
+		...(evidenceHotelRunnerRole
+			? {
+					hotelRunnerReportedAmount: {
+						amount:
+							evidenceHotelRunnerRole === "guest_gross"
+								? sourceGross
+								: sourcePayout,
+						currency: "USD",
+						role: evidenceHotelRunnerRole,
+						explicitRoleAssignment: true,
+						provenance: {
+							provider,
+							sourceType: "hotelrunner_api",
+							sourceHash: "f".repeat(64),
+							sourceTimestamp: "2026-08-06T12:00:00.000Z",
+							sourceId: `${provider}-hotelrunner-reported-amount`,
+						},
+					},
+			  }
+			: {}),
+		currencyConversion: {
+			trusted: true,
+			verified: true,
+			sourceCurrency: "USD",
+			propertyCurrency: "SAR",
+			rate: 3.75,
+			provenance: {
+				provider,
+				sourceType: "trusted_exchange_evidence",
+				sourceHash: (provider === "booking" ? "c" : "d").repeat(64),
+				sourceTimestamp: "2026-08-06T15:00:00.000Z",
+				sourceId: `${provider}-provider-portal-fx`,
+			},
+		},
+	});
+	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
+
+	reservation.hr_number = "";
+	reservation.reservation_id = providerNumber;
+	reservation.booking_source = providerLabel;
+	reservation.customer_details.booking_source = providerLabel;
+	reservation.customer_details.confirmation_number2 = providerNumber;
+	reservation.otaIdentityKey = `${provider}:${providerNumber}`;
+	reservation.otaCrossTransportIdentityKey = "";
+	reservation.state = "confirmed";
+	reservation.reservation_status = "confirmed";
+	reservation.currency = "SAR";
+	reservation.total_amount = propertyGross;
+	reservation.sub_total = 0;
+	reservation.extras_total = 0;
+	reservation.tax_total = 0;
+	reservation.commission = 0;
+	reservation.commission_ota = null;
+	delete reservation.supplierData.hotelRunner;
+	Object.assign(reservation.supplierData, {
+		suppliedBookingNo: providerNumber,
+		otaConfirmationNumber: providerNumber,
+		platformConfirmationNumber: providerNumber,
+		otaProvider: provider,
+		otaAutomationPipeline: "ota-reservation-sync-orchestrator",
+		otaSourceAuthority: 4,
+		otaLastSourceReceivedAt: new Date(
+			olderThanPortalWatermark
+				? "2026-08-06T15:00:00.000Z"
+				: "2026-08-06T11:00:00.000Z"
+		),
+		otaCommercialEvidence: evidence,
+		otaCommercialEvidenceStaleReason: "",
+		otaSourceCurrency: "USD",
+		otaSourceAmount: sourceGross,
+		otaAmount: sourceGross,
+		otaAmountSar: propertyGross,
+		otaTotalPayoutSar: propertyPayout,
+		otaExpenseTotalSar: propertyDeduction,
+		otaPayoutFallbackReason: "",
+		otaPaymentCollectionModel: providerCollected
+			? "ota_collect"
+			: "hotel_collect",
+		otaPaymentSummary: {
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: sourceGross,
+			sourceTotalPayoutAmount: sourcePayout,
+			totalGuestPaymentAmount: propertyGross,
+			totalPayoutAmount: propertyPayout,
+			currency: "SAR",
+		},
+	});
+	reservation.adminPricing = {
+		...(reservation.adminPricing || {}),
+		clientTotal: propertyGross,
+		netAfterExpensesTotal: propertyPayout,
+		otaExpenseTotal: propertyDeduction,
+		commercialResolution: "verified",
+		commercialVerified: true,
+		payoutFallbackReason: "",
+		sourceCurrency: "USD",
+		propertyCurrency: "SAR",
+		sourceAmount: sourceGross,
+	};
+	reservation.ota_financial_summary = {
+		...(reservation.ota_financial_summary || {}),
+		show: true,
+		currency: "SAR",
+		clientTotal: propertyGross,
+		netAfterExpenses: propertyPayout,
+		netAfterOtaExpenses: propertyPayout,
+		otaExpenseTotal: propertyDeduction,
+		commercialVerified: true,
+		payoutFallbackReason: "",
+		sourceCurrency: "USD",
+		sourceAmount: sourceGross,
+		paymentSummary: reservation.supplierData.otaPaymentSummary,
+	};
+	const grossSlots = allocateCents(
+		propertyGross * 100,
+		reservation.pickedRoomsType
+			.flatMap((room) => room.pricingByDay)
+			.map(() => 1)
+	);
+	const payoutSlots = allocateCents(
+		propertyPayout * 100,
+		reservation.pickedRoomsType
+			.flatMap((room) => room.pricingByDay)
+			.map(() => 1)
+	);
+	let slot = 0;
+	for (const room of reservation.pickedRoomsType) {
+		for (const day of room.pricingByDay) {
+			const gross = grossSlots[slot] / 100;
+			const payout = payoutSlots[slot] / 100;
+			day.price = gross;
+			day.clientPrice = gross;
+			day.mainPrice = gross;
+			day.totalPriceWithCommission = gross;
+			day.netAfterExpenses = payout;
+			day.netAfterOtaExpenses = payout;
+			day.otaExpenseAmount = Number((gross - payout).toFixed(2));
+			slot += 1;
+		}
+		room.totalPriceWithCommission = Number(
+			room.pricingByDay
+				.reduce((sum, day) => sum + day.totalPriceWithCommission, 0)
+				.toFixed(2)
+		);
+	}
+	reservation.pickedRoomsPricing = JSON.parse(
+		JSON.stringify(reservation.pickedRoomsType)
+	);
+	reservation.paid_amount = providerCollected ? propertyGross : 0;
+	reservation.paid_amount_breakdown = {
+		paid_online_via_link: 0,
+		paid_at_hotel_cash: 0,
+		paid_at_hotel_card: 0,
+		paid_to_hotel: 0,
+		paid_online_jannatbooking: 0,
+		paid_online_other_platforms: providerCollected ? propertyGross : 0,
+		paid_online_via_instapay: 0,
+		paid_no_show: 0,
+		payment_comments: providerCollected
+			? `${providerLabel} collected by platform`
+			: `${providerLabel} hotel collect`,
+	};
+	reservation.payment_details = { captured: false, onsite_paid_amount: 0 };
+	reservation.financial_cycle = {
+		collectionModel: providerCollected ? "pms_collected" : "pending",
+		status: "open",
+		commissionType: "amount",
+		commissionValue: 0,
+		commissionAmount: 0,
+		commissionAssigned: false,
+		pmsCollectedAmount: providerCollected ? propertyGross : 0,
+		hotelCollectedAmount: 0,
+		hotelPayoutDue: 0,
+		commissionDueToPms: 0,
+	};
+	system.reservations.push(reservation);
+	system.dependencies.loadEmailCommercialBridge = async () => ({
+		ok: false,
+		reason: "commercial_evidence_not_found",
+		amountRole: "",
+	});
+	return {
+		system,
+		normalized,
+		reservation,
+		evidence,
+		providerNumber,
+		reportedRole,
+	};
+}
+
+function authenticatedProviderHotelRunnerSourceProjection(
+	system,
+	normalized,
+	reservation
+) {
+	const pricing = buildPickedRoomsProjection(
+		normalized,
+		resolvedRooms(normalized),
+		reservation,
+		{ propertyCurrency: system.hotel.currency }
+	);
+	assert.equal(pricing.ok, true);
+	return projectionFromIncoming(normalized, pricing);
+}
+
+function portalCommercialSnapshot(reservation) {
+	return JSON.parse(
+		JSON.stringify({
+			state: reservation.state,
+			reservation_status: reservation.reservation_status,
+			reservation_id: reservation.reservation_id,
+			customer_details: reservation.customer_details,
+			comment: reservation.comment,
+			booking_comment: reservation.booking_comment,
+			total_amount: reservation.total_amount,
+			sub_total: reservation.sub_total,
+			extras_total: reservation.extras_total,
+			tax_total: reservation.tax_total,
+			currency: reservation.currency,
+			commission: reservation.commission,
+			commission_ota: reservation.commission_ota,
+			pickedRoomsType: reservation.pickedRoomsType,
+			pickedRoomsPricing: reservation.pickedRoomsPricing,
+			paid_amount: reservation.paid_amount,
+			paid_amount_breakdown: reservation.paid_amount_breakdown,
+			payment_details: reservation.payment_details,
+			financial_cycle: reservation.financial_cycle,
+			adminPricing: reservation.adminPricing,
+			ota_financial_summary: reservation.ota_financial_summary,
+			otaCommercialEvidence: reservation.supplierData.otaCommercialEvidence,
+			otaCommercialEvidenceStaleReason:
+				reservation.supplierData.otaCommercialEvidenceStaleReason,
+			otaPaymentSummary: reservation.supplierData.otaPaymentSummary,
+			otaTotalPayoutSar: reservation.supplierData.otaTotalPayoutSar,
+			otaExpenseTotalSar: reservation.supplierData.otaExpenseTotalSar,
+			otaPayoutFallbackReason: reservation.supplierData.otaPayoutFallbackReason,
+			otaSourceCurrency: reservation.supplierData.otaSourceCurrency,
+			otaSourceAmount: reservation.supplierData.otaSourceAmount,
+			otaAmount: reservation.supplierData.otaAmount,
+			otaAmountSar: reservation.supplierData.otaAmountSar,
+		})
+	);
 }
 
 function attachVerifiedHotelRunnerEmailCommercialEvidence(reservation) {
@@ -1675,6 +2001,794 @@ test("cross-currency API event waits visibly for its email identity bridge inste
 	assert.equal(system.mappingWrites.length, 0);
 });
 
+test("an older Expedia payout event performs one exact metadata-only portal handoff without touching provider money or lifecycle", async () => {
+	const { system, normalized, reservation, evidence } =
+		authenticatedProviderPortalHandoffFixture({
+			provider: "expedia",
+			reportedRole: "hotel_payout",
+			olderThanPortalWatermark: true,
+			providerCollected: true,
+		});
+	assert.equal(hasFinanceOrSettlementActivity(reservation), true);
+	const commercialBefore = portalCommercialSnapshot(reservation);
+	const portalWatermark = reservation.supplierData.otaLastSourceReceivedAt;
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: {
+				_id: "expedia-provider-portal-event",
+				payload: normalized.storedPayload,
+			},
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.code, "hotelrunner_older_authenticated_provider_handoff");
+	assert.equal(result.metadataOnly, true);
+	assert.equal(result.hotelRunnerAmountRole, "hotel_payout");
+	assert.equal(system.reservations.length, 1);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+	assert.equal(reservation.hr_number, normalized.hrNumber);
+	assert.equal(
+		reservation.supplierData.hotelRunner.reservationId,
+		normalized.hotelRunnerReservationId
+	);
+	assert.equal(
+		reservation.supplierData.hotelRunner.appliedCanonicalHash,
+		normalized.canonicalHash
+	);
+	assert.match(
+		reservation.supplierData.hotelRunner.metadataHandoffProjectionHash,
+		/^[a-f0-9]{64}$/
+	);
+	assert.equal(
+		reservation.supplierData.otaAutomationPipeline,
+		"hotelrunner-background-worker"
+	);
+	assert.equal(reservation.supplierData.otaSourceAuthority, 4);
+	assert.equal(
+		reservation.supplierData.otaLastSourceReceivedAt,
+		portalWatermark,
+		"the provider collector watermark must not be rolled back"
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidence.evidenceHash,
+		evidence.evidenceHash
+	);
+	assert.equal(system.mirror.reservationMongoId, reservation._id);
+	assert.equal(system.mirror.appliedCanonicalHash, normalized.canonicalHash);
+	assert.equal(system.mirror.lastResult.metadataOnly, true);
+});
+
+test("a newer Booking.com gross event uses the same provider-generic portal proof and preserves commercial facts", async () => {
+	const { system, normalized, reservation, evidence } =
+		authenticatedProviderPortalHandoffFixture({
+			provider: "booking",
+			reportedRole: "guest_gross",
+		});
+	const commercialBefore = portalCommercialSnapshot(reservation);
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: {
+				_id: "booking-provider-portal-event",
+				payload: normalized.storedPayload,
+			},
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.commercialProtected, true);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+	assert.equal(
+		reservation.supplierData.hotelRunner.reservationId,
+		normalized.hotelRunnerReservationId
+	);
+	assert.equal(
+		reservation.supplierData.otaCommercialEvidence.evidenceHash,
+		evidence.evidenceHash
+	);
+	assert.equal(
+		reservation.supplierData.otaAutomationPipeline,
+		"hotelrunner-background-worker"
+	);
+	assert.equal(reservation.supplierData.otaSourceAuthority, 4);
+});
+
+test("an older Booking.com gross event uses the provider-generic metadata-only handoff", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			provider: "booking",
+			reportedRole: "guest_gross",
+			olderThanPortalWatermark: true,
+		});
+	const commercialBefore = portalCommercialSnapshot(reservation);
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "updated");
+	assert.equal(result.code, "hotelrunner_older_authenticated_provider_handoff");
+	assert.equal(result.metadataOnly, true);
+	assert.equal(result.hotelRunnerAmountRole, "guest_gross");
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+});
+
+test("explicit authenticated provider API evidence can bridge the same exact existing-record gate", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			provider: "expedia",
+			reportedRole: "hotel_payout",
+			sourceType: "authenticated_provider_api",
+		});
+	const commercialBefore = portalCommercialSnapshot(reservation);
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "updated");
+	assert.equal(result.commercialProtected, true);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+});
+
+test("an older event cannot metadata-link a locally terminal provider reservation", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+		});
+	reservation.state = "cancelled";
+	reservation.reservation_status = "cancelled";
+	const before = portalCommercialSnapshot(reservation);
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "ignored");
+	assert.equal(result.code, "hotelrunner_stale_against_pms_watermark");
+	assert.equal(system.reservationWrites.length, 0);
+	assert.deepEqual(portalCommercialSnapshot(reservation), before);
+	assert.equal(reservation.supplierData.hotelRunner, undefined);
+});
+
+test("metadata-only handoff retry finishes only the mirror after a post-reservation mirror failure", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+			providerCollected: true,
+		});
+	const expectedSourceProjection =
+		authenticatedProviderHotelRunnerSourceProjection(
+			system,
+			normalized,
+			reservation
+		);
+	const commercialBefore = portalCommercialSnapshot(reservation);
+	const portalWatermark = reservation.supplierData.otaLastSourceReceivedAt;
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let failAppliedMirrorOnce = true;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (failAppliedMirrorOnce && update?.$set?.appliedCanonicalHash) {
+			return queryResult(() => {
+				failAppliedMirrorOnce = false;
+				throw new Error(
+					"synthetic mirror write failure after reservation metadata"
+				);
+			});
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		/synthetic mirror write failure/
+	);
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(system.mirror.appliedCanonicalHash, "");
+	assert.equal(
+		reservation.supplierData.hotelRunner.appliedCanonicalHash,
+		normalized.canonicalHash
+	);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+	assert.equal(
+		reservation.supplierData.otaLastSourceReceivedAt,
+		portalWatermark
+	);
+
+	const recovered = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(recovered.status, "updated");
+	assert.equal(
+		recovered.code,
+		"hotelrunner_authenticated_provider_mirror_recovered"
+	);
+	assert.equal(recovered.mirrorRecovery, true);
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(system.mirror.appliedCanonicalHash, normalized.canonicalHash);
+	assert.equal(system.mirror.lastResult.mirrorRecovery, true);
+	assert.deepEqual(
+		system.mirror.lastAppliedProjection,
+		expectedSourceProjection,
+		"mirror-only recovery must restore the HotelRunner source assertion, not claim the provider portal projection"
+	);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+	assert.equal(
+		reservation.supplierData.otaLastSourceReceivedAt,
+		portalWatermark
+	);
+});
+
+test("mirror recovery rejects a post-metadata projection change without a second reservation write", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+			providerCollected: true,
+		});
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let failAppliedMirrorOnce = true;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (failAppliedMirrorOnce && update?.$set?.appliedCanonicalHash) {
+			return queryResult(() => {
+				failAppliedMirrorOnce = false;
+				throw new Error(
+					"synthetic mirror write failure before projection drift"
+				);
+			});
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		/synthetic mirror write failure/
+	);
+	assert.equal(system.reservationWrites.length, 1);
+	const storedProjectionHash =
+		reservation.supplierData.hotelRunner.metadataHandoffProjectionHash;
+	reservation.customer_details.name = "Legacy writer changed the guest";
+	reservation.total_amount += 1;
+
+	const rejected = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(rejected.status, "quarantined");
+	assert.equal(
+		rejected.code,
+		"hotelrunner_authenticated_provider_mirror_recovery_rejected"
+	);
+	assert.equal(rejected.handoffReason, "metadata_projection_hash_mismatch");
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(system.mirror.appliedCanonicalHash, "");
+	assert.equal(system.mirror.projectionStatus, "quarantined");
+	assert.equal(
+		reservation.supplierData.hotelRunner.metadataHandoffProjectionHash,
+		storedProjectionHash
+	);
+});
+
+test("mirror recovery quarantines a corrupt nonempty handoff hash instead of entering the normal update path", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+			providerCollected: true,
+		});
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let failAppliedMirrorOnce = true;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (failAppliedMirrorOnce && update?.$set?.appliedCanonicalHash) {
+			return queryResult(() => {
+				failAppliedMirrorOnce = false;
+				throw new Error("synthetic mirror failure before hash corruption");
+			});
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		/synthetic mirror failure/
+	);
+	assert.equal(system.reservationWrites.length, 1);
+	reservation.supplierData.hotelRunner.metadataHandoffProjectionHash =
+		"corrupt-handoff-hash";
+
+	const rejected = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(rejected.status, "quarantined");
+	assert.equal(
+		rejected.code,
+		"hotelrunner_authenticated_provider_mirror_recovery_rejected"
+	);
+	assert.equal(rejected.handoffReason, "metadata_projection_hash_invalid");
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(system.mirror.appliedCanonicalHash, "");
+	assert.equal(system.mirror.projectionStatus, "quarantined");
+});
+
+test("a normal newer provider update without a handoff hash retries through its ordinary apply path", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			provider: "booking",
+			reportedRole: "guest_gross",
+		});
+	const commercialBefore = portalCommercialSnapshot(reservation);
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let failAppliedMirrorOnce = true;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (failAppliedMirrorOnce && update?.$set?.appliedCanonicalHash) {
+			return queryResult(() => {
+				failAppliedMirrorOnce = false;
+				throw new Error("synthetic ordinary mirror failure");
+			});
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		/synthetic ordinary mirror failure/
+	);
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(
+		reservation.supplierData.hotelRunner.metadataHandoffProjectionHash,
+		undefined
+	);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "updated");
+	assert.equal(result.mirrorRecovery, undefined);
+	assert.equal(system.reservationWrites.length, 2);
+	assert.equal(system.mirror.appliedCanonicalHash, normalized.canonicalHash);
+	assert.deepEqual(portalCommercialSnapshot(reservation), commercialBefore);
+});
+
+test("metadata-only mirror ownership records the HotelRunner source projection, not portal or concurrent PMS facts", async () => {
+	const { system, normalized, reservation } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+		});
+	const expectedTotal = reservation.total_amount;
+	const expectedSourceProjection =
+		authenticatedProviderHotelRunnerSourceProjection(
+			system,
+			normalized,
+			reservation
+		);
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let injectedConcurrentChange = false;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (!injectedConcurrentChange && update?.$set?.appliedCanonicalHash) {
+			injectedConcurrentChange = true;
+			reservation.customer_details.name = "Concurrent manual guest edit";
+			reservation.total_amount = expectedTotal + 1;
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(result.status, "updated");
+	assert.equal(result.metadataOnly, true);
+	assert.equal(
+		reservation.customer_details.name,
+		"Concurrent manual guest edit"
+	);
+	assert.equal(reservation.total_amount, expectedTotal + 1);
+	assert.deepEqual(
+		system.mirror.lastAppliedProjection,
+		expectedSourceProjection
+	);
+	assert.notEqual(
+		system.mirror.lastAppliedProjection.commercial.totalAmount,
+		expectedTotal,
+		"verified portal gross must not become HotelRunner's owned commercial baseline"
+	);
+});
+
+test("provider guest, note, and guest-count facts stay protected until HotelRunner first matches them", async () => {
+	const { system, normalized, reservation, providerNumber } =
+		authenticatedProviderPortalHandoffFixture({
+			olderThanPortalWatermark: true,
+		});
+	const providerFacts = {
+		name: "Provider Portal Guest",
+		note: "Provider portal booking note",
+		totalGuests: 7,
+		adults: 5,
+		children: 2,
+	};
+	reservation.customer_details.name = providerFacts.name;
+	reservation.comment = providerFacts.note;
+	reservation.booking_comment = providerFacts.note;
+	reservation.total_guests = providerFacts.totalGuests;
+	reservation.adults = providerFacts.adults;
+	reservation.children = providerFacts.children;
+
+	const hotelRunnerEvent = ({
+		messageUid,
+		updatedAt,
+		guest = "Projection Guest",
+		note = "",
+		totalGuests = 5,
+		roomGuests = [
+			{ adults: 2, children: 0 },
+			{ adults: 2, children: 1 },
+		],
+	}) =>
+		normalizedMultiRoom({
+			message_uid: messageUid,
+			reservation_id: normalized.hotelRunnerReservationId,
+			hr_number: normalized.hrNumber,
+			provider_number: providerNumber,
+			channel: "expedia",
+			channel_display: "Expedia",
+			source_display: "Expedia",
+			currency: "USD",
+			sub_total: "438.40",
+			item_total: "438.40",
+			total: "438.40",
+			paid_amount: "0",
+			updated_at: updatedAt,
+			guest,
+			note,
+			total_guests: totalGuests,
+			rooms: [
+				rawRoom({
+					id: "external-room-1",
+					invCode: "INV-DOUBLE",
+					name: "Double Room",
+					prices: ["100", "200"],
+					...roomGuests[0],
+				}),
+				rawRoom({
+					id: "external-room-2",
+					invCode: "INV-TRIPLE",
+					name: "Triple Room",
+					prices: ["300", "400"],
+					...roomGuests[1],
+				}),
+			],
+		});
+	const project = (next) =>
+		projectHotelRunnerReservation(
+			{
+				normalized: next,
+				event: { payload: next.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		);
+
+	const first = await project(normalized);
+	assert.equal(first.code, "hotelrunner_older_authenticated_provider_handoff");
+	assert.equal(
+		system.mirror.lastAppliedProjection.guest.name,
+		"Projection Guest"
+	);
+	assert.equal(system.mirror.lastAppliedProjection.note.comment, "");
+	assert.deepEqual(system.mirror.lastAppliedProjection.guestCounts, {
+		totalGuests: 5,
+		adults: 4,
+		children: 1,
+	});
+
+	const stillDifferent = hotelRunnerEvent({
+		messageUid: "expedia-source-still-differs",
+		updatedAt: "2026-08-06T13:00:00.000Z",
+	});
+	const protectedResult = await project(stillDifferent);
+	assert.equal(protectedResult.status, "updated");
+	assert.equal(protectedResult.guestCountsProtected, true);
+	assert.equal(reservation.customer_details.name, providerFacts.name);
+	assert.equal(reservation.comment, providerFacts.note);
+	assert.equal(reservation.booking_comment, providerFacts.note);
+	assert.equal(reservation.total_guests, providerFacts.totalGuests);
+	assert.equal(reservation.adults, providerFacts.adults);
+	assert.equal(reservation.children, providerFacts.children);
+	assert.equal(
+		system.mirror.lastAppliedProjection.guest.name,
+		"Projection Guest"
+	);
+	assert.equal(system.mirror.lastAppliedProjection.note.comment, "");
+	assert.equal(system.mirror.lastAppliedProjection.guestCounts.totalGuests, 5);
+
+	const sourceMatchesProvider = hotelRunnerEvent({
+		messageUid: "expedia-source-now-matches-provider",
+		updatedAt: "2026-08-06T14:00:00.000Z",
+		guest: providerFacts.name,
+		note: providerFacts.note,
+		totalGuests: providerFacts.totalGuests,
+		roomGuests: [
+			{ adults: 3, children: 1 },
+			{ adults: 2, children: 1 },
+		],
+	});
+	const matchedResult = await project(sourceMatchesProvider);
+	assert.equal(matchedResult.status, "updated");
+	assert.equal(
+		system.mirror.lastAppliedProjection.guest.name,
+		providerFacts.name
+	);
+	assert.equal(
+		system.mirror.lastAppliedProjection.note.comment,
+		providerFacts.note
+	);
+	assert.deepEqual(system.mirror.lastAppliedProjection.guestCounts, {
+		totalGuests: providerFacts.totalGuests,
+		adults: providerFacts.adults,
+		children: providerFacts.children,
+	});
+
+	const laterSourceChange = hotelRunnerEvent({
+		messageUid: "expedia-source-changes-after-match",
+		updatedAt: "2026-08-06T14:30:00.000Z",
+		guest: "HotelRunner Confirmed Guest",
+		note: "HotelRunner confirmed note",
+		totalGuests: 6,
+		roomGuests: [
+			{ adults: 2, children: 1 },
+			{ adults: 2, children: 1 },
+		],
+	});
+	const changedResult = await project(laterSourceChange);
+	assert.equal(changedResult.status, "updated");
+	assert.equal(
+		reservation.customer_details.name,
+		"HotelRunner Confirmed Guest"
+	);
+	assert.equal(reservation.comment, "HotelRunner confirmed note");
+	assert.equal(reservation.booking_comment, "HotelRunner confirmed note");
+	assert.equal(reservation.total_guests, 6);
+	assert.equal(reservation.adults, 4);
+	assert.equal(reservation.children, 2);
+});
+
+test("provider-portal handoff rejects tampering, role mismatch, stale evidence, room mismatch, and non-portal sources without PMS mutation", async (t) => {
+	const cases = [
+		{
+			name: "tampered evidence hash",
+			mutate: ({ reservation }) => {
+				reservation.supplierData.otaCommercialEvidence = JSON.parse(
+					JSON.stringify(reservation.supplierData.otaCommercialEvidence)
+				);
+				reservation.supplierData.otaCommercialEvidence.evidenceHash =
+					"0".repeat(64);
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "HotelRunner total matches no verified source role",
+			mutate: ({ normalized }) => {
+				normalized.totalCents += 1;
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "commercial evidence has a stale marker",
+			mutate: ({ reservation }) => {
+				reservation.supplierData.otaCommercialEvidenceStaleReason =
+					"provider_stay_changed";
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "picked room pricing diverges from the canonical room rows",
+			mutate: ({ reservation }) => {
+				reservation.pickedRoomsPricing[0].pricingByDay[0].netAfterExpenses += 0.01;
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "provider payment summary contradicts the verified payout role",
+			mutate: ({ reservation }) => {
+				reservation.supplierData.otaPaymentSummary = {
+					...reservation.supplierData.otaPaymentSummary,
+					sourceTotalPayoutAmount: 438.41,
+				};
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "redundant property gross contradicts verified evidence",
+			mutate: ({ reservation }) => {
+				reservation.supplierData.otaAmountSar = 2132.41;
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "nightly commercial totals contradict the verified reservation total",
+			mutate: ({ reservation }) => {
+				reservation.pickedRoomsType[0].pricingByDay[0].totalPriceWithCommission += 0.01;
+				reservation.pickedRoomsPricing = JSON.parse(
+					JSON.stringify(reservation.pickedRoomsType)
+				);
+			},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "HotelRunner total ambiguously matches equal gross and payout roles",
+			fixture: () =>
+				authenticatedProviderPortalHandoffFixture({
+					reportedRole: "guest_gross",
+					equalCommercialRoles: true,
+				}),
+			mutate: () => {},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "explicit HotelRunner evidence assigns a contradictory amount role",
+			fixture: () =>
+				authenticatedProviderPortalHandoffFixture({
+					reportedRole: "hotel_payout",
+					evidenceHotelRunnerRole: "guest_gross",
+				}),
+			mutate: () => {},
+			expectedCode: "hotelrunner_currency_requires_review",
+		},
+		{
+			name: "resolved HotelRunner room differs from the provider-created room",
+			mutate: ({ reservation }) => {
+				reservation.pickedRoomsType[0].hotelRoomConfigId = LOCAL_TRIPLE_ID;
+				reservation.pickedRoomsType[0].localRoomConfigId = LOCAL_TRIPLE_ID;
+				reservation.pickedRoomsPricing[0].hotelRoomConfigId = LOCAL_TRIPLE_ID;
+				reservation.pickedRoomsPricing[0].localRoomConfigId = LOCAL_TRIPLE_ID;
+			},
+			expectedCode: "hotelrunner_authenticated_provider_handoff_rejected",
+		},
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const fixture = scenario.fixture
+				? scenario.fixture()
+				: authenticatedProviderPortalHandoffFixture();
+			scenario.mutate(fixture);
+			const before = portalCommercialSnapshot(fixture.reservation);
+			const result = await projectHotelRunnerReservation(
+				{
+					normalized: fixture.normalized,
+					event: { payload: fixture.normalized.storedPayload },
+					hotel: fixture.system.hotel,
+					config: fixture.system.config,
+				},
+				fixture.system.dependencies
+			);
+			assert.equal(result.status, "quarantined");
+			assert.equal(result.code, scenario.expectedCode);
+			assert.equal(fixture.system.reservationWrites.length, 0);
+			assert.deepEqual(portalCommercialSnapshot(fixture.reservation), before);
+			assert.equal(fixture.reservation.supplierData.hotelRunner, undefined);
+		});
+	}
+
+	await t.test(
+		"valid authenticated relay/audit evidence is not portal authority",
+		async () => {
+			const fixture = authenticatedProviderPortalHandoffFixture({
+				sourceType: "authenticated_ota_audit",
+			});
+			assert.equal(
+				validateOtaCommercialEvidence(
+					fixture.reservation.supplierData.otaCommercialEvidence
+				).ok,
+				true
+			);
+			const before = portalCommercialSnapshot(fixture.reservation);
+			const result = await projectHotelRunnerReservation(
+				{
+					normalized: fixture.normalized,
+					event: { payload: fixture.normalized.storedPayload },
+					hotel: fixture.system.hotel,
+					config: fixture.system.config,
+				},
+				fixture.system.dependencies
+			);
+			assert.equal(result.status, "quarantined");
+			assert.equal(result.code, "hotelrunner_currency_requires_review");
+			assert.equal(fixture.system.reservationWrites.length, 0);
+			assert.deepEqual(portalCommercialSnapshot(fixture.reservation), before);
+			assert.equal(fixture.reservation.supplierData.hotelRunner, undefined);
+		}
+	);
+});
+
 test("queued Trip stored-FX evidence creates one authority-4 API reservation with gross and payout atomically", async () => {
 	const system = createInMemoryProjectionSystem();
 	system.config.requireOtaReview = true;
@@ -2854,8 +3968,8 @@ test("first modified and cancellation events may use one unique exact alias with
 		},
 	};
 	const ReservationModel = {
-		findOne: () => queryResult(() => null),
-		find: () => queryResult(() => [candidate]),
+		find: (filter) => queryResult(() =>
+				filter["supplierData.hotelRunner.reservationId"] ? [] : [candidate]),
 	};
 	const modified = normalizedMultiRoom();
 	modified.modified = true;
@@ -2909,8 +4023,8 @@ test("relaxed lifecycle identity linking fails closed when the exact alias is no
 		supplierData: { otaProvider: "booking", otaAutomationPipeline: "ota-email" },
 	}));
 	const ReservationModel = {
-		findOne: () => queryResult(() => null),
-		find: () => queryResult(() => candidates),
+		find: (filter) => queryResult(() =>
+				filter["supplierData.hotelRunner.reservationId"] ? [] : candidates),
 	};
 	const modified = normalizedMultiRoom();
 	modified.modified = true;
@@ -2938,8 +4052,10 @@ test("alias linking quarantines when the bounded candidate query cannot prove un
 	}));
 	let requestedLimit = null;
 	const ReservationModel = {
-		findOne: () => queryResult(() => null),
-		find: () => {
+		find: (filter) => {
+			if (filter["supplierData.hotelRunner.reservationId"]) {
+				return queryResult(() => []);
+			}
 			const query = queryResult(() => candidates);
 			query.limit = (value) => {
 				requestedLimit = value;
@@ -2956,6 +4072,41 @@ test("alias linking quarantines when the bounded candidate query cannot prove un
 		(error) => error?.code === "hotelrunner_identity_ambiguous"
 	);
 	assert.equal(requestedLimit, 6);
+});
+
+test("direct HotelRunner identity linking fails closed when the primary identifier is duplicated", async () => {
+	const normalized = normalizedMultiRoom();
+	const duplicates = ["direct-duplicate-a", "direct-duplicate-b"].map(
+		(_id) => ({
+			_id,
+			hotelId: "64b000000000000000000001",
+			supplierData: {
+				hotelRunner: { reservationId: normalized.hotelRunnerReservationId },
+			},
+		})
+	);
+	let requestedLimit = null;
+	const ReservationModel = {
+		find(filter) {
+			const matches = filter["supplierData.hotelRunner.reservationId"]
+				? duplicates
+				: [];
+			const query = queryResult(() => matches);
+			query.limit = (value) => {
+				requestedLimit = value;
+				return query;
+			};
+			return query;
+		},
+	};
+
+	await assert.rejects(
+		findLinkedReservation(normalized, duplicates[0].hotelId, {
+			ReservationModel,
+		}),
+		(error) => error?.code === "hotelrunner_identity_ambiguous"
+	);
+	assert.equal(requestedLimit, 2);
 });
 
 test("critical ownership ignores transport room IDs but detects local room, date, and count changes", () => {

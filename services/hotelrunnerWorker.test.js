@@ -5,6 +5,7 @@ process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+	LATE_EVIDENCE_RECOVERY_INTERVAL_MS,
 	TARGETED_LOOKUP_MARKER_PATH,
 	buildProjectionEligibilityFilter,
 	createHotelRunnerWorker,
@@ -145,6 +146,54 @@ test("an idle worker probes without churning the projection lease", async () => 
 
 	assert.equal(await worker.runOnce(), false);
 	assert.equal(projectionStateWrites, 0);
+	assert.equal(projectionLeaseClaims, 0);
+});
+
+test("a due late-evidence interval with no candidates does not churn the property lease", async () => {
+	let candidateProbes = 0;
+	let scans = 0;
+	let projectionLeaseClaims = 0;
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		dependencies: {
+			otaFallbackCoordinator: null,
+			EventModel: {
+				exists() {
+					return { exec: async () => null };
+				},
+			},
+			SyncStateModel: {
+				findOneAndUpdate() {
+					projectionLeaseClaims += 1;
+					return { exec: async () => ({ _id: "unexpected-lease" }) };
+				},
+			},
+			lateEvidenceRecovery: {
+				async hasCandidates() {
+					candidateProbes += 1;
+					return false;
+				},
+				async scanOnce() {
+					scans += 1;
+					return { requeued: false };
+				},
+			},
+			createPullSync: () => ({
+				runIfDue: async () => ({ status: "disabled" }),
+			}),
+		},
+	});
+	const dueAt = Date.now() + LATE_EVIDENCE_RECOVERY_INTERVAL_MS;
+
+	assert.equal(await worker.runOnce(dueAt), false);
+	assert.equal(await worker.runOnce(dueAt + 1), false);
+	assert.equal(candidateProbes, 1);
+	assert.equal(scans, 0);
 	assert.equal(projectionLeaseClaims, 0);
 });
 
@@ -750,6 +799,240 @@ test("scheduled room-list refresh is independent from reservation-history pull",
 	assert.equal(await worker.runCycle(30_000), false);
 	assert.equal(roomListChecks, 1);
 	assert.equal(pullChecks, 1);
+});
+
+test("late authoritative evidence recovery runs when due and then at a bounded interval", async () => {
+	let scans = 0;
+	let candidateProbes = 0;
+	let lastScanAt = null;
+	const EventModel = {
+		exists() {
+			return { exec: async () => null };
+		},
+		findOneAndUpdate() {
+			return {
+				select() {
+					return this;
+				},
+				exec: async () => null,
+			};
+		},
+	};
+	const SyncStateModel = {
+		updateOne() {
+			return { exec: async () => ({ matchedCount: 1 }) };
+		},
+		findOneAndUpdate() {
+			return { exec: async () => ({ _id: "late-evidence-state" }) };
+		},
+	};
+	const worker = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId: "64b000000000000000000001",
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		dependencies: {
+			otaFallbackCoordinator: null,
+			EventModel,
+			SyncStateModel,
+			lateEvidenceRecovery: {
+				async hasCandidates() {
+					candidateProbes += 1;
+					return true;
+				},
+				async scanOnce({ now }) {
+					scans += 1;
+					lastScanAt = now;
+					return { requeued: false };
+				},
+			},
+			createPullSync: () => ({
+				runIfDue: async () => ({ status: "disabled" }),
+			}),
+		},
+	});
+
+	const firstAt = Date.now() + LATE_EVIDENCE_RECOVERY_INTERVAL_MS;
+	assert.equal(await worker.runCycle(firstAt), false);
+	assert.equal(scans, 1);
+	assert.equal(candidateProbes, 1);
+	assert.equal(lastScanAt.toISOString(), new Date(firstAt).toISOString());
+	assert.equal(
+		await worker.runCycle(firstAt + LATE_EVIDENCE_RECOVERY_INTERVAL_MS - 1),
+		false
+	);
+	assert.equal(scans, 1);
+	assert.equal(candidateProbes, 1);
+	assert.equal(
+		await worker.runCycle(firstAt + LATE_EVIDENCE_RECOVERY_INTERVAL_MS),
+		false
+	);
+	assert.equal(scans, 2);
+	assert.equal(candidateProbes, 2);
+});
+
+test("only the property-lease owner scans late evidence and its recovered event preempts fallback", async () => {
+	const hotelId = "64b000000000000000000001";
+	const state = { hotelId };
+	let event = null;
+	let ownerScans = 0;
+	let nonOwnerScans = 0;
+	let projections = 0;
+	let fallbackRuns = 0;
+	const query = (value) => ({
+		select() {
+			return this;
+		},
+		exec: async () => value,
+	});
+	const SyncStateModel = {
+		updateOne(filter, update) {
+			if (
+				filter.projectionLeaseOwner &&
+				state.projectionLeaseOwner !== filter.projectionLeaseOwner
+			) {
+				return query({ matchedCount: 0 });
+			}
+			Object.assign(state, update.$set || {});
+			for (const key of Object.keys(update.$unset || {})) delete state[key];
+			return query({ matchedCount: 1 });
+		},
+		findOneAndUpdate(filter, update) {
+			const now = update.$set.projectionLeaseAcquiredAt;
+			const ownerMatches =
+				state.projectionLeaseOwner === filter.$or[3].projectionLeaseOwner;
+			const expired =
+				!state.projectionLeaseUntil ||
+				new Date(state.projectionLeaseUntil).getTime() <= now.getTime();
+			if (!expired && !ownerMatches) return query(null);
+			Object.assign(state, update.$set);
+			return query({ ...state });
+		},
+	};
+	const EventModel = {
+		exists() {
+			return query(event?.status === "pending" ? { _id: event._id } : null);
+		},
+		findOneAndUpdate(filter, update) {
+			if (!event || !filter.status?.$in?.includes(event.status)) {
+				return query(null);
+			}
+			Object.assign(event, update.$set || {});
+			event.attempts = Number(event.attempts || 0) + 1;
+			return query(event);
+		},
+		updateOne(_filter, update) {
+			if (event) {
+				Object.assign(event, update.$set || {});
+				for (const key of Object.keys(update.$unset || {})) delete event[key];
+			}
+			return query({ matchedCount: 1 });
+		},
+	};
+	const otaFallbackCoordinator = {
+		ensureIndexes: async () => true,
+		hasDueWork: async () => true,
+		recoverOrphanedArchivedEmails: async () => ({ scanned: 0 }),
+		async runOnce() {
+			fallbackRuns += 1;
+			return { _id: "fallback-must-not-run" };
+		},
+	};
+	const recoveredEvent = () => {
+		const payload = { issues: [], rooms: [] };
+		return {
+			_id: "late-evidence-event",
+			hotelId,
+			status: "pending",
+			attempts: 0,
+			messageUid: "late-evidence-message",
+			hotelRunnerReservationId: "late-evidence-hotelrunner-id",
+			payloadHash: "a".repeat(64),
+			canonicalHash: "b".repeat(64),
+			sourceUpdatedAt: new Date("2026-08-10T16:00:00.000Z"),
+			integrityReason: "",
+			payload,
+			toObject() {
+				return { ...this, payload };
+			},
+		};
+	};
+	const dependencies = {
+		EventModel,
+		SyncStateModel,
+		otaFallbackCoordinator,
+		HotelModel: {
+			findOne: () => ({
+				select() {
+					return this;
+				},
+				lean() {
+					return this;
+				},
+				exec: async () => ({
+					_id: hotelId,
+					belongsTo: "64b000000000000000000002",
+				}),
+			}),
+		},
+		projectReservation: async () => {
+			projections += 1;
+			return { status: "created" };
+		},
+		createPullSync: () => ({
+			runIfDue: async () => ({ status: "disabled" }),
+		}),
+	};
+	const owner = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId,
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		instanceId: "late-evidence-owner",
+		dependencies: {
+			...dependencies,
+			lateEvidenceRecovery: {
+				async scanOnce() {
+					ownerScans += 1;
+					event = recoveredEvent();
+					return { requeued: true };
+				},
+			},
+		},
+	});
+	const nonOwner = createHotelRunnerWorker({
+		config: {
+			configured: true,
+			hotelId,
+			projectionEnabled: true,
+			pullEnabled: false,
+		},
+		instanceId: "late-evidence-non-owner",
+		dependencies: {
+			...dependencies,
+			lateEvidenceRecovery: {
+				async scanOnce() {
+					nonOwnerScans += 1;
+					return { requeued: false };
+				},
+			},
+		},
+	});
+
+	const dueAt = Date.now() + LATE_EVIDENCE_RECOVERY_INTERVAL_MS;
+	assert.ok(await owner.claimProjectionLease(new Date(dueAt)));
+	assert.equal(await nonOwner.runOnce(dueAt), false);
+	assert.equal(nonOwnerScans, 0);
+	await owner.releaseProjectionLease();
+
+	assert.equal(await owner.runOnce(dueAt + 1), true);
+	assert.equal(ownerScans, 1);
+	assert.equal(projections, 1);
+	assert.equal(fallbackRuns, 0);
 });
 
 test("a shared-identity quarantine is terminal and does not burn retry attempts", async () => {
