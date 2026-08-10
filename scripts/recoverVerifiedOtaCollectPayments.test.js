@@ -544,6 +544,35 @@ function fixture({
   };
 }
 
+function applyZeroValueCommissionAssignment(
+  target,
+  {
+    assignedAt = new Date("2026-08-10T10:09:00.000Z"),
+    assignedBy = objectId(9901),
+  } = {}
+) {
+  Object.assign(target.reservation.financial_cycle, {
+    commissionAssigned: true,
+    commissionAssignedAt: assignedAt,
+    commissionAssignedBy: assignedBy,
+    lastUpdatedAt: assignedAt,
+    lastUpdatedBy: assignedBy,
+  });
+  target.reservation.commissionStatus = "no commission due";
+  target.reservation.commissionData = {
+    assigned: true,
+    amount: 0,
+    commissionAmount: 0,
+    commissionValue: 0,
+    status: "no commission due",
+    assignedAt,
+    assignedBy,
+    proposedByAgent: false,
+  };
+  target.reservation.adminPricing.commissionAmount = 0;
+  return target;
+}
+
 async function planFor(db, fixtures) {
   return loadPlan({
     db,
@@ -637,16 +666,9 @@ test("provider-generic plan requires the exact authenticated audit and linked Ho
 });
 
 test("zero-value release commission assignment is accepted and preserved byte-for-byte", async () => {
-  const target = fixture({ provider: "agoda" });
-  const assignedAt = new Date("2026-08-10T10:09:00.000Z");
-  const assignedBy = objectId(9901);
-  Object.assign(target.reservation.financial_cycle, {
-    commissionAssigned: true,
-    commissionAssignedAt: assignedAt,
-    commissionAssignedBy: assignedBy,
-    lastUpdatedAt: assignedAt,
-    lastUpdatedBy: assignedBy,
-  });
+  const target = applyZeroValueCommissionAssignment(
+    fixture({ provider: "agoda" })
+  );
   const beforeTuple = {
     commissionAssigned: target.reservation.financial_cycle.commissionAssigned,
     commissionAssignedAt:
@@ -668,6 +690,14 @@ test("zero-value release commission assignment is accepted and preserved byte-fo
       lastUpdatedBy: after.lastUpdatedBy,
     }),
     canonicalEjsonSha256(beforeTuple)
+  );
+  assert.equal(
+    canonicalEjsonSha256(plan.scopes[0].expected.commissionData),
+    canonicalEjsonSha256(target.reservation.commissionData)
+  );
+  assert.equal(
+    canonicalEjsonSha256(plan.scopes[0].expected.adminPricing),
+    canonicalEjsonSha256(target.reservation.adminPricing)
   );
   assert.equal(
     canonicalEjsonSha256(protectedReservationSnapshot(plan.scopes[0].expected)),
@@ -742,19 +772,75 @@ test("planning fails closed on unverified collect semantics or settlement activi
     "inconsistent commission-assignment actor or timestamp blocks recovery",
     async () => {
       for (const mismatch of ["actor", "timestamp"]) {
-        const target = fixture({ index: mismatch === "actor" ? 31 : 32 });
+        const target = applyZeroValueCommissionAssignment(
+          fixture({ index: mismatch === "actor" ? 31 : 32 }),
+          { assignedBy: objectId(9931) }
+        );
         const assignedAt = new Date("2026-08-10T10:09:00.000Z");
         const assignedBy = objectId(9931);
         Object.assign(target.reservation.financial_cycle, {
-          commissionAssigned: true,
-          commissionAssignedAt: assignedAt,
-          commissionAssignedBy: assignedBy,
           lastUpdatedAt:
             mismatch === "timestamp"
               ? new Date("2026-08-10T10:09:01.000Z")
               : assignedAt,
           lastUpdatedBy: mismatch === "actor" ? objectId(9932) : assignedBy,
         });
+        await assert.rejects(
+          planFor(memoryDb([target]), [target]),
+          (error) => error.code === "OTA_COLLECT_PAYMENT_SETTLEMENT_ACTIVITY"
+        );
+      }
+    }
+  );
+
+  await t.test(
+    "commissionData zero-assignment exception is closed-world and exact",
+    async () => {
+      const mutations = [
+        (target) => {
+          target.reservation.commissionData.history = ["prior assignment"];
+        },
+        (target) => {
+          target.reservation.commissionData.assignedBy = objectId(9941);
+        },
+        (target) => {
+          target.reservation.commissionData.assignedAt = new Date(
+            "2026-08-10T10:09:01.000Z"
+          );
+        },
+        (target) => {
+          target.reservation.commissionData.status = "pending";
+        },
+        (target) => {
+          target.reservation.commissionStatus = "pending";
+        },
+        (target) => {
+          target.reservation.commissionData.amount = 1;
+        },
+        (target) => {
+          target.reservation.commissionData.commissionAmount = 1;
+        },
+        (target) => {
+          target.reservation.commissionData.commissionValue = 1;
+        },
+        (target) => {
+          target.reservation.adminPricing.commissionAmount = 1;
+        },
+        (target) => {
+          target.reservation.commissionData.proposedByAgent = true;
+        },
+        (target) => {
+          delete target.reservation.commissionData.commissionValue;
+        },
+        (target) => {
+          target.reservation.commissionData.amount = "0";
+        },
+      ];
+      for (const [index, mutate] of mutations.entries()) {
+        const target = applyZeroValueCommissionAssignment(
+          fixture({ index: 50 + index })
+        );
+        mutate(target);
         await assert.rejects(
           planFor(memoryDb([target]), [target]),
           (error) => error.code === "OTA_COLLECT_PAYMENT_SETTLEMENT_ACTIVITY"

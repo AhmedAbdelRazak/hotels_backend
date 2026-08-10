@@ -93,6 +93,17 @@ const PAYMENT_BREAKDOWN_KEYS = Object.freeze([
 
 const PAYMENT_DETAILS_KEYS = Object.freeze(["captured", "onsite_paid_amount"]);
 
+const ZERO_ASSIGNMENT_COMMISSION_DATA_KEYS = Object.freeze([
+  "assigned",
+  "amount",
+  "commissionAmount",
+  "commissionValue",
+  "status",
+  "assignedAt",
+  "assignedBy",
+  "proposedByAgent",
+]);
+
 const MUTATION_CAPABILITIES = new WeakSet();
 
 const BSON_DESERIALIZE_OPTIONS = Object.freeze({
@@ -609,6 +620,44 @@ function assertPristinePaymentState(reservation = {}) {
     : !meaningfulProtectedValue(cycle?.commissionAssignedAt) &&
       !meaningfulProtectedValue(cycle?.commissionAssignedBy) &&
       !meaningfulProtectedValue(cycle?.lastUpdatedBy);
+  const commissionData = reservation.commissionData;
+  let commissionDataAssignmentValid = false;
+  if (
+    commissionAssigned &&
+    commissionData &&
+    typeof commissionData === "object" &&
+    !Array.isArray(commissionData) &&
+    Object.keys(commissionData).sort().join("|") ===
+      [...ZERO_ASSIGNMENT_COMMISSION_DATA_KEYS].sort().join("|")
+  ) {
+    const dataAssignedAt = new Date(commissionData.assignedAt || "");
+    commissionDataAssignmentValid = Boolean(
+      commissionData.assigned === true &&
+        commissionData.proposedByAgent === false &&
+        typeof commissionData.amount === "number" &&
+        typeof commissionData.commissionAmount === "number" &&
+        typeof commissionData.commissionValue === "number" &&
+        typeof commissionData.status === "string" &&
+        commissionData.assignedAt instanceof Date &&
+        sameMoney(commissionData.amount, 0) &&
+        sameMoney(commissionData.commissionAmount, 0) &&
+        sameMoney(commissionData.commissionValue, 0) &&
+        sameMoney(commissionData.amount, commission) &&
+        sameMoney(commissionData.commissionAmount, cycle.commissionAmount) &&
+        sameMoney(commissionData.commissionValue, cycle.commissionValue) &&
+        lower(commissionData.status) === "no commission due" &&
+        typeof reservation.commissionStatus === "string" &&
+        lower(reservation.commissionStatus) === "no commission due" &&
+        Number.isFinite(dataAssignedAt.getTime()) &&
+        dataAssignedAt.getTime() === assignmentAt.getTime() &&
+        clean(commissionData.assignedBy) === assignmentActor &&
+        clean(commissionData.assignedBy) === clean(cycle.lastUpdatedBy)
+    );
+  }
+  const adminCommissionPresent = Object.prototype.hasOwnProperty.call(
+    reservation.adminPricing || {},
+    "commissionAmount"
+  );
   if (
     !cycle ||
     cycleHasUnknownActivity ||
@@ -619,6 +668,10 @@ function assertPristinePaymentState(reservation = {}) {
     !sameMoney(cycle.commissionValue, commission) ||
     !sameMoney(cycle.commissionAmount, commission) ||
     !assignmentTupleValid ||
+    (commissionAssigned && !commissionDataAssignmentValid) ||
+    (adminCommissionPresent &&
+      (typeof reservation.adminPricing.commissionAmount !== "number" ||
+        !sameMoney(reservation.adminPricing.commissionAmount, 0))) ||
     !sameMoney(cycle.pmsCollectedAmount, 0) ||
     !sameMoney(cycle.hotelCollectedAmount, 0) ||
     !sameMoney(cycle.hotelPayoutDue, 0) ||
@@ -645,6 +698,7 @@ function assertPristinePaymentState(reservation = {}) {
     hasCaptureOrSettlementActivity({
       ...reservation,
       financial_cycle: { ...cycle, commissionAssigned: false },
+      commissionData: commissionDataAssignmentValid ? {} : commissionData,
     }) ||
     reservation.moneyTransferredToHotel === true ||
     Boolean(reservation.moneyTransferredAt) ||
