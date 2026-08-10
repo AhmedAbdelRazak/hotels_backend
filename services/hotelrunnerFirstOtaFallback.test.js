@@ -25,6 +25,7 @@ const {
 	createArchiveFingerprint,
 	createHotelRunnerFirstOtaFallbackCoordinator,
 	defaultFinalizeInboundAudit,
+	defaultInspectLocalHotelRunnerState,
 	defaultMarkRecoveredArchivedEmail,
 	defaultReconcileArchivedEmail,
 	validConfirmedEmptyProof,
@@ -2143,6 +2144,295 @@ test("local classifier treats ambiguity and blocked HotelRunner evidence as revi
 		).kind,
 		"needs_review"
 	);
+});
+
+function inventoryAttentionFixture() {
+	const mirrorId = "6a789cf2f77fb5bdaf73b0b4";
+	return {
+		events: [
+			{
+				_id: EVENT_ID,
+				hotelId: HOTEL_ID,
+				providerNumber: CONFIRMATION,
+				channel: "agoda",
+				hotelRunnerReservationId: "one",
+				status: "attention",
+				reservationMongoId: RESERVATION_ID,
+				mirrorId,
+				integrityReason: "",
+				integrityConflict: false,
+				errorCode: "",
+				errorMessage: "",
+				result: {
+					status: "created",
+					inventoryIssueCount: 1,
+					missingInvCodes: [],
+					staleInvCodes: [],
+					inventorySummary: {
+						overbooked: true,
+						issueCount: 1,
+						issues: [{ code: "inventory_overbook" }],
+					},
+					commercialEvidenceStale: false,
+					attentionCode: "",
+					integrityConflict: false,
+				},
+			},
+		],
+		mirrors: [
+			{
+				_id: mirrorId,
+				hotelId: HOTEL_ID,
+				providerNumber: CONFIRMATION,
+				channel: "agoda",
+				hotelRunnerReservationId: "one",
+				reservationMongoId: RESERVATION_ID,
+				projectionStatus: "created",
+				identityConflict: false,
+				lastErrorCode: "",
+				lastErrorMessage: "",
+			},
+		],
+		reservations: [
+			{
+				_id: RESERVATION_ID,
+				hotelId: HOTEL_ID,
+				otaIdentityKey: `agoda:${CONFIRMATION}`,
+				reservation_id: CONFIRMATION,
+				supplierData: {
+					otaProvider: "agoda",
+					suppliedBookingNo: CONFIRMATION,
+					otaAutomationPipeline: "hotelrunner_background_worker",
+					otaSourceAuthority: 4,
+					hotelRunner: {
+						transport: "hotelrunner_api",
+						reservationId: "one",
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+					},
+				},
+			},
+		],
+	};
+}
+
+test("local classifier accepts only a fully linked inventory attention projection as API-complete", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	assert.deepEqual(classifyLocalHotelRunnerState(inventoryAttentionFixture(), identity), {
+		kind: "api",
+		code: "direct_api_reservation_found",
+		reservationId: RESERVATION_ID,
+		eventId: EVENT_ID,
+		mirrorId: "6a789cf2f77fb5bdaf73b0b4",
+	});
+});
+
+test("local classifier rejects commercial, integrity, and unknown attention states", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	for (const [label, mutate] of [
+		[
+			"commercial evidence stale",
+			(raw) => {
+				raw.events[0].result.commercialEvidenceStale = true;
+			},
+		],
+		[
+			"commercial attention code",
+			(raw) => {
+				raw.events[0].result.attentionCode =
+					"hotelrunner_commercial_evidence_stale";
+			},
+		],
+		[
+			"event error code",
+			(raw) => {
+				raw.events[0].errorCode = "hotelrunner_projection_warning";
+			},
+		],
+		[
+			"event error message",
+			(raw) => {
+				raw.events[0].errorMessage = "unexpected projection warning";
+			},
+		],
+		[
+			"integrity conflict",
+			(raw) => {
+				raw.events[0].integrityConflict = true;
+			},
+		],
+		[
+			"result integrity conflict",
+			(raw) => {
+				raw.events[0].result.integrityConflict = true;
+			},
+		],
+		[
+			"mirror identity conflict",
+			(raw) => {
+				raw.mirrors[0].identityConflict = true;
+			},
+		],
+		[
+			"mirror error message",
+			(raw) => {
+				raw.mirrors[0].lastErrorMessage = "unexpected mirror warning";
+			},
+		],
+		[
+			"unknown attention",
+			(raw) => {
+				raw.events[0].result.inventorySummary.issues[0].code = "unknown";
+			},
+		],
+		[
+			"inventory summary count mismatch",
+			(raw) => {
+				raw.events[0].result.inventorySummary.issueCount = 2;
+			},
+		],
+		[
+			"string inventory issue count",
+			(raw) => {
+				raw.events[0].result.inventoryIssueCount = "1";
+			},
+		],
+		[
+			"boolean summary issue count",
+			(raw) => {
+				raw.events[0].result.inventorySummary.issueCount = true;
+			},
+		],
+		[
+			"missing inventory code remains",
+			(raw) => {
+				raw.events[0].result.missingInvCodes = ["INV-1"];
+			},
+		],
+		[
+			"stale inventory code remains",
+			(raw) => {
+				raw.events[0].result.staleInvCodes = ["INV-1"];
+			},
+		],
+	]) {
+		const raw = inventoryAttentionFixture();
+		mutate(raw);
+		const result = classifyLocalHotelRunnerState(raw, identity);
+		assert.equal(result.kind, "needs_review", label);
+		assert.equal(result.code, "hotelrunner_local_record_blocked", label);
+	}
+});
+
+test("local classifier rejects inventory attention with wrong or missing links", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	for (const [label, mutate] of [
+		[
+			"missing event reservation link",
+			(raw) => {
+				raw.events[0].reservationMongoId = null;
+			},
+		],
+		[
+			"wrong event mirror link",
+			(raw) => {
+				raw.events[0].mirrorId = "6a789cf2f77fb5bdaf73b0b5";
+			},
+		],
+		[
+			"wrong mirror reservation link",
+			(raw) => {
+				raw.mirrors[0].reservationMongoId = "6a789cea66c058f4ab621ec0";
+			},
+		],
+		[
+			"wrong PMS HotelRunner reservation link",
+			(raw) => {
+				raw.reservations[0].supplierData.hotelRunner.reservationId = "two";
+			},
+		],
+		[
+			"missing mirror",
+			(raw) => {
+				raw.mirrors = [];
+			},
+		],
+		[
+			"missing direct reservation",
+			(raw) => {
+				raw.reservations = [];
+			},
+		],
+		[
+			"duplicate qualifying attention event",
+			(raw) => {
+				raw.events.push({
+					...raw.events[0],
+					_id: "6a789cf2f77fb5bdaf73b0b6",
+				});
+			},
+		],
+	]) {
+		const raw = inventoryAttentionFixture();
+		mutate(raw);
+		const result = classifyLocalHotelRunnerState(raw, identity);
+		assert.equal(result.kind, "needs_review", label);
+		assert.equal(result.code, "hotelrunner_local_record_blocked", label);
+	}
+});
+
+test("default local inspector selects every diagnostic required by inventory-attention classification", async () => {
+	const selections = [];
+	const createModel = (name) => ({
+		find() {
+			return {
+				select(value) {
+					selections.push({ name, value });
+					return this;
+				},
+				sort() {
+					return this;
+				},
+				limit() {
+					return this;
+				},
+				lean() {
+					return this;
+				},
+				async exec() {
+					return [];
+				},
+			};
+		},
+	});
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+
+	await defaultInspectLocalHotelRunnerState(identity, {
+		EventModel: createModel("event"),
+		MirrorModel: createModel("mirror"),
+		ReservationModel: createModel("reservation"),
+	});
+
+	const eventSelection = selections.find(({ name }) => name === "event")?.value;
+	const mirrorSelection = selections.find(({ name }) => name === "mirror")?.value;
+	assert.match(eventSelection, /(?:^|\s)errorMessage(?:\s|$)/);
+	assert.match(mirrorSelection, /(?:^|\s)lastErrorMessage(?:\s|$)/);
 });
 
 test("local classifier keeps exact stale-mapping event and mirror evidence pending", () => {
