@@ -14,6 +14,9 @@ const OTA_BOOKING_SOURCE_PATTERN =
 	/(?:\bota\b|expedia|agoda|booking\.?com|airbnb|hotels?\.?com|trivago|trip\.?com|\btrip\b|ctrip)/i;
 const CALCULATED_PRICING_MODE_PATTERN =
 	/^(?:admin_three_price$|ota(?:_|$)|platform(?:_|$)|hotelrunner_api$)/i;
+const SAVED_PRICING_BREAKDOWN_MODE_PATTERN =
+	/^(?:admin_three_price$|ota(?:_|$)|platform(?:_|$))/i;
+const SAVED_PRICING_SUMMARY_TOLERANCE = 0.5;
 
 const hasOwn = (source, field) =>
 	Boolean(
@@ -109,6 +112,32 @@ const availableRole = (
 	source,
 	reason: "",
 });
+
+const agreesWithOptionalPersistedSummaries = (
+	reservation,
+	amount,
+	fields,
+	{ allowNegative = false } = {}
+) => {
+	for (const summary of [
+		reservation?.ota_financial_summary,
+		reservation?.otaFinancialSummary,
+	]) {
+		for (const field of fields) {
+			if (!hasOwn(summary, field)) continue;
+			const value = summary[field];
+			if (value === null || value === undefined || value === "") continue;
+			const candidate = finiteMoneyOrNull(value, { allowNegative });
+			if (
+				candidate === null ||
+				Math.abs(candidate - amount) > SAVED_PRICING_SUMMARY_TOLERANCE
+			) {
+				return false;
+			}
+		}
+	}
+	return true;
+};
 
 const resolveProviderNeutralEvidence = (reservation = {}) => {
 	const supplierData = reservation?.supplierData || {};
@@ -236,6 +265,76 @@ const resolveVerifiedHotelRunnerMaterializedNet = (reservation = {}) => {
 	);
 };
 
+const resolveSavedPricingBreakdown = (reservation = {}) => {
+	const adminPricing = reservation?.adminPricing || {};
+	const mode = String(adminPricing.mode || "").trim();
+	const unavailable = () => ({
+		gross: unavailableRole("invalid_saved_pricing_breakdown"),
+		net: unavailableRole("invalid_saved_pricing_breakdown"),
+	});
+	if (
+		!SAVED_PRICING_BREAKDOWN_MODE_PATTERN.test(mode) ||
+		!["clientTotal", "netAfterExpensesTotal", "otaExpenseTotal"].every(
+			(field) => hasOwn(adminPricing, field)
+		)
+	) {
+		return unavailable();
+	}
+
+	const gross = finiteMoneyOrNull(adminPricing.clientTotal);
+	const net = finiteMoneyOrNull(adminPricing.netAfterExpensesTotal, {
+		allowNegative: true,
+	});
+	const expense = finiteMoneyOrNull(adminPricing.otaExpenseTotal);
+	const rawCurrencies = [
+		adminPricing.propertyCurrency,
+		reservation?.currency,
+		reservation?.ota_financial_summary?.propertyCurrency,
+		reservation?.ota_financial_summary?.currency,
+		reservation?.otaFinancialSummary?.propertyCurrency,
+		reservation?.otaFinancialSummary?.currency,
+	].filter((value) => String(value || "").trim());
+	const currencies = rawCurrencies.map((value) =>
+		String(value).trim().toUpperCase()
+	);
+	const currency =
+		currencies.length > 0 &&
+		currencies.every((value) => /^[A-Z]{3}$/.test(value)) &&
+		new Set(currencies).size === 1
+			? currencies[0]
+			: "";
+	if (
+		gross === null ||
+		gross <= 0 ||
+		net === null ||
+		expense === null ||
+		!currency ||
+		Math.abs(gross - net - expense) > SAVED_PRICING_SUMMARY_TOLERANCE ||
+		!agreesWithOptionalPersistedSummaries(
+			reservation,
+			gross,
+			["clientTotal", "client_total"]
+		) ||
+		!agreesWithOptionalPersistedSummaries(
+			reservation,
+			net,
+			["netAfterExpenses", "netAfterOtaExpenses"],
+			{ allowNegative: true }
+		)
+	) {
+		return unavailable();
+	}
+	return {
+		gross: availableRole(gross, currency, "saved_pricing_breakdown"),
+		net: availableRole(net, currency, "saved_pricing_breakdown", {
+			allowNegative: true,
+		}),
+	};
+};
+
+// Preserve the established non-HotelRunner list behavior. The stricter paired
+// breakdown contract above is only a fallback for HotelRunner rows whose saved
+// editor pricing was previously hidden from the table.
 const resolveCalculatedNet = (reservation = {}) => {
 	const adminPricing = reservation?.adminPricing || {};
 	const mode = String(adminPricing.mode || "").trim();
@@ -283,29 +382,46 @@ const resolveAdminReservationFinancialTotals = (reservation = {}) => {
 		reservation?.currency,
 		"SAR"
 	);
+	const supplierData = reservation?.supplierData || {};
+	const hasAnyCommercialEvidenceState =
+		hasOwn(supplierData, "otaCommercialEvidence") ||
+		hasOwn(supplierData, "hotelRunnerEmailCommercialEvidence") ||
+		Boolean(
+			String(supplierData.otaCommercialEvidenceStaleReason || "").trim()
+		);
+	const savedPricingBreakdown =
+		isHotelRunner && !hasAnyCommercialEvidenceState
+		? resolveSavedPricingBreakdown(reservation)
+		: null;
 
 	let gross = authoritativeEvidence.gross;
-	if (!authoritativeEvidence.present && !isHotelRunner) {
-		const totalAmount = hasOwn(reservation, "total_amount")
-			? finiteMoneyOrNull(reservation.total_amount)
-			: null;
-		const clientTotal = hasOwn(reservation?.adminPricing, "clientTotal")
-			? finiteMoneyOrNull(reservation.adminPricing.clientTotal)
-			: null;
-		const amount = totalAmount !== null ? totalAmount : clientTotal;
-		gross =
-			amount === null
-				? unavailableRole("gross_not_recorded")
-				: availableRole(amount, defaultCurrency, "reservation_total");
+	if (!authoritativeEvidence.present) {
+		if (isHotelRunner && savedPricingBreakdown?.gross.available) {
+			gross = savedPricingBreakdown.gross;
+		} else if (!isHotelRunner) {
+			const totalAmount = hasOwn(reservation, "total_amount")
+				? finiteMoneyOrNull(reservation.total_amount)
+				: null;
+			const clientTotal = hasOwn(reservation?.adminPricing, "clientTotal")
+				? finiteMoneyOrNull(reservation.adminPricing.clientTotal)
+				: null;
+			const amount = totalAmount !== null ? totalAmount : clientTotal;
+			gross =
+				amount === null
+					? unavailableRole("gross_not_recorded")
+					: availableRole(amount, defaultCurrency, "reservation_total");
+		}
 	}
 
 	let net = authoritativeEvidence.net;
 	if (!authoritativeEvidence.present) {
-		if (isHotelRunner) {
+		if (isHotelRunner && savedPricingBreakdown?.net.available) {
+			net = savedPricingBreakdown.net;
+		} else if (isHotelRunner && !hasAnyCommercialEvidenceState) {
 			net = resolveVerifiedHotelRunnerMaterializedNet(reservation);
-		} else if (otaManaged) {
+		} else if (!isHotelRunner && otaManaged) {
 			net = resolveCalculatedNet(reservation);
-		} else if (gross.available) {
+		} else if (!isHotelRunner && gross.available) {
 			net = availableRole(gross.amount, gross.currency, "no_ota_deduction");
 		}
 	}

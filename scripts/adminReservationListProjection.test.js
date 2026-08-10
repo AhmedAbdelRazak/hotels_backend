@@ -522,6 +522,61 @@ test("compact admin rows retain verified OTA gross and net without exposing nest
   assert.equal(result.body.data[0].supplierData.otaCommercialEvidence, undefined);
 });
 
+test("compact admin rows reflect an already-saved OTA pricing breakdown", async () => {
+  const otaReservation = baseReservation({
+    id: "65e000000000000000000005",
+    hotelId: HOTEL_A,
+    hotelName: "Hotel Alpha",
+    confirmation: "ota-saved-breakdown-1",
+    name: "Saved Breakdown Guest",
+    createdAt: now,
+  });
+  otaReservation.booking_source = "channel-partner";
+  otaReservation.customer_details.booking_source = "channel-partner";
+  otaReservation.currency = "sar";
+  otaReservation.total_amount = 65.03;
+  otaReservation.adminPricing = {
+    mode: "ota_review",
+    clientTotal: 65.03,
+    rootTotal: 75,
+    netAfterExpensesTotal: 52.02,
+    otaExpenseTotal: 13.01,
+    platformMarginTotal: -22.98,
+  };
+  otaReservation.adminPricingVisibility = {
+    rootOnlyForHotelManagement: true,
+  };
+  otaReservation.ota_financial_summary = {
+    currency: "SAR",
+    clientTotal: 65.03,
+    netAfterExpenses: 52.02,
+    netAfterOtaExpenses: 52.02,
+    otaExpenseTotal: 13.01,
+  };
+  otaReservation.supplierData = {
+    hotelRunner: {
+      transport: "hotelrunner_api",
+      reservationId: "channel-reservation-1",
+    },
+  };
+
+  const result = await runHandler({
+    honorProjection: true,
+    query: { searchQuery: "ota-saved-breakdown-1" },
+    profile: { _id: ADMIN_ID, role: 1000, roleDescription: "super admin" },
+    sourceDocuments: [otaReservation],
+  });
+
+  assert.equal(result.body.data.length, 1);
+  assert.equal(result.body.data[0].gross_total_amount, 65.03);
+  assert.equal(result.body.data[0].net_total_amount, 52.02);
+  assert.equal(result.body.data[0].financial_totals_currency, "SAR");
+  assert.equal(result.body.data[0].gross_total_available, true);
+  assert.equal(result.body.data[0].net_total_available, true);
+  assert.equal(result.body.data[0].adminPricing.clientTotal, 65.03);
+  assert.equal(result.body.data[0].adminPricing.netAfterExpensesTotal, 52.02);
+});
+
 test("financial totals resolve from the persisted OTA summary before the display summary is derived", async () => {
   const otaReservation = baseReservation({
     id: "65d000000000000000000004",
