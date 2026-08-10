@@ -5650,6 +5650,59 @@ test("unequal Agoda nightly values use cent-exact weighted allocation instead of
 	);
 });
 
+test("HotelRunner commercial materialization repairs a one-cent converted nightly shortfall", () => {
+	const dates = Array.from(
+		{ length: 7 },
+		(_item, index) => `2026-08-${String(10 + index).padStart(2, "0")}`
+	);
+	const malformedClientRows = [60.23, 60.23, 60.23, 60.22, 60.22, 60.22, 60.22];
+	const exactPayoutRows = [56.89, 56.89, 56.89, 56.89, 56.89, 56.88, 56.88];
+	const pricing = buildDirectHotelRunnerCommercialPricing(
+		{
+			pickedRoomsPricing: [
+				{
+					count: 1,
+					pricingByDay: dates.map((date) => ({
+						date,
+						clientPrice: 15.17,
+						rootPrice: 75,
+						hotelRunnerSourcePrice: 15.17,
+					})),
+				},
+			],
+		},
+		{
+			nightlyPricingSar: dates.map((date, index) => ({
+				date,
+				clientAmountSar: malformedClientRows[index],
+				payoutAmountSar: exactPayoutRows[index],
+			})),
+		},
+		{ grossTotalSar: 421.58, payoutTotalSar: 398.21 },
+		{ reportedTotalRole: "payout" }
+	);
+
+	assert.ok(pricing);
+	const rows = pricing.rooms[0].pricingByDay;
+	const cents = (value) =>
+		Math.round((Number(value) + Number.EPSILON) * 100);
+	assert.equal(
+		rows.reduce((sum, day) => sum + cents(day.clientPrice), 0),
+		42158
+	);
+	assert.equal(
+		rows.reduce((sum, day) => sum + cents(day.netAfterExpenses), 0),
+		39821
+	);
+	assert.equal(cents(pricing.rooms[0].totalPriceWithCommission), 42158);
+	assert.equal(cents(pricing.clientTotal), 42158);
+	assert.ok(
+		rows.every(
+			(day) => cents(day.clientPrice) >= cents(day.netAfterExpenses)
+		)
+	);
+});
+
 test("Agoda commercial parsing keeps missing commission nullable and genuine stay conflicts closed", () => {
 	const withoutCommission = authenticatedAgodaCommercialVoucher({
 		bookingId: "687702587",

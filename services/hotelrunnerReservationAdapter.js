@@ -28,6 +28,7 @@ const {
 	buildReservationSnapshotFilter,
 } = require("./otaReviewConcurrency");
 const {
+	OTA_PLATFORM_REVIEW_RELEASED,
 	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
 	buildOtaReviewSnapshot,
 } = require("./otaReservationVisibility");
@@ -2556,10 +2557,193 @@ const IMMUTABLE_HOTELRUNNER_LINK_METHODS = new Set([
 	"provider_or_hr_alias_create_race",
 ]);
 
+function canonicalReleasedOtaReviewEvidence(reservation = {}) {
+	const review = reservation.otaPlatformReview || {};
+	const pending = reservation.pendingConfirmation || {};
+	const releasedAt = new Date(review.releasedAt || "").getTime();
+	const releasedToHotelAt = new Date(pending.releasedToHotelAt || "").getTime();
+	const releasedById = clean(review.releasedBy?._id || review.releasedBy?.id);
+	if (
+		clean(review.status).toLowerCase() !== OTA_PLATFORM_REVIEW_RELEASED ||
+		!Number.isFinite(releasedAt) ||
+		!releasedById ||
+		clean(pending.source).toLowerCase() !== "ota_platform_release" ||
+		!Number.isFinite(releasedToHotelAt) ||
+		releasedAt !== releasedToHotelAt
+	) {
+		return null;
+	}
+	return {
+		releasedAt: review.releasedAt,
+		releasedById: review.releasedBy._id || review.releasedBy.id,
+		releasedToHotelAt: pending.releasedToHotelAt,
+	};
+}
+
+function releasedReservationCasFilter(existing, normalized) {
+	const release = canonicalReleasedOtaReviewEvidence(existing);
+	return {
+		...reservationCasFilter(existing, normalized),
+		"otaPlatformReview.status": OTA_PLATFORM_REVIEW_RELEASED,
+		"otaPlatformReview.releasedAt": release.releasedAt,
+		"otaPlatformReview.releasedBy._id": release.releasedById,
+		"pendingConfirmation.source": "ota_platform_release",
+		"pendingConfirmation.releasedToHotelAt": release.releasedToHotelAt,
+	};
+}
+
+function releasedHotelRunnerWatermarkSet(
+	existing,
+	normalized,
+	now = new Date()
+) {
+	return {
+		"supplierData.hotelRunner.transport": "hotelrunner_api",
+		"supplierData.hotelRunner.reservationId":
+			normalized.hotelRunnerReservationId ||
+			existing.supplierData?.hotelRunner?.reservationId ||
+			"",
+		"supplierData.hotelRunner.sourceState": normalized.state,
+		"supplierData.hotelRunner.lastMessageUid": normalized.messageUid,
+		"supplierData.hotelRunner.appliedSourceUpdatedAt":
+			normalized.sourceUpdatedAt,
+		"supplierData.hotelRunner.appliedCanonicalHash":
+			normalized.canonicalHash,
+		"supplierData.hotelRunner.lastAppliedAt": now,
+		"supplierData.otaAutomationPipeline": "hotelrunner-background-worker",
+		"supplierData.otaSourceAuthority": 4,
+		"supplierData.otaLastSourceReceivedAt": normalized.sourceUpdatedAt,
+		"supplierData.otaLastEventType":
+			normalized.state === "canceled" ? "cancelled" : normalized.state,
+	};
+}
+
+function releasedHotelRunnerLifecycleSet(existing, normalized, now = new Date()) {
+	const set = releasedHotelRunnerWatermarkSet(existing, normalized, now);
+	const priorHotelRunnerState = clean(
+		existing.supplierData?.hotelRunner?.sourceState
+	).toLowerCase();
+	if (normalized.state === "canceled") {
+		Object.assign(set, {
+			state: "cancelled",
+			reservation_status: "cancelled",
+			"pendingConfirmation.status": "cancelled",
+			"pendingConfirmation.cancelledAt": now,
+			"pendingConfirmation.inventoryBlocks": false,
+			"pendingConfirmation.lastUpdatedAt": now,
+		});
+	} else if (
+		normalized.state === "confirmed" &&
+		priorHotelRunnerState &&
+		priorHotelRunnerState !== "confirmed"
+	) {
+		Object.assign(set, {
+			state: "confirmed",
+			reservation_status: "confirmed",
+			"pendingConfirmation.status": "confirmed",
+			"pendingConfirmation.confirmedAt": now,
+			"pendingConfirmation.lastUpdatedAt": now,
+		});
+	}
+	return set;
+}
+
+async function applyReleasedHotelRunnerLifecycleOnly(
+	{ normalized, mirror, existing, linkMethod },
+	dependencies
+) {
+	const ReservationModel = dependencies.ReservationModel || Reservations;
+	const cancellation = normalized.state === "canceled";
+	const mirrorResult = (changedPaths, mirrorRecovery = false) => ({
+		changedPaths,
+		lifecycleOnly: true,
+		releaseProtected: true,
+		...(mirrorRecovery ? { mirrorRecovery: true } : {}),
+	});
+	const finishMirror = async (changedPaths, mirrorRecovery = false) => {
+		await updateMirrorApplied(
+			mirror,
+			{
+				status: cancellation ? "cancelled" : "updated",
+				normalized,
+				reservationMongoId: existing._id,
+				linkMethod,
+				linkEvidence: {
+					strongIdentity: true,
+					hotelId: String(existing.hotelId),
+				},
+				// Retain the pre-release ownership baseline. Protected local fields
+				// must never become HotelRunner-owned through a lifecycle-only event.
+				lastAppliedProjection: stableClone(
+					mirror.lastAppliedProjection || {}
+				),
+				result: mirrorResult(changedPaths, mirrorRecovery),
+			},
+			dependencies
+		);
+	};
+	if (hasExactAppliedHotelRunnerMetadata(existing, normalized)) {
+		await finishMirror([], true);
+		return {
+			status: cancellation ? "cancelled" : "updated",
+			code: "hotelrunner_released_reservation_mirror_recovered",
+			reservationMongoId: existing._id,
+			...mirrorResult([], true),
+			commercialProtected: true,
+		};
+	}
+
+	const now = new Date();
+	const set = releasedHotelRunnerLifecycleSet(existing, normalized, now);
+	const changedPaths = Object.keys(set);
+	const result = await ReservationModel.updateOne(
+		releasedReservationCasFilter(existing, normalized),
+		addReservationVersionBump({
+			$set: set,
+			$push: {
+				reservationAuditLog: auditEntry(
+					normalized,
+					cancellation
+						? "released-reservation-cancelled-from-hotelrunner"
+						: "released-reservation-lifecycle-from-hotelrunner",
+					changedPaths
+				),
+			},
+		})
+	).exec();
+	const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+	if (!matched) {
+		return { status: "retry", code: "hotelrunner_reservation_cas_conflict" };
+	}
+	const after = await ReservationModel.findById(existing._id).lean().exec();
+	if (!after) {
+		return {
+			status: "retry",
+			code: cancellation
+				? "hotelrunner_cancelled_reservation_missing"
+				: "hotelrunner_updated_reservation_missing",
+		};
+	}
+	await finishMirror(changedPaths);
+	return {
+		status: cancellation ? "cancelled" : "updated",
+		code: "hotelrunner_released_reservation_lifecycle_only",
+		reservationMongoId: existing._id,
+		...mirrorResult(changedPaths),
+		commercialProtected: true,
+	};
+}
+
 async function applyCancellation(
 	{ normalized, event, mirror, existing, linkMethod, emailBridge = null },
 	dependencies
 ) {
+	if (canonicalReleasedOtaReviewEvidence(existing)) {
+		return applyReleasedHotelRunnerLifecycleOnly(
+			{ normalized, mirror, existing, linkMethod },
+			dependencies
+		);
+	}
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const terminal = isLocalTerminal(existing);
 	if (["inhouse", "checked_out", "no_show"].includes(terminal)) {
@@ -3120,6 +3304,12 @@ async function applyActiveUpdate({
 			code: "hotelrunner_terminal_reopen_blocked",
 			message: "An active HotelRunner event cannot reopen or rewrite a local terminal stay.",
 		};
+	}
+	if (canonicalReleasedOtaReviewEvidence(existing)) {
+		return applyReleasedHotelRunnerLifecycleOnly(
+			{ normalized, mirror, existing, linkMethod },
+			dependencies
+		);
 	}
 	const currentProjection = projectionFromReservation(existing);
 	const incomingProjection = projectionFromIncoming(normalized, pricing);
@@ -3925,6 +4115,61 @@ async function projectHotelRunnerReservation(
 				mirrorId: mirror._id,
 			};
 		}
+	}
+	if (existing && canonicalReleasedOtaReviewEvidence(existing)) {
+		const directHotelRunnerWatermark =
+			existing.supplierData?.hotelRunner?.appliedSourceUpdatedAt;
+		if (
+			directHotelRunnerWatermark &&
+			Number.isFinite(new Date(directHotelRunnerWatermark).getTime()) &&
+			sourceTimestampComparison(
+				normalized.sourceUpdatedAt,
+				directHotelRunnerWatermark
+			) === "older"
+		) {
+			await markMirrorReview(
+				mirror,
+				"ignored",
+				"hotelrunner_stale_against_pms_watermark",
+				"The HotelRunner event predates the PMS reservation's latest direct HotelRunner update.",
+				{
+					incomingSourceUpdatedAt: normalized.sourceUpdatedAt,
+					pmsSourceUpdatedAt: directHotelRunnerWatermark,
+				},
+				dependencies
+			);
+			return {
+				status: "ignored",
+				code: "hotelrunner_stale_against_pms_watermark",
+				mirrorId: mirror._id,
+			};
+		}
+		const result =
+			normalized.state === "canceled"
+				? await applyCancellation(
+						{
+							normalized,
+							event,
+							mirror,
+							existing,
+							linkMethod: linked.method,
+						},
+						dependencies
+				  )
+				: await applyActiveUpdate(
+						{
+							normalized,
+							event,
+							mirror,
+							existing,
+							pricing: null,
+							linkMethod: linked.method,
+							hotel,
+							config,
+						},
+						dependencies
+				  );
+		return { ...result, mirrorId: mirror._id };
 	}
 	const authenticatedProviderHandoffCandidate =
 		authenticatedProviderExistingHandoffProof({

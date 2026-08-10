@@ -11359,11 +11359,13 @@ function buildDirectHotelRunnerCommercialPricing(
 		? slots.map((slot) => Number(nightlyByDate.get(slot.date)?.clientAmountSar))
 		: [];
 	const currentSlots = slots.map((slot) => slot.currentSource);
+	const moneyCents = (value) =>
+		Math.round((Number(value) + Number.EPSILON) * 100);
 	const sumsTo = (values, target) =>
 		values.length === slots.length &&
 		values.every((value) => Number.isFinite(value) && value > 0) &&
-		Math.abs(round2(values.reduce((sum, value) => sum + value, 0)) - target) <=
-			0.02;
+		moneyCents(values.reduce((sum, value) => sum + value, 0)) ===
+			moneyCents(target);
 	let payoutSlots = sumsTo(sourcePayoutSlots, payout)
 		? sourcePayoutSlots.map(round2)
 		: reportedTotalRole === "payout" && sumsTo(currentSlots, payout)

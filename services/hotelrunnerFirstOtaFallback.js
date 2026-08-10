@@ -650,7 +650,7 @@ async function defaultInspectLocalHotelRunnerState(
 		findManyLean(
 			EventModel,
 			{ hotelId: identity.hotelId, providerNumber: exactConfirmation },
-			"_id hotelId status source hotelRunnerReservationId providerNumber channel reservationMongoId mirrorId receivedAt sourceUpdatedAt integrityReason integrityConflict errorCode leaseOwner leaseUntil result",
+			"_id hotelId status source hotelRunnerReservationId providerNumber channel reservationMongoId mirrorId receivedAt sourceUpdatedAt integrityReason integrityConflict errorCode errorMessage leaseOwner leaseUntil result",
 			{ sourceUpdatedAt: -1 },
 			10
 		),
@@ -663,7 +663,7 @@ async function defaultInspectLocalHotelRunnerState(
 					{ providerNumberAliases: exactConfirmation },
 				],
 			},
-			"_id hotelId hotelRunnerReservationId providerNumber providerNumberAliases channel reservationMongoId projectionStatus identityConflict lastErrorCode",
+			"_id hotelId hotelRunnerReservationId providerNumber providerNumberAliases channel reservationMongoId projectionStatus identityConflict lastErrorCode lastErrorMessage",
 			{ observedSourceUpdatedAt: -1 },
 			10
 		),
@@ -769,6 +769,83 @@ function directReservationMatchesIdentity(reservation, identity) {
 	);
 }
 
+function isSafeInventoryAttentionProjection(
+	event,
+	{ directReservations = [], events = [], mirrors = [] } = {}
+) {
+	if (lower(event?.status) !== "attention") return false;
+	if (
+		directReservations.length !== 1 ||
+		events.length !== 1 ||
+		mirrors.length !== 1
+	) {
+		return false;
+	}
+
+	const reservation = directReservations[0];
+	const mirror = mirrors[0];
+	const reservationId = stringId(reservation?._id);
+	const mirrorId = stringId(mirror?._id);
+	const eventResultStatus = lower(event?.result?.status);
+	const inventoryIssueCount = event?.result?.inventoryIssueCount;
+	const inventorySummary = event?.result?.inventorySummary;
+	const summaryIssueCount = inventorySummary?.issueCount;
+	const inventoryIssues = inventorySummary?.issues;
+	const missingInvCodes = event?.result?.missingInvCodes;
+	const staleInvCodes = event?.result?.staleInvCodes;
+	const eventHotelRunnerId = clean(event?.hotelRunnerReservationId);
+	const mirrorHotelRunnerId = clean(mirror?.hotelRunnerReservationId);
+	const reservationHotelRunnerId = clean(
+		reservation?.supplierData?.hotelRunner?.reservationId
+	);
+
+	return Boolean(
+		reservationId &&
+		mirrorId &&
+		["created", "updated"].includes(eventResultStatus) &&
+		lower(mirror.projectionStatus) === eventResultStatus &&
+		Number.isSafeInteger(inventoryIssueCount) &&
+		inventoryIssueCount > 0 &&
+		inventorySummary &&
+		typeof inventorySummary === "object" &&
+		!Array.isArray(inventorySummary) &&
+		inventorySummary.overbooked === true &&
+		Number.isSafeInteger(summaryIssueCount) &&
+		summaryIssueCount === inventoryIssueCount &&
+		Array.isArray(inventoryIssues) &&
+		inventoryIssues.length === inventoryIssueCount &&
+		inventoryIssues.length <= 25 &&
+		inventoryIssues.every(
+			(issue) =>
+				issue &&
+				typeof issue === "object" &&
+				!Array.isArray(issue) &&
+				lower(issue.code) === "inventory_overbook"
+		) &&
+		Array.isArray(missingInvCodes) &&
+		missingInvCodes.length === 0 &&
+		Array.isArray(staleInvCodes) &&
+		staleInvCodes.length === 0 &&
+		event?.result?.commercialEvidenceStale === false &&
+		!clean(event?.result?.attentionCode) &&
+		!clean(event?.result?.code) &&
+		!clean(event?.errorCode) &&
+		!clean(event?.errorMessage) &&
+		!clean(event?.integrityReason) &&
+		event?.integrityConflict === false &&
+		event?.result?.integrityConflict === false &&
+		mirror?.identityConflict === false &&
+		!clean(mirror?.lastErrorCode) &&
+		!clean(mirror?.lastErrorMessage) &&
+		stringId(event?.reservationMongoId) === reservationId &&
+		stringId(event?.mirrorId) === mirrorId &&
+		stringId(mirror?.reservationMongoId) === reservationId &&
+		eventHotelRunnerId &&
+		eventHotelRunnerId === mirrorHotelRunnerId &&
+		eventHotelRunnerId === reservationHotelRunnerId
+	);
+}
+
 async function defaultLoadReservationById(
 	reservationId,
 	{ ReservationModel = Reservations } = {}
@@ -862,11 +939,24 @@ function classifyLocalHotelRunnerState(
 			})
 	);
 	const lateEvidenceWaitingEventSet = new Set(lateEvidenceWaitingEvents);
+	const directReservations = raw.reservations.filter((reservation) =>
+		directReservationMatchesIdentity(reservation, identity)
+	);
+	const safeInventoryAttentionEventSet = new Set(
+		raw.events.filter((event) =>
+			isSafeInventoryAttentionProjection(event, {
+				directReservations,
+				events: raw.events,
+				mirrors: raw.mirrors,
+			})
+		)
+	);
 	if (
 		raw.events.some((event) =>
 				event.integrityConflict === true ||
 				(BLOCKED_HOTELRUNNER_EVENT_STATES.has(lower(event.status)) &&
-					!lateEvidenceWaitingEventSet.has(event))
+					!lateEvidenceWaitingEventSet.has(event) &&
+					!safeInventoryAttentionEventSet.has(event))
 		) ||
 		raw.mirrors.some(
 			(mirror) =>
@@ -876,9 +966,6 @@ function classifyLocalHotelRunnerState(
 	) {
 		return { kind: "needs_review", code: "hotelrunner_local_record_blocked" };
 	}
-	const directReservations = raw.reservations.filter((reservation) =>
-		directReservationMatchesIdentity(reservation, identity)
-	);
 	if (directReservations.length > 1) {
 		return { kind: "needs_review", code: "multiple_direct_api_reservations" };
 	}

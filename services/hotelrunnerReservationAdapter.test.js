@@ -823,6 +823,137 @@ function attachVerifiedHotelRunnerEmailCommercialEvidence(reservation) {
 	return evidence;
 }
 
+async function canonicalReleasedHotelRunnerFixture({
+	finance = false,
+	housing = false,
+	sourceState = "confirmed",
+} = {}) {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const initial = normalizedMultiRoom({
+		message_uid: "canonical-release-initial",
+		updated_at: "2026-08-06T11:00:00.000Z",
+	});
+	const created = await projectHotelRunnerReservation(
+		{
+			normalized: initial,
+			event: { payload: initial.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(created.status, "created");
+	const reservation = system.reservations[0];
+	const releasedAt = new Date("2026-08-06T11:30:00.000Z");
+	const actor = {
+		_id: "64b000000000000000000777",
+		name: "Platform Admin",
+		email: "platform-admin@example.test",
+		role: "admin",
+	};
+	reservation.state = "Pending Confirmation";
+	reservation.reservation_status = "Pending Confirmation";
+	reservation.pendingConfirmation = {
+		...(reservation.pendingConfirmation || {}),
+		status: "pending",
+		source: "ota_platform_release",
+		releasedToHotelAt: releasedAt,
+		lastUpdatedAt: releasedAt,
+		lastUpdatedBy: structuredClone(actor),
+	};
+	reservation.otaPlatformReview = {
+		...(reservation.otaPlatformReview || {}),
+		status: "released",
+		releasedAt,
+		releasedBy: structuredClone(actor),
+		priceAtRelease: reservation.adminPricing.rootTotal,
+	};
+	reservation.adminPricingVisibility = {
+		...(reservation.adminPricingVisibility || {}),
+		rootOnlyForHotelManagement: true,
+		source: "ota_platform_release",
+		appliedAt: releasedAt,
+		appliedBy: actor._id,
+	};
+	reservation.supplierData.hotelRunner.sourceState = sourceState;
+	if (finance) {
+		attachVerifiedHotelRunnerEmailCommercialEvidence(reservation);
+		reservation.paypal_details = {
+			status: "captured",
+			captured_total_sar: reservation.total_amount,
+			capture_id: "release-protected-capture",
+		};
+		reservation.moneyTransferredToHotel = true;
+	}
+	if (housing) {
+		reservation.roomId = [LOCAL_DOUBLE_ID, LOCAL_TRIPLE_ID];
+		reservation.bedNumber = ["201-A", "305-B"];
+		reservation.housedBy = {
+			_id: "64b000000000000000000778",
+			name: "Hotel Operations",
+			role: "hotel employee",
+		};
+	}
+	return { system, reservation, releasedAt, actor };
+}
+
+function deleteDottedPath(target, path) {
+	const parts = String(path).split(".");
+	let cursor = target;
+	for (const part of parts.slice(0, -1)) {
+		if (!cursor || typeof cursor !== "object") return;
+		cursor = cursor[part];
+	}
+	if (cursor && typeof cursor === "object") {
+		delete cursor[parts[parts.length - 1]];
+	}
+}
+
+const RELEASED_HOTELRUNNER_MUTABLE_PATHS = [
+	"state",
+	"reservation_status",
+	"pendingConfirmation.status",
+	"pendingConfirmation.confirmedAt",
+	"pendingConfirmation.cancelledAt",
+	"pendingConfirmation.inventoryBlocks",
+	"pendingConfirmation.lastUpdatedAt",
+	"supplierData.hotelRunner.transport",
+	"supplierData.hotelRunner.reservationId",
+	"supplierData.hotelRunner.sourceState",
+	"supplierData.hotelRunner.lastMessageUid",
+	"supplierData.hotelRunner.appliedSourceUpdatedAt",
+	"supplierData.hotelRunner.appliedCanonicalHash",
+	"supplierData.hotelRunner.lastAppliedAt",
+	"supplierData.otaAutomationPipeline",
+	"supplierData.otaSourceAuthority",
+	"supplierData.otaLastSourceReceivedAt",
+	"supplierData.otaLastEventType",
+	"reservationAuditLog",
+	"__v",
+	"updatedAt",
+];
+
+function releasedProtectedSnapshot(reservation) {
+	const snapshot = structuredClone(reservation);
+	for (const path of RELEASED_HOTELRUNNER_MUTABLE_PATHS) {
+		deleteDottedPath(snapshot, path);
+	}
+	return snapshot;
+}
+
+async function projectFixtureEvent(system, normalized) {
+	return projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+}
+
 function sanitizedAgodaCriticalHandoffFixture() {
 	const system = createInMemoryProjectionSystem();
 	system.config.requireOtaReview = true;
@@ -4897,6 +5028,409 @@ test("critical conflicts hide stale payout evidence while preserving protected f
 		system.mirror.lastErrorCode,
 		"hotelrunner_local_room_or_stay_conflict"
 	);
+});
+
+test("released HotelRunner modifications preserve all protected domains and mirror ownership", async () => {
+	const { system, reservation } = await canonicalReleasedHotelRunnerFixture();
+	const protectedBefore = releasedProtectedSnapshot(reservation);
+	const releaseBefore = structuredClone(reservation.otaPlatformReview);
+	const mirrorBaselineBefore = structuredClone(system.mirror.lastAppliedProjection);
+	const mappingWritesBefore = system.mappingWrites.length;
+	system.dependencies.loadEmailCommercialBridge = async () => {
+		throw new Error("released lifecycle path loaded commercial evidence");
+	};
+	system.dependencies.validateInventory = async () => {
+		throw new Error("released lifecycle path validated changed rooms");
+	};
+	const modified = normalizedMultiRoom({
+		message_uid: "released-protected-modification",
+		modified: true,
+		guest: "Source Must Not Replace Released Guest",
+		currency: "USD",
+		sub_total: "1040",
+		item_total: "1040",
+		total: "1040",
+		checkin_date: "2026-08-11",
+		checkout_date: "2026-08-13",
+		updated_at: "2026-08-06T12:00:00.000Z",
+		rooms: [
+			rawRoom({
+				id: "external-room-1",
+				invCode: "INV-DOUBLE",
+				name: "Changed Double Room",
+				prices: ["110", "210"],
+			}),
+			rawRoom({
+				id: "external-room-2",
+				invCode: "INV-TRIPLE",
+				name: "Changed Triple Room",
+				prices: ["310", "410"],
+				children: 1,
+			}),
+		].map((room) => ({
+			...room,
+			checkin_date: "2026-08-11",
+			checkout_date: "2026-08-13",
+			daily_prices: room.daily_prices.map((day, index) => ({
+				...day,
+				date: `2026-08-${11 + index}`,
+			})),
+		})),
+	});
+	const result = await projectFixtureEvent(system, modified);
+
+	assert.equal(result.status, "updated");
+	assert.equal(result.code, "hotelrunner_released_reservation_lifecycle_only");
+	assert.equal(result.lifecycleOnly, true);
+	assert.equal(result.releaseProtected, true);
+	assert.deepEqual(releasedProtectedSnapshot(reservation), protectedBefore);
+	assert.deepEqual(reservation.otaPlatformReview, releaseBefore);
+	assert.deepEqual(system.mirror.lastAppliedProjection, mirrorBaselineBefore);
+	assert.equal(system.mappingWrites.length, mappingWritesBefore);
+	assert.equal(
+		result.changedPaths.some((path) =>
+			/^(?:customer_details|pickedRooms|adminPricing|ota_financial|commission|total_)/.test(
+				path
+			)
+		),
+		false
+	);
+});
+
+test("released reserved-to-confirmed changes lifecycle only, including with finance and housing", async () => {
+	const { system, reservation } = await canonicalReleasedHotelRunnerFixture({
+		finance: true,
+		housing: true,
+		sourceState: "reserved",
+	});
+	const protectedBefore = releasedProtectedSnapshot(reservation);
+	const releaseBefore = structuredClone(reservation.otaPlatformReview);
+	const releasedToHotelAt = reservation.pendingConfirmation.releasedToHotelAt;
+	const confirmed = normalizedMultiRoom({
+		message_uid: "released-reserved-to-confirmed",
+		modified: true,
+		updated_at: "2026-08-06T12:15:00.000Z",
+	});
+	const result = await projectFixtureEvent(system, confirmed);
+
+	assert.equal(result.status, "updated");
+	assert.equal(reservation.state, "confirmed");
+	assert.equal(reservation.reservation_status, "confirmed");
+	assert.equal(reservation.pendingConfirmation.status, "confirmed");
+	assert.equal(
+		reservation.pendingConfirmation.releasedToHotelAt,
+		releasedToHotelAt
+	);
+	assert.deepEqual(releasedProtectedSnapshot(reservation), protectedBefore);
+	assert.deepEqual(reservation.otaPlatformReview, releaseBefore);
+});
+
+test("released active events never downgrade confirmed, in-house, or checked-out lifecycle", async () => {
+	const confirmedFixture = await canonicalReleasedHotelRunnerFixture();
+	confirmedFixture.reservation.state = "confirmed";
+	confirmedFixture.reservation.reservation_status = "confirmed";
+	confirmedFixture.reservation.pendingConfirmation.status = "confirmed";
+	const reserved = normalizedMultiRoom({
+		message_uid: "released-confirmed-late-reserved",
+		state: "reserved",
+		modified: true,
+		updated_at: "2026-08-06T12:20:00.000Z",
+	});
+	const reservedResult = await projectFixtureEvent(
+		confirmedFixture.system,
+		reserved
+	);
+	assert.equal(reservedResult.status, "updated");
+	assert.equal(confirmedFixture.reservation.state, "confirmed");
+	assert.equal(confirmedFixture.reservation.reservation_status, "confirmed");
+
+	for (const terminal of ["inhouse", "checked_out"]) {
+		const { system, reservation } = await canonicalReleasedHotelRunnerFixture({
+			housing: true,
+			sourceState: "reserved",
+		});
+		reservation.state = terminal;
+		reservation.reservation_status = terminal;
+		const before = JSON.parse(JSON.stringify(reservation));
+		const active = normalizedMultiRoom({
+			message_uid: `released-${terminal}-active-confirmed`,
+			modified: true,
+			updated_at: "2026-08-06T12:25:00.000Z",
+		});
+		const result = await projectFixtureEvent(system, active);
+		assert.equal(result.status, "quarantined");
+		assert.equal(result.code, "hotelrunner_terminal_reopen_blocked");
+		assert.deepEqual(JSON.parse(JSON.stringify(reservation)), before);
+	}
+});
+
+test("released cancellation over housed checked-out finance changes only allowlisted lifecycle and ordering paths", async () => {
+	const { system, reservation } = await canonicalReleasedHotelRunnerFixture({
+		finance: true,
+		housing: true,
+	});
+	reservation.state = "checked_out";
+	reservation.reservation_status = "checked_out";
+	reservation.pendingConfirmation.status = "confirmed";
+	const protectedBefore = releasedProtectedSnapshot(reservation);
+	const releaseBefore = structuredClone(reservation.otaPlatformReview);
+	const mirrorBaselineBefore = structuredClone(system.mirror.lastAppliedProjection);
+	const cancellation = normalizeHotelRunnerReservation({
+		message_uid: "released-housed-finance-cancelled",
+		reservation_id: reservation.supplierData.hotelRunner.reservationId,
+		state: "canceled",
+		updated_at: "2026-08-06T13:00:00.000Z",
+		rooms: [{ id: "external-room-1", state: "canceled" }],
+	});
+	const result = await projectFixtureEvent(system, cancellation);
+	const allowed = new Set([
+		"state",
+		"reservation_status",
+		"pendingConfirmation.status",
+		"pendingConfirmation.cancelledAt",
+		"pendingConfirmation.inventoryBlocks",
+		"pendingConfirmation.lastUpdatedAt",
+		...RELEASED_HOTELRUNNER_MUTABLE_PATHS.filter((path) =>
+			path.startsWith("supplierData.")
+		),
+	]);
+
+	assert.equal(result.status, "cancelled");
+	assert.equal(result.code, "hotelrunner_released_reservation_lifecycle_only");
+	assert.equal(reservation.state, "cancelled");
+	assert.equal(reservation.reservation_status, "cancelled");
+	assert.deepEqual(new Set(result.changedPaths), allowed);
+	assert.deepEqual(releasedProtectedSnapshot(reservation), protectedBefore);
+	assert.deepEqual(reservation.otaPlatformReview, releaseBefore);
+	assert.deepEqual(system.mirror.lastAppliedProjection, mirrorBaselineBefore);
+	assert.equal(
+		reservation.reservationAuditLog.at(-1).action,
+		"released-reservation-cancelled-from-hotelrunner"
+	);
+});
+
+test("released HotelRunner lifecycle outranks a later portal or email collector watermark", async (t) => {
+	for (const lifecycle of ["confirmed", "canceled"]) {
+		await t.test(lifecycle, async () => {
+			const { system, reservation } =
+				await canonicalReleasedHotelRunnerFixture({
+					finance: true,
+					housing: true,
+					sourceState: "reserved",
+				});
+			const hotelRunnerReservationId =
+				reservation.supplierData.hotelRunner.reservationId;
+			reservation.supplierData.hotelRunner = {};
+			reservation.supplierData.otaAutomationPipeline =
+				"authenticated-provider-portal";
+			reservation.supplierData.otaSourceAuthority = 4;
+			reservation.supplierData.otaLastSourceReceivedAt =
+				new Date("2026-08-06T15:00:00.000Z");
+			system.mirror.reservationMongoId = null;
+			system.mirror.appliedCanonicalHash = "";
+			system.mirror.appliedSourceUpdatedAt = null;
+			system.mirror.lastAppliedProjection = {};
+			const protectedBefore = releasedProtectedSnapshot(reservation);
+			const source = normalizedMultiRoom({
+				message_uid: `released-portal-watermark-${lifecycle}`,
+				reservation_id: hotelRunnerReservationId,
+				state: lifecycle,
+				modified: true,
+				updated_at: "2026-08-06T12:00:00.000Z",
+			});
+			assert.equal(pmsWatermarkComparison(source, reservation), "older");
+			system.dependencies.loadEmailCommercialBridge = async () => {
+				throw new Error("released lifecycle loaded lower-authority evidence");
+			};
+			const result = await projectFixtureEvent(system, source);
+			assert.equal(result.releaseProtected, true);
+			assert.equal(
+				result.status,
+				lifecycle === "canceled" ? "cancelled" : "updated"
+			);
+			assert.equal(
+				reservation.reservation_status,
+				lifecycle === "canceled" ? "cancelled" : "Pending Confirmation"
+			);
+			assert.equal(
+				reservation.supplierData.hotelRunner.sourceState,
+				lifecycle
+			);
+			assert.deepEqual(
+				releasedProtectedSnapshot(reservation),
+				protectedBefore
+			);
+		});
+	}
+});
+
+test("released lifecycle still rejects an event older than a genuine direct HotelRunner watermark", async () => {
+	const { system, reservation } = await canonicalReleasedHotelRunnerFixture();
+	reservation.supplierData.hotelRunner.appliedSourceUpdatedAt =
+		new Date("2026-08-06T14:00:00.000Z");
+	reservation.supplierData.otaLastSourceReceivedAt =
+		new Date("2026-08-06T16:00:00.000Z");
+	const before = JSON.parse(JSON.stringify(reservation));
+	const cancellation = normalizeHotelRunnerReservation({
+		message_uid: "released-stale-direct-hotelrunner-cancelled",
+		reservation_id: reservation.supplierData.hotelRunner.reservationId,
+		state: "canceled",
+		updated_at: "2026-08-06T13:00:00.000Z",
+		rooms: [{ id: "external-room-1", state: "canceled" }],
+	});
+	const result = await projectFixtureEvent(system, cancellation);
+	assert.equal(result.status, "ignored");
+	assert.equal(result.code, "hotelrunner_stale_against_pms_watermark");
+	assert.deepEqual(JSON.parse(JSON.stringify(reservation)), before);
+});
+
+test("release near-misses use the ordinary update path", async (t) => {
+	const cases = [
+		{
+			name: "legacy status and date only",
+			mutate(reservation) {
+				delete reservation.otaPlatformReview.releasedBy;
+				delete reservation.pendingConfirmation.releasedToHotelAt;
+			},
+		},
+		{
+			name: "wrong pending source",
+			mutate(reservation) {
+				reservation.pendingConfirmation.source = "hotelrunner_api";
+			},
+		},
+		{
+			name: "missing release actor",
+			mutate(reservation) {
+				reservation.otaPlatformReview.releasedBy = null;
+			},
+		},
+	];
+	for (const [index, entry] of cases.entries()) {
+		await t.test(entry.name, async () => {
+			const { system, reservation } =
+				await canonicalReleasedHotelRunnerFixture();
+			entry.mutate(reservation);
+			const modified = normalizedMultiRoom({
+				message_uid: `release-near-miss-${index}`,
+				modified: true,
+				guest: `Ordinary Update ${index}`,
+				updated_at: `2026-08-06T12:4${index}:00.000Z`,
+			});
+			const result = await projectFixtureEvent(system, modified);
+			assert.equal(result.status, "updated");
+			assert.equal(result.releaseProtected, undefined);
+			assert.equal(
+				reservation.customer_details.name,
+				`Ordinary Update ${index}`
+			);
+			assert.equal(
+				reservation.reservationAuditLog.at(-1).action,
+				"updated-from-hotelrunner"
+			);
+		});
+	}
+});
+
+test("unreleased cancellation retains commission ownership behavior", async () => {
+	const system = createInMemoryProjectionSystem();
+	const initial = normalizedMultiRoom({ message_uid: "unreleased-cancel-initial" });
+	assert.equal((await projectFixtureEvent(system, initial)).status, "created");
+	system.reservations[0].commission = 17;
+	const cancellation = normalizeHotelRunnerReservation({
+		message_uid: "unreleased-cancel-final",
+		reservation_id: initial.hotelRunnerReservationId,
+		state: "canceled",
+		updated_at: "2026-08-06T12:30:00.000Z",
+		rooms: [{ id: "external-room-1", state: "canceled" }],
+	});
+	const result = await projectFixtureEvent(system, cancellation);
+	assert.equal(result.status, "cancelled");
+	assert.equal(result.releaseProtected, undefined);
+	assert.equal(system.reservations[0].commission, 0);
+	assert.equal(
+		system.reservations[0].reservationAuditLog.at(-1).action,
+		"cancelled-from-hotelrunner"
+	);
+});
+
+test("released lifecycle CAS fences every release marker without partial mutation", async () => {
+	const { system, reservation, releasedAt, actor } =
+		await canonicalReleasedHotelRunnerFixture();
+	const before = JSON.parse(JSON.stringify(reservation));
+	const mirrorHashBefore = system.mirror.appliedCanonicalHash;
+	let attempted = null;
+	system.ReservationModel.updateOne = (filter, update) => queryResult(() => {
+		attempted = { filter, update };
+		return { matchedCount: 0 };
+	});
+	const modified = normalizedMultiRoom({
+		message_uid: "released-cas-conflict",
+		modified: true,
+		updated_at: "2026-08-06T13:15:00.000Z",
+	});
+	const result = await projectFixtureEvent(system, modified);
+
+	assert.equal(result.status, "retry");
+	assert.equal(result.code, "hotelrunner_reservation_cas_conflict");
+	assert.equal(attempted.filter["otaPlatformReview.status"], "released");
+	assert.equal(attempted.filter["otaPlatformReview.releasedAt"], releasedAt);
+	assert.equal(
+		attempted.filter["otaPlatformReview.releasedBy._id"],
+		actor._id
+	);
+	assert.equal(
+		attempted.filter["pendingConfirmation.source"],
+		"ota_platform_release"
+	);
+	assert.equal(
+		attempted.filter["pendingConfirmation.releasedToHotelAt"],
+		releasedAt
+	);
+	assert.equal(attempted.update.$inc.__v, 1);
+	assert.deepEqual(JSON.parse(JSON.stringify(reservation)), before);
+	assert.equal(system.mirror.appliedCanonicalHash, mirrorHashBefore);
+});
+
+test("released lifecycle retry recovers only the mirror after its post-CAS failure", async () => {
+	const { system, reservation } = await canonicalReleasedHotelRunnerFixture();
+	const protectedBefore = releasedProtectedSnapshot(reservation);
+	const baselineBefore = structuredClone(system.mirror.lastAppliedProjection);
+	const originalMirrorUpdateOne = system.MirrorModel.updateOne.bind(
+		system.MirrorModel
+	);
+	let failAppliedMirrorOnce = true;
+	system.MirrorModel.updateOne = (filter, update) => {
+		if (failAppliedMirrorOnce && update?.$set?.appliedCanonicalHash) {
+			return queryResult(() => {
+				failAppliedMirrorOnce = false;
+				throw new Error("synthetic released lifecycle mirror failure");
+			});
+		}
+		return originalMirrorUpdateOne(filter, update);
+	};
+	const modified = normalizedMultiRoom({
+		message_uid: "released-mirror-recovery",
+		modified: true,
+		updated_at: "2026-08-06T13:30:00.000Z",
+	});
+	const auditCountBefore = reservation.reservationAuditLog.length;
+	await assert.rejects(
+		projectFixtureEvent(system, modified),
+		/synthetic released lifecycle mirror failure/
+	);
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(reservation.reservationAuditLog.length, auditCountBefore + 1);
+	const recovered = await projectFixtureEvent(system, modified);
+	assert.equal(
+		recovered.code,
+		"hotelrunner_released_reservation_mirror_recovered"
+	);
+	assert.equal(recovered.mirrorRecovery, true);
+	assert.equal(system.reservationWrites.length, 1);
+	assert.equal(reservation.reservationAuditLog.length, auditCountBefore + 1);
+	assert.deepEqual(system.mirror.lastAppliedProjection, baselineBefore);
+	assert.deepEqual(releasedProtectedSnapshot(reservation), protectedBefore);
 });
 
 test("minimal cancellation preserves canonical provider and prior HotelRunner identity metadata", async () => {
