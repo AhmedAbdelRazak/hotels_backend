@@ -41,6 +41,27 @@ test("official receipt groups 20 identical agency rooms", () => {
   assert.equal(view.payment.remaining, 1550);
 });
 
+test("official receipt treats canonical OTA-collected money as paid without a local capture", () => {
+  const view = buildOfficialReceiptView(
+    {
+      confirmation_number: "OTA-COLLECTED",
+      checkin_date: "2026-08-10",
+      checkout_date: "2026-08-11",
+      total_amount: 588,
+      payment: "paid online",
+      financeStatus: "paid online",
+      paid_amount: 588,
+      paid_amount_breakdown: { paid_online_other_platforms: 588 },
+      payment_details: { captured: false, onsite_paid_amount: 0 },
+      customer_details: { name: "OTA Guest" },
+    },
+    { hotelName: "Hotel" }
+  );
+  assert.equal(view.payment.paid, 588);
+  assert.equal(view.payment.remaining, 0);
+  assert.equal(view.payment.method.en, "Paid");
+});
+
 test("official receipt escapes customer-controlled HTML and embeds a local flag", () => {
   const html = renderOfficialReceiptHtml(
     {

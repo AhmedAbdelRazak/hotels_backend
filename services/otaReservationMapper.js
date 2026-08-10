@@ -11378,6 +11378,11 @@ function directHotelRunnerCommercialEnrichmentProtectedState(
 	const summary = existing.ota_financial_summary || {};
 	const visibility = existing.adminPricingVisibility || {};
 	const pristineHotelRunnerReview = isPristineHotelRunnerOtaReview(existing);
+	const trustedOtaCollectPaymentBaseline = Boolean(
+		trustedExistingEvidence &&
+			recognizedStoredPaymentBaseline(existing)?.model === "ota_collect" &&
+			!topLevelPaymentStateHasProtectedDrift(existing)
+	);
 	const verifiedExistingEvidence = verifiedHotelRunnerEmailCommercialEvidence(
 		existing,
 		{
@@ -11413,8 +11418,10 @@ function directHotelRunnerCommercialEnrichmentProtectedState(
 		(Array.isArray(existing.bedNumber) &&
 			existing.bedNumber.some(hasMeaningfulProtectedValue)) ||
 		hasCaptureOrSettlementActivity(existing) ||
-		Math.abs(Number(existing.paid_amount || 0)) > 0.0001 ||
-		directHotelRunnerTopLevelPaymentStateProtected(existing) ||
+		(Math.abs(Number(existing.paid_amount || 0)) > 0.0001 &&
+			!trustedOtaCollectPaymentBaseline) ||
+		(directHotelRunnerTopLevelPaymentStateProtected(existing) &&
+			!trustedOtaCollectPaymentBaseline) ||
 		paidAmountBreakdownHasProtectedState(existing) ||
 		financialCycleHasProtectedState(existing) ||
 		(adminPricingVisibilityHasProtectedState(existing) &&
@@ -11733,6 +11740,80 @@ function buildDirectHotelRunnerCommercialPricing(
 	};
 }
 
+// HotelRunner's own payment fields remain informational. Promote a provider-
+// collected amount only when the same authenticated OTA email that proved the
+// commercial bundle also supplied an exact, normalized OTA-collect fact.
+function verifiedHotelRunnerOtaCollectPaymentSet(
+	normalized = {},
+	evidence = {},
+	{ existing = {}, pricing = {} } = {}
+) {
+	if (
+		normalized.sourceSenderTrusted !== true ||
+		normalized.sourceSenderAuthenticated !== true ||
+		!hasSourceField(normalized, "paymentCollectionModel") ||
+		normalized.paymentCollectionModel !== "ota_collect" ||
+		normalized.paidOnline !== true ||
+		Number(evidence.version) !== 2 ||
+		evidence.verified !== true ||
+		evidence.source !== "authenticated_ota_email" ||
+		directHotelRunnerCommercialEnrichmentProtectedState(existing)
+	) {
+		return {};
+	}
+	const rebuiltEvidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: evidence.appliedAt,
+	});
+	if (
+		!rebuiltEvidence ||
+		!constantTimeEvidenceHashMatches(
+			evidence.evidenceHash,
+			hotelRunnerEmailCommercialEvidenceHash(evidence)
+		) ||
+		!constantTimeEvidenceHashMatches(
+			evidence.evidenceHash,
+			rebuiltEvidence.evidenceHash
+		)
+	) {
+		return {};
+	}
+	const evidenceGrossCents = decimalMoneyCents(evidence.grossTotalSar);
+	const pricingGrossCents = decimalMoneyCents(pricing.clientTotal);
+	const rootTotal = Number(pricing.rootTotal);
+	if (
+		evidenceGrossCents <= 0 ||
+		evidenceGrossCents !== pricingGrossCents ||
+		!Number.isFinite(rootTotal) ||
+		rootTotal < 0
+	) {
+		return {};
+	}
+	const paymentMapping = resolvePaymentMapping(
+		normalized,
+		evidence.grossTotalSar,
+		rootTotal,
+		0
+	);
+	if (
+		paymentMapping.payment !== "paid online" ||
+		paymentMapping.financeStatus !== "paid online" ||
+		decimalMoneyCents(paymentMapping.paidAmount) !== evidenceGrossCents ||
+		decimalMoneyCents(
+			paymentMapping.paidAmountBreakdown?.paid_online_other_platforms
+		) !== evidenceGrossCents
+	) {
+		return {};
+	}
+	return {
+		payment: paymentMapping.payment,
+		financeStatus: paymentMapping.financeStatus,
+		paid_amount: paymentMapping.paidAmount,
+		paid_amount_breakdown: paymentMapping.paidAmountBreakdown,
+		financial_cycle: paymentMapping.financialCycle,
+		"supplierData.otaPaymentCollectionModel": "ota_collect",
+	};
+}
+
 function directHotelRunnerCommercialEnrichmentSet(
 	normalized = {},
 	evidence = {},
@@ -11740,6 +11821,7 @@ function directHotelRunnerCommercialEnrichmentSet(
 		reportedTotalRole = "gross",
 		existing = {},
 		commercialPricing = null,
+		materializeVerifiedOtaCollectPayment = false,
 	} = {}
 ) {
 	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
@@ -11761,6 +11843,12 @@ function directHotelRunnerCommercialEnrichmentSet(
 		(evidence.otaCommissionSar === null || evidence.otaCommissionSar === undefined
 			? null
 			: round2(evidence.otaCommissionSar));
+	const otaCollectPaymentSet = materializeVerifiedOtaCollectPayment
+		? verifiedHotelRunnerOtaCollectPaymentSet(normalized, evidence, {
+				existing,
+				pricing,
+			})
+		: {};
 	const set = {
 		// Keep xHotelPro/platform commission separate from the OTA's fee. The OTA
 		// amount is written only from the complete, authenticated evidence above.
@@ -11806,6 +11894,7 @@ function directHotelRunnerCommercialEnrichmentSet(
 		...(otaCommercialEvidence
 			? { "supplierData.otaCommercialEvidence": otaCommercialEvidence }
 			: {}),
+		...otaCollectPaymentSet,
 	};
 	return set;
 }
@@ -12030,6 +12119,12 @@ function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
 		sub_total: existing.sub_total,
 		currency: existing.currency,
 		commission: existing.commission,
+		payment: existing.payment,
+		financeStatus: existing.financeStatus,
+		paid_amount: existing.paid_amount,
+		payment_details: existing.payment_details ?? null,
+		paid_amount_breakdown: existing.paid_amount_breakdown ?? null,
+		financial_cycle: existing.financial_cycle ?? null,
 		pickedRoomsType: existing.pickedRoomsType,
 		pickedRoomsPricing: existing.pickedRoomsPricing,
 		"adminPricing.mode": existing.adminPricing?.mode,
@@ -12056,6 +12151,8 @@ function directHotelRunnerCommercialSnapshotFilter(existing = {}) {
 			existing.supplierData?.otaAutomationPipeline,
 		"supplierData.otaSourceAuthority":
 			existing.supplierData?.otaSourceAuthority,
+		"supplierData.otaPaymentCollectionModel":
+			existing.supplierData?.otaPaymentCollectionModel ?? null,
 	};
 	// MongoDB's equality-to-null matches both the new explicit null and legacy
 	// documents where this newly introduced field does not exist yet.
@@ -12258,6 +12355,7 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 					reportedTotalRole: guard.reportedTotalRole,
 					existing,
 					commercialPricing: guard.commercialPricing,
+					materializeVerifiedOtaCollectPayment: true,
 				}
 		  );
 	if (!set) {
