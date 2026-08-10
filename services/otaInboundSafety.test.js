@@ -38,6 +38,7 @@ const {
 	detectPaymentCollectionModel,
 	detectProvider,
 	detectStatusToApply,
+	decimalMoneyCents,
 	explicitRoomCapacity,
 	extractNormalizedReservation,
 	fetchWithHardTimeout,
@@ -58,7 +59,9 @@ const {
 	otaInboundAllocationSafety,
 	parseDate,
 	parseMoney,
+	multipliedMoneyCents,
 	redactSensitive,
+	reconcileDirectHotelRunnerOwnedEmail,
 	requiredNewReservationMissing,
 	reconcileOtaReservation,
 	resolvedIncomingHotelConflictsWithExisting,
@@ -5703,6 +5706,20 @@ test("HotelRunner commercial materialization repairs a one-cent converted nightl
 	);
 });
 
+test("commercial cents use deterministic decimal half-away rounding and exact multiplication", () => {
+	assert.equal(decimalMoneyCents(1.005), 101);
+	assert.equal(decimalMoneyCents(10.075), 1008);
+	assert.equal(decimalMoneyCents(421.575), 42158);
+	assert.equal(decimalMoneyCents(-1.005), -101);
+	assert.equal(decimalMoneyCents("1.005e1"), 1005);
+	assert.equal(decimalMoneyCents("90071992547409.91"), Number.MAX_SAFE_INTEGER);
+	assert.equal(decimalMoneyCents("90071992547409.92"), null);
+	assert.equal(decimalMoneyCents("not-money"), null);
+	assert.equal(multipliedMoneyCents(112.42, 3.75), 42158);
+	assert.equal(multipliedMoneyCents("1.1242e2", "3.75e0"), 42158);
+	assert.equal(multipliedMoneyCents(-1.005, 1), -101);
+});
+
 test("Agoda commercial parsing keeps missing commission nullable and genuine stay conflicts closed", () => {
 	const withoutCommission = authenticatedAgodaCommercialVoucher({
 		bookingId: "687702587",
@@ -9463,18 +9480,18 @@ test("a different future Trip booking derives commercial SAR values through the 
 		},
 		checkin_date: "2026-08-10",
 		checkout_date: "2026-08-11",
-		total_amount: null,
+		total_amount: 69.16,
 		sub_total: 75,
 		pickedRoomsType: structuredClone(sourceRooms),
 		pickedRoomsPricing: structuredClone(sourceRooms),
 		adminPricing: {
 			...base.adminPricing,
-			clientTotal: null,
+			clientTotal: 69.16,
 			rootTotal: 75,
 		},
 		ota_financial_summary: {
 			...base.ota_financial_summary,
-			clientTotal: null,
+			clientTotal: 69.16,
 			hotelVisibleAmount: 75,
 		},
 		supplierData: {
@@ -9498,7 +9515,7 @@ test("a different future Trip booking derives commercial SAR values through the 
 		evidence,
 	});
 	assert.equal(guard.ok, true, guard.reason);
-	assert.equal(guard.reportedTotalRole, "unknown");
+	assert.equal(guard.reportedTotalRole, "payout");
 	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence, {
 		reportedTotalRole: guard.reportedTotalRole,
 		existing,
@@ -10323,6 +10340,414 @@ test("a pristine HotelRunner OTA review may receive verified commercial evidence
 		"protected_state",
 		"a manually created reservation must remain protected"
 	);
+});
+
+test("same v2 evidence exactly rematerializes a one-cent nightly drift only while the HotelRunner review is pristine", async () => {
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalReservationFindById = Reservations.findById;
+	const dates = Array.from(
+		{ length: 7 },
+		(_value, index) => `2026-08-${String(10 + index).padStart(2, "0")}`
+	);
+	const malformedGrossRows = [
+		60.23,
+		60.23,
+		60.23,
+		60.22,
+		60.22,
+		60.22,
+		60.22,
+	];
+	const exactPayoutRows = [
+		56.89,
+		56.89,
+		56.89,
+		56.89,
+		56.89,
+		56.88,
+		56.88,
+	];
+	const foreignSource = makeVerifiedHotelRunnerCommercialEmail({
+		checkinDate: dates[0],
+		checkoutDate: "2026-08-17",
+		amount: null,
+		totalAmountSar: null,
+		sourceAmount: 112.42,
+		sourceCurrency: "USD",
+		totalPayoutSar: null,
+		netAfterExpensesTotal: null,
+		currency: "USD",
+		nightlyPricingSar: dates.map((date, index) => ({
+			date,
+			clientAmountSar: malformedGrossRows[index],
+			payoutAmountSar: exactPayoutRows[index],
+		})),
+		paymentSummary: {
+			sourceCurrency: "USD",
+			sourceTotalGuestPaymentAmount: 112.42,
+			sourceTotalPayoutAmount: 106.19,
+			sourceTotalPayoutCurrency: "USD",
+			totalGuestPaymentAmount: null,
+			totalPayoutAmount: null,
+			currency: null,
+			exchangeRateToSar: null,
+		},
+	});
+	const converted = await applyLiveSarConversion(foreignSource, {
+		apiKey: "exact-cent-regression-credential",
+		cache: new Map(),
+		now: () => Date.parse("2026-08-10T17:22:00.000Z"),
+		fetchImpl: async () => ({
+			ok: true,
+			async json() {
+				return {
+					result: "success",
+					base_code: "USD",
+					target_code: "SAR",
+					conversion_rate: 3.75,
+					time_last_update_unix:
+						Date.parse("2026-08-10T17:20:00.000Z") / 1000,
+				};
+			},
+		}),
+	});
+	const normalized = {
+		...converted,
+		amount: 421.58,
+		totalAmountSar: 421.58,
+		totalPayoutSar: 398.21,
+		netAfterExpensesTotal: 398.21,
+		paymentSummary: {
+			...converted.paymentSummary,
+			totalGuestPaymentAmount: 421.58,
+			totalPayoutAmount: 398.21,
+		},
+	};
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const sourceRooms = [
+		{
+			...base.pickedRoomsPricing[0],
+			immutableRoomMetadata: { hotelRunnerRatePlan: "opaque-and-preserved" },
+			pricingByDay: dates.map((date) => ({
+				date,
+				price: 60.23,
+				clientPrice: 60.23,
+				mainPrice: 60.23,
+				rootPrice: 75,
+				totalPriceWithCommission: 60.23,
+				hotelRunnerSourcePrice: 60.23,
+				immutableHotelRunnerDayFact: "opaque-and-preserved",
+			})),
+		},
+	];
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		state: "OTA Platform Review",
+		reservation_status: "OTA Platform Review",
+		checkin_date: dates[0],
+		checkout_date: "2026-08-17",
+		total_amount: 421.58,
+		sub_total: 525,
+		pickedRoomsType: structuredClone(sourceRooms),
+		pickedRoomsPricing: structuredClone(sourceRooms),
+		adminPricing: {
+			...base.adminPricing,
+			clientTotal: 421.58,
+			rootTotal: 525,
+		},
+		ota_financial_summary: {
+			...base.ota_financial_summary,
+			clientTotal: 421.58,
+			hotelVisibleAmount: 525,
+		},
+		adminPricingVisibility: {
+			rootOnlyForHotelManagement: true,
+			source: "hotelrunner_api",
+			appliedAt: new Date("2026-08-10T17:20:00.000Z"),
+			appliedBy: null,
+		},
+		otaPlatformReview: {
+			status: "pending",
+			source: "hotelrunner_api",
+			inboundEmailId: "",
+			provider: "booking",
+			providerLabel: "Booking.com",
+			confirmationNumber: HOTELRUNNER_COMMERCIAL_CONFIRMATION,
+			createdAt: new Date("2026-08-10T17:20:00.000Z"),
+			releasedAt: null,
+			releasedBy: null,
+			priceAtRelease: 0,
+			hotelRunnerManaged: true,
+			hotelRunnerLinkedAt: new Date("2026-08-10T17:20:00.000Z"),
+			lastHotelRunnerUpdatedAt: new Date("2026-08-10T17:20:00.000Z"),
+			hotelAssignmentRequired: false,
+			hotelAssignmentStatus: "assigned",
+			assignedHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			assignedHotelName: "Zad Ajyad",
+			assignedAt: new Date("2026-08-10T17:20:00.000Z"),
+			roomMappingStatus: "mapped",
+			roomMappingHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			lastUpdatedAt: new Date("2026-08-10T17:20:00.000Z"),
+		},
+	});
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-10T17:23:01.000Z"),
+	});
+	assert.ok(evidence);
+	const exactSet = directHotelRunnerCommercialEnrichmentSet(
+		normalized,
+		evidence,
+		{ existing }
+	);
+	assert.ok(exactSet);
+	const exactMaterialized = applyDottedCommercialSet(existing, exactSet);
+	assert.ok(
+		verifiedHotelRunnerEmailCommercialEvidence(exactMaterialized, {
+			provider: "booking",
+			grossTotalSar: 421.58,
+			currency: "SAR",
+		})
+	);
+
+	const drifted = structuredClone(exactMaterialized);
+	for (const roomsKey of ["pickedRoomsType", "pickedRoomsPricing"]) {
+		const room = drifted[roomsKey][0];
+		room.totalPriceWithCommission = 421.57;
+		room.chosenPrice = 60.22;
+		room.pricingByDay.forEach((day, index) => {
+			const client = malformedGrossRows[index];
+			const payout = exactPayoutRows[index];
+			Object.assign(day, {
+				price: client,
+				clientPrice: client,
+				mainPrice: client,
+				totalPriceWithCommission: client,
+				netAfterExpenses: payout,
+				netAfterOtaExpenses: payout,
+				otaExpenseAmount: Number((client - payout).toFixed(2)),
+			});
+		});
+	}
+	assert.equal(
+		verifiedHotelRunnerEmailCommercialEvidence(drifted, {
+			provider: "booking",
+			grossTotalSar: 421.58,
+			currency: "SAR",
+		}),
+		null,
+		"a 421.57 nightly gross cannot satisfy the v2 marker for 421.58"
+	);
+
+	const guardInput = {
+		normalized,
+		existing: drifted,
+		hotelDetails: hotelRunnerCommercialHotel(),
+		matchedReservationBy: ["otaIdentityKey"],
+		evidence,
+	};
+	assert.equal(directHotelRunnerEmailCommercialGuard(guardInput).ok, true);
+	const withAdditionalGrossDrift = (reservation, additionalDrift) => {
+		const changed = structuredClone(reservation);
+		changed.pickedRoomsType = structuredClone(reservation.pickedRoomsType);
+		changed.pickedRoomsPricing = structuredClone(reservation.pickedRoomsPricing);
+		for (const roomsKey of ["pickedRoomsType", "pickedRoomsPricing"]) {
+			const room = changed[roomsKey][0];
+			const day = room.pricingByDay[0];
+			const client = Number((day.clientPrice - additionalDrift).toFixed(2));
+			Object.assign(day, {
+				price: client,
+				clientPrice: client,
+				mainPrice: client,
+				totalPriceWithCommission: client,
+				otaExpenseAmount: Number(
+					(client - day.netAfterExpenses).toFixed(2)
+				),
+			});
+			room.totalPriceWithCommission = Number(
+				(room.totalPriceWithCommission - additionalDrift).toFixed(2)
+			);
+		}
+		return changed;
+	};
+	const boundedDriftGuard = directHotelRunnerEmailCommercialGuard({
+		...guardInput,
+		existing: withAdditionalGrossDrift(drifted, 0.49),
+	});
+	assert.equal(
+		boundedDriftGuard.ok,
+		true,
+		`the named 0.50 SAR daily-only drift bound remains eligible: ${JSON.stringify(
+			boundedDriftGuard
+		)}`
+	);
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...guardInput,
+			existing: withAdditionalGrossDrift(drifted, 0.5),
+		}).reason,
+		"protected_state",
+		"a 0.51 SAR drift remains fail-closed"
+	);
+	const nonDailyDrift = structuredClone(drifted);
+	nonDailyDrift.supplierData.otaCommercialEvidence = {
+		...nonDailyDrift.supplierData.otaCommercialEvidence,
+		manualNonDailyFact: "must-not-overwrite",
+	};
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...guardInput,
+			existing: nonDailyDrift,
+		}).reason,
+		"non_daily_commercial_drift"
+	);
+	const releasedAt = new Date("2026-08-10T17:30:00.000Z");
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...guardInput,
+			existing: {
+				...drifted,
+				state: "Pending Confirmation",
+				reservation_status: "Pending Confirmation",
+				otaPlatformReview: {
+					...drifted.otaPlatformReview,
+					status: "released",
+					releasedAt,
+					releasedBy: { role: "admin", name: "Admin" },
+				},
+				pendingConfirmation: {
+					status: "pending",
+					source: "ota_platform_release",
+					releasedToHotelAt: releasedAt,
+				},
+			},
+		}).reason,
+		"protected_state"
+	);
+	for (const protectedStatus of ["cancelled", "inhouse", "checked_out"]) {
+		assert.equal(
+			directHotelRunnerEmailCommercialGuard({
+				...guardInput,
+				existing: {
+					...drifted,
+					state: protectedStatus,
+					reservation_status: protectedStatus,
+				},
+			}).reason,
+			"protected_state",
+			protectedStatus
+		);
+	}
+
+	let writtenFilter = null;
+	let writtenUpdate = null;
+	Reservations.updateOne = async (filter, update) => {
+		writtenFilter = filter;
+		writtenUpdate = update;
+		return { matchedCount: 1 };
+	};
+	try {
+		const result = await reconcileDirectHotelRunnerOwnedEmail({
+			...guardInput,
+			warnings: [],
+			errors: [],
+		});
+		assert.equal(result.status, "updated", JSON.stringify(result));
+		assert.equal(result.actionTaken, "commercial_enrichment");
+		assert.equal(
+			writtenFilter[
+				"supplierData.hotelRunnerEmailCommercialEvidence.evidenceHash"
+			],
+			evidence.evidenceHash,
+			"same-evidence repair uses equality CAS instead of the new-evidence $ne CAS"
+		);
+		const dailyLeafPath =
+			/^pickedRooms(?:Type|Pricing)\.\d+\.(?:chosenPrice|totalPriceWithCommission|pricingByDay\.\d+\.(?:price|clientPrice|mainPrice|totalPriceWithCommission|netAfterExpenses|netAfterOtaExpenses|otaExpenseAmount|platformMargin|commercialVerification))$/;
+		const writtenPaths = Object.keys(writtenUpdate.$set);
+		assert.ok(
+			writtenPaths.length > 0 &&
+				writtenPaths.every((path) => dailyLeafPath.test(path)),
+			"same-evidence repair writes only allowlisted dotted daily/room commercial leaves"
+		);
+		assert.equal(writtenPaths.includes("pickedRoomsPricing"), false);
+		assert.equal(writtenPaths.includes("pickedRoomsType"), false);
+		const repaired = applyDottedCommercialSet(drifted, writtenUpdate.$set);
+		const repairedDays = repaired.pickedRoomsPricing[0].pricingByDay;
+		assert.equal(
+			repairedDays.reduce(
+				(sum, day) => sum + decimalMoneyCents(day.clientPrice),
+				0
+			),
+			42158
+		);
+		assert.equal(
+			repairedDays.reduce(
+				(sum, day) => sum + decimalMoneyCents(day.netAfterExpenses),
+				0
+			),
+			39821
+		);
+		assert.equal(
+			repairedDays.reduce(
+				(sum, day) => sum + decimalMoneyCents(day.otaExpenseAmount),
+				0
+			),
+			2337
+		);
+		assert.deepEqual(
+			repaired.pickedRoomsPricing[0].immutableRoomMetadata,
+			{ hotelRunnerRatePlan: "opaque-and-preserved" }
+		);
+		assert.ok(
+			repairedDays.every(
+				(day) =>
+					day.immutableHotelRunnerDayFact === "opaque-and-preserved"
+			)
+		);
+		assert.ok(
+			verifiedHotelRunnerEmailCommercialEvidence(repaired, {
+				provider: "booking",
+				grossTotalSar: 421.58,
+				currency: "SAR",
+			})
+		);
+
+		let loserFilter = null;
+		let loserUpdate = null;
+		Reservations.updateOne = async (filter, update) => {
+			loserFilter = filter;
+			loserUpdate = update;
+			return { matchedCount: 0 };
+		};
+		Reservations.findById = () => ({
+			lean() {
+				return this;
+			},
+			async exec() {
+				return repaired;
+			},
+		});
+		const casLoser = await reconcileDirectHotelRunnerOwnedEmail({
+			...guardInput,
+			warnings: [],
+			errors: [],
+		});
+		assert.equal(casLoser.status, "duplicate_reservation");
+		assert.equal(
+			casLoser.skipReason,
+			"hotelrunner_email_commercial_evidence_already_applied"
+		);
+		assert.equal(
+			loserFilter[
+				"supplierData.hotelRunnerEmailCommercialEvidence.evidenceHash"
+			],
+			evidence.evidenceHash
+		);
+		assert.ok(
+			Object.keys(loserUpdate.$set).every((path) => dailyLeafPath.test(path))
+		);
+	} finally {
+		Reservations.updateOne = originalReservationUpdateOne;
+		Reservations.findById = originalReservationFindById;
+	}
 });
 
 test("authenticated provider evidence reconciles an equal HotelRunner total without provider-specific semantics", async () => {
@@ -11457,7 +11882,7 @@ test("a mapped email-create E11000 race also reconciles the reloaded direct Hote
 	}
 });
 
-test("direct-owned commercial enrichment treats unmatched HotelRunner totals as unknown and still protects local state", () => {
+test("direct-owned commercial enrichment requires one unique HotelRunner amount role and protects local state", () => {
 	const normalized = makeVerifiedHotelRunnerCommercialEmail();
 	const existing = makeDirectHotelRunnerCommercialReservation();
 	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
@@ -11472,6 +11897,49 @@ test("direct-owned commercial enrichment treats unmatched HotelRunner totals as 
 		evidence,
 	};
 	assert.equal(directHotelRunnerEmailCommercialGuard(base).ok, true);
+	const roleToleranceExisting = makeDirectHotelRunnerCommercialReservation({
+		total_amount: 99.5,
+		adminPricing: { ...existing.adminPricing, clientTotal: 99.5 },
+		ota_financial_summary: {
+			...existing.ota_financial_summary,
+			clientTotal: 99.5,
+		},
+	});
+	const roleToleranceGuard = directHotelRunnerEmailCommercialGuard({
+		...base,
+		existing: roleToleranceExisting,
+	});
+	assert.equal(roleToleranceGuard.ok, true);
+	assert.equal(roleToleranceGuard.reportedTotalRole, "gross");
+	const ambiguousNormalized = makeVerifiedHotelRunnerCommercialEmail({
+		totalPayoutSar: 99.75,
+		netAfterExpensesTotal: 99.75,
+		paymentSummary: {
+			sourceTotalPayoutAmount: 99.75,
+			totalPayoutAmount: 99.75,
+		},
+	});
+	const ambiguousEvidence = buildHotelRunnerEmailCommercialEvidence(
+		ambiguousNormalized,
+		{ appliedAt: new Date("2026-08-06T15:00:01.000Z") }
+	);
+	const ambiguousExisting = makeDirectHotelRunnerCommercialReservation({
+		total_amount: 99.8,
+		adminPricing: { ...existing.adminPricing, clientTotal: 99.8 },
+		ota_financial_summary: {
+			...existing.ota_financial_summary,
+			clientTotal: 99.8,
+		},
+	});
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...base,
+			normalized: ambiguousNormalized,
+			evidence: ambiguousEvidence,
+			existing: ambiguousExisting,
+		}).reason,
+		"hotelrunner_amount_ambiguous"
+	);
 	const unmatchedHotelRunnerTotal = directHotelRunnerEmailCommercialGuard({
 			...base,
 			existing: makeDirectHotelRunnerCommercialReservation({
@@ -11486,8 +11954,7 @@ test("direct-owned commercial enrichment treats unmatched HotelRunner totals as 
 				},
 			}),
 		});
-	assert.equal(unmatchedHotelRunnerTotal.ok, true);
-	assert.equal(unmatchedHotelRunnerTotal.reportedTotalRole, "unknown");
+	assert.equal(unmatchedHotelRunnerTotal.reason, "hotelrunner_amount");
 	assert.equal(
 		directHotelRunnerEmailCommercialGuard({
 			...base,
@@ -11555,8 +12022,7 @@ test("direct-owned commercial enrichment treats unmatched HotelRunner totals as 
 				},
 			}),
 		});
-	assert.equal(missingHotelRunnerSummaryTotal.ok, true);
-	assert.equal(missingHotelRunnerSummaryTotal.reportedTotalRole, "unknown");
+	assert.equal(missingHotelRunnerSummaryTotal.reason, "hotelrunner_amount");
 	assert.equal(
 		directHotelRunnerEmailCommercialGuard({
 			...base,

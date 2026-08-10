@@ -10480,9 +10480,81 @@ function commercialEvidenceAmountMatches(actual, expected) {
 	return Number.isFinite(numeric) && Math.abs(round2(numeric) - expected) <= 0.02;
 }
 
-function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
+function decimalMoneyParts(value) {
+	const source = typeof value === "string" ? value.trim() : String(value);
+	const match = source.match(/^([+-]?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$/i);
+	if (!match) return null;
+	const exponent = Number(match[4] || 0);
+	if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100) return null;
+	const fraction = match[3] || "";
+	const digits = `${match[2]}${fraction}`.replace(/^0+(?=\d)/, "");
+	return {
+		coefficient: BigInt(`${match[1] === "-" ? "-" : ""}${digits || "0"}`),
+		scale: fraction.length - exponent,
+	};
+}
+
+function roundedDecimalInteger(parts, targetScale) {
+	if (!parts || !Number.isSafeInteger(targetScale)) return null;
+	const shift = targetScale - parts.scale;
+	let result;
+	if (shift >= 0) {
+		result = parts.coefficient * 10n ** BigInt(shift);
+	} else {
+		const divisor = 10n ** BigInt(-shift);
+		const negative = parts.coefficient < 0n;
+		const absolute = negative ? -parts.coefficient : parts.coefficient;
+		const quotient = absolute / divisor;
+		const remainder = absolute % divisor;
+		const rounded = remainder * 2n >= divisor ? quotient + 1n : quotient;
+		result = negative ? -rounded : rounded;
+	}
+	if (
+		result > BigInt(Number.MAX_SAFE_INTEGER) ||
+		result < BigInt(Number.MIN_SAFE_INTEGER)
+	) {
+		return null;
+	}
+	return Number(result);
+}
+
+function decimalMoneyCents(value) {
+	return roundedDecimalInteger(decimalMoneyParts(value), 2);
+}
+
+function multipliedMoneyCents(left, right) {
+	const leftParts = decimalMoneyParts(left);
+	const rightParts = decimalMoneyParts(right);
+	if (!leftParts || !rightParts) return null;
+	return roundedDecimalInteger(
+		{
+			coefficient: leftParts.coefficient * rightParts.coefficient,
+			scale: leftParts.scale + rightParts.scale,
+		},
+		2
+	);
+}
+
+function commercialEvidenceExactCentsMatch(actual, expected) {
+	const actualCents = decimalMoneyCents(actual);
+	const expectedCents = decimalMoneyCents(expected);
+	return (
+		actualCents !== null &&
+		expectedCents !== null &&
+		actualCents === expectedCents
+	);
+}
+
+function commercialEvidencePaymentSummaryMatches(
+	summary = {},
+	marker = {},
+	{ exactPropertyCents = false } = {}
+) {
 	if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
 	const safe = safeOtaPaymentSummary(summary);
+	const propertyAmountMatches = exactPropertyCents
+		? commercialEvidenceExactCentsMatch
+		: commercialEvidenceAmountMatches;
 	const sourceCurrency = String(safe.sourceCurrency || "").trim().toUpperCase();
 	const propertyCurrency = String(safe.currency || "").trim().toUpperCase();
 	const sourceGross = Number(safe.sourceTotalGuestPaymentAmount);
@@ -10508,12 +10580,32 @@ function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
 			: ["exchange_rate_api", "exchange_rate_api_cached"].includes(
 					rateSource
 			  ) || Boolean(storedConversionEvidence);
+	const convertedGrossCents = multipliedMoneyCents(sourceGross, rate);
+	const convertedPayoutCents = multipliedMoneyCents(sourcePayout, rate);
+	const markerGrossCents = decimalMoneyCents(marker.grossTotalSar);
+	const markerPayoutCents = decimalMoneyCents(marker.payoutTotalSar);
+	const convertedGrossMatches = exactPropertyCents
+		? convertedGrossCents !== null &&
+			markerGrossCents !== null &&
+			convertedGrossCents === markerGrossCents
+		: commercialEvidenceAmountMatches(
+				round2(sourceGross * rate),
+				marker.grossTotalSar
+		  );
+	const convertedPayoutMatches = exactPropertyCents
+		? convertedPayoutCents !== null &&
+			markerPayoutCents !== null &&
+			convertedPayoutCents === markerPayoutCents
+		: commercialEvidenceAmountMatches(
+				round2(sourcePayout * rate),
+				marker.payoutTotalSar
+		  );
 	return !!(
-		commercialEvidenceAmountMatches(
+		propertyAmountMatches(
 			safe.totalGuestPaymentAmount,
 			round2(marker.grossTotalSar)
 		) &&
-		commercialEvidenceAmountMatches(
+		propertyAmountMatches(
 			safe.totalPayoutAmount,
 			round2(marker.payoutTotalSar)
 		) &&
@@ -10525,14 +10617,8 @@ function commercialEvidencePaymentSummaryMatches(summary = {}, marker = {}) {
 		Number.isFinite(rate) &&
 		rate > 0 &&
 		legacyConversionTrusted &&
-		commercialEvidenceAmountMatches(
-			round2(sourceGross * rate),
-			marker.grossTotalSar
-		) &&
-		commercialEvidenceAmountMatches(
-			round2(sourcePayout * rate),
-			marker.payoutTotalSar
-		)
+		convertedGrossMatches &&
+		convertedPayoutMatches
 	);
 }
 
@@ -10548,16 +10634,15 @@ function commercialDailyPricingTotals(reservation = {}) {
 		? reservation.pickedRoomsPricing
 		: [];
 	if (!rooms.length) return null;
-	const totals = {
-		client: 0,
-		root: 0,
-		payout: 0,
-		expense: 0,
-		margin: 0,
-	};
+	const exactCents = { client: 0, root: 0, payout: 0, expense: 0, margin: 0 };
+	let commercialRowsExact = true;
 	for (const room of rooms) {
 		const count = Math.max(1, Number(room?.count || 1));
-		if (!Array.isArray(room?.pricingByDay) || !room.pricingByDay.length) {
+		if (
+			!Number.isSafeInteger(count) ||
+			!Array.isArray(room?.pricingByDay) ||
+			!room.pricingByDay.length
+		) {
 			return null;
 		}
 		for (const day of room.pricingByDay) {
@@ -10566,8 +10651,16 @@ function commercialDailyPricingTotals(reservation = {}) {
 			const payout = Number(day?.netAfterExpenses);
 			const expense = Number(day?.otaExpenseAmount);
 			const margin = Number(day?.platformMargin);
+			const clientCents = decimalMoneyCents(day?.clientPrice);
+			const rootCents = decimalMoneyCents(day?.rootPrice);
+			const payoutCents = decimalMoneyCents(day?.netAfterExpenses);
+			const expenseCents = decimalMoneyCents(day?.otaExpenseAmount);
+			const marginCents = decimalMoneyCents(day?.platformMargin);
 			if (
 				![client, root, payout, expense, margin].every(Number.isFinite) ||
+				![clientCents, rootCents, payoutCents, expenseCents, marginCents].every(
+					Number.isSafeInteger
+				) ||
 				client < 0 ||
 				root < 0 ||
 				payout < 0 ||
@@ -10576,19 +10669,45 @@ function commercialDailyPricingTotals(reservation = {}) {
 			) {
 				return null;
 			}
-			totals.client += client * count;
-			totals.root += root * count;
-			totals.payout += payout * count;
-			totals.expense += expense * count;
-			totals.margin += margin * count;
+			exactCents.client += clientCents * count;
+			exactCents.root += rootCents * count;
+			exactCents.payout += payoutCents * count;
+			exactCents.expense += expenseCents * count;
+			exactCents.margin += marginCents * count;
+			commercialRowsExact = Boolean(
+				commercialRowsExact &&
+					clientCents - payoutCents === expenseCents &&
+					payoutCents - rootCents === marginCents
+			);
+			if (!Object.values(exactCents).every(Number.isSafeInteger)) return null;
 		}
 	}
-	return Object.fromEntries(
-		Object.entries(totals).map(([key, value]) => [key, round2(value)])
+	return {
+		client: exactCents.client / 100,
+		root: exactCents.root / 100,
+		payout: exactCents.payout / 100,
+		expense: exactCents.expense / 100,
+		margin: exactCents.margin / 100,
+		commercialRowsExact,
+	};
+}
+
+const HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS = 50;
+const HOTELRUNNER_AMOUNT_ROLE_MATCH_MAX_DRIFT_CENTS = 50;
+
+function commercialEvidenceWithinCents(actual, expected, maxDriftCents) {
+	const actualCents = decimalMoneyCents(actual);
+	const expectedCents = decimalMoneyCents(expected);
+	return !!(
+		actualCents !== null &&
+		expectedCents !== null &&
+		Number.isSafeInteger(maxDriftCents) &&
+		maxDriftCents >= 0 &&
+		Math.abs(actualCents - expectedCents) <= maxDriftCents
 	);
 }
 
-function hotelRunnerEmailCommercialEvidenceIsMaterialized(
+function hotelRunnerEmailCommercialMaterializationState(
 	reservation = {},
 	marker = {}
 ) {
@@ -10599,25 +10718,50 @@ function hotelRunnerEmailCommercialEvidenceIsMaterialized(
 	const payout = round2(marker.payoutTotalSar);
 	const expense = round2(marker.otaExpenseTotalSar);
 	const version = Number(marker.version || 1);
+	const markerAmountMatches =
+		version >= 2
+			? commercialEvidenceExactCentsMatch
+			: commercialEvidenceAmountMatches;
 	const explicitCommission =
 		marker.otaCommissionSar === null || marker.otaCommissionSar === undefined
 			? null
 			: round2(marker.otaCommissionSar);
 	const daily = version >= 2 ? commercialDailyPricingTotals(reservation) : null;
-	const versionTwoMaterialized =
+	const dailyCommercialMaterialized =
 		version < 2 ||
 		Boolean(
 			daily &&
-				commercialEvidenceAmountMatches(reservation.total_amount, gross) &&
-				commercialEvidenceAmountMatches(daily.client, gross) &&
-				commercialEvidenceAmountMatches(daily.root, pricing.rootTotal) &&
-				commercialEvidenceAmountMatches(daily.payout, payout) &&
-				commercialEvidenceAmountMatches(daily.expense, expense) &&
-				commercialEvidenceAmountMatches(daily.margin, pricing.platformMarginTotal) &&
-				nullableCommercialAmountMatches(
-					reservation.commission_ota,
-					explicitCommission
-				) &&
+				daily.commercialRowsExact === true &&
+				commercialEvidenceExactCentsMatch(daily.client, gross) &&
+				commercialEvidenceExactCentsMatch(daily.payout, payout) &&
+				commercialEvidenceExactCentsMatch(daily.expense, expense)
+		);
+	const dailyCommercialWithinRematerializationBound = Boolean(
+		daily &&
+			daily.commercialRowsExact === true &&
+			commercialEvidenceWithinCents(
+				daily.client,
+				gross,
+				HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS
+			) &&
+			commercialEvidenceWithinCents(
+				daily.payout,
+				payout,
+				HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS
+			) &&
+			commercialEvidenceWithinCents(
+				daily.expense,
+				expense,
+				HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS
+			)
+	);
+	const commissionMaterialized =
+		version < 2 ||
+		Boolean(
+			nullableCommercialAmountMatches(
+				reservation.commission_ota,
+				explicitCommission
+			) &&
 				nullableCommercialAmountMatches(
 					supplier.otaCommissionSar,
 					explicitCommission
@@ -10632,30 +10776,79 @@ function hotelRunnerEmailCommercialEvidenceIsMaterialized(
 						  )) &&
 				supplier.otaCommissionSourceBacked === (explicitCommission !== null)
 		);
-	return !!(
-		versionTwoMaterialized &&
-		commercialEvidenceAmountMatches(pricing.clientTotal, gross) &&
-		commercialEvidenceAmountMatches(summary.clientTotal, gross) &&
-		commercialEvidenceAmountMatches(pricing.netAfterExpensesTotal, payout) &&
-		commercialEvidenceAmountMatches(pricing.otaExpenseTotal, expense) &&
+	const dailyAuxiliaryMaterialized =
+		version < 2 ||
+		Boolean(
+			daily &&
+				daily.commercialRowsExact === true &&
+				commercialEvidenceExactCentsMatch(daily.root, pricing.rootTotal) &&
+				commercialEvidenceExactCentsMatch(
+					daily.margin,
+					pricing.platformMarginTotal
+				) &&
+				commissionMaterialized
+		);
+	const dailyAuxiliaryWithinRematerializationBound = Boolean(
+		daily &&
+			daily.commercialRowsExact === true &&
+			commercialEvidenceExactCentsMatch(daily.root, pricing.rootTotal) &&
+			commercialEvidenceWithinCents(
+				daily.margin,
+				pricing.platformMarginTotal,
+				HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS
+			) &&
+			commissionMaterialized
+	);
+	const commonMaterialized = !!(
+		(version < 2 || markerAmountMatches(reservation.total_amount, gross)) &&
+		markerAmountMatches(pricing.clientTotal, gross) &&
+		markerAmountMatches(summary.clientTotal, gross) &&
+		markerAmountMatches(pricing.netAfterExpensesTotal, payout) &&
+		markerAmountMatches(pricing.otaExpenseTotal, expense) &&
 		pricing.defaultDeductionApplied === false &&
 		pricing.commercialVerified === true &&
 		!normalizeWhitespace(pricing.payoutFallbackReason || "") &&
 		summary.show === true &&
-		commercialEvidenceAmountMatches(summary.netAfterExpenses, payout) &&
-		commercialEvidenceAmountMatches(summary.netAfterOtaExpenses, payout) &&
-		commercialEvidenceAmountMatches(summary.otaExpenseTotal, expense) &&
+		markerAmountMatches(summary.netAfterExpenses, payout) &&
+		markerAmountMatches(summary.netAfterOtaExpenses, payout) &&
+		markerAmountMatches(summary.otaExpenseTotal, expense) &&
 		summary.commercialVerified === true &&
 		!normalizeWhitespace(summary.payoutFallbackReason || "") &&
-		commercialEvidenceAmountMatches(supplier.otaTotalPayoutSar, payout) &&
-		commercialEvidenceAmountMatches(supplier.otaExpenseTotalSar, expense) &&
+		markerAmountMatches(supplier.otaTotalPayoutSar, payout) &&
+		markerAmountMatches(supplier.otaExpenseTotalSar, expense) &&
 		!normalizeWhitespace(supplier.otaPayoutFallbackReason || "") &&
-		commercialEvidencePaymentSummaryMatches(summary.paymentSummary, marker) &&
-		commercialEvidencePaymentSummaryMatches(supplier.otaPaymentSummary, marker)
+		commercialEvidencePaymentSummaryMatches(summary.paymentSummary, marker, {
+			exactPropertyCents: version >= 2,
+		}) &&
+		commercialEvidencePaymentSummaryMatches(supplier.otaPaymentSummary, marker, {
+			exactPropertyCents: version >= 2,
+		})
 	);
+	return {
+		fullyMaterialized:
+			commonMaterialized &&
+			dailyCommercialMaterialized &&
+			dailyAuxiliaryMaterialized,
+		onlyDailyCommercialDrift: Boolean(
+			version === 2 &&
+				commonMaterialized &&
+				daily &&
+				dailyCommercialWithinRematerializationBound &&
+				dailyAuxiliaryWithinRematerializationBound &&
+				!(dailyCommercialMaterialized && dailyAuxiliaryMaterialized)
+		),
+	};
 }
 
-function verifiedHotelRunnerEmailCommercialEvidence(
+function hotelRunnerEmailCommercialEvidenceIsMaterialized(
+	reservation = {},
+	marker = {}
+) {
+	return hotelRunnerEmailCommercialMaterializationState(reservation, marker)
+		.fullyMaterialized;
+}
+
+function validatedHotelRunnerEmailCommercialEvidenceMarker(
 	reservation = {},
 	{ provider = "", grossTotalSar, currency = "" } = {}
 ) {
@@ -10757,12 +10950,25 @@ function verifiedHotelRunnerEmailCommercialEvidence(
 		!constantTimeEvidenceHashMatches(
 			marker.evidenceHash,
 			hotelRunnerEmailCommercialEvidenceHash(marker)
-		) ||
-		!hotelRunnerEmailCommercialEvidenceIsMaterialized(reservation, marker)
+		)
 	) {
 		return null;
 	}
 	return { ...marker };
+}
+
+function verifiedHotelRunnerEmailCommercialEvidence(
+	reservation = {},
+	options = {}
+) {
+	const marker = validatedHotelRunnerEmailCommercialEvidenceMarker(
+		reservation,
+		options
+	);
+	return marker &&
+		hotelRunnerEmailCommercialEvidenceIsMaterialized(reservation, marker)
+		? marker
+		: null;
 }
 
 function directHotelRunnerAuthoritativeGrossTotal(existing = {}) {
@@ -11124,7 +11330,50 @@ function directHotelRunnerCommercialOperationalStateProtected(existing = {}) {
 	);
 }
 
-function directHotelRunnerCommercialEnrichmentProtectedState(existing = {}) {
+function sameEvidenceHotelRunnerDailyCommercialRematerialization(
+	existing = {},
+	evidence = {}
+) {
+	const pending = existing.pendingConfirmation;
+	if (
+		Number(evidence.version) !== 2 ||
+		evidence.verified !== true ||
+		evidence.source !== "authenticated_ota_email" ||
+		!constantTimeEvidenceHashMatches(
+			evidence.evidenceHash,
+			hotelRunnerEmailCommercialEvidenceHash(evidence)
+		) ||
+		!isPristineHotelRunnerOtaReview(existing) ||
+		hasTerminalOtaReservationStatus(existing) ||
+		hasInhouseOtaReservationStatus(existing) ||
+		(normalizeMarker(pending?.source || "") === "ota_platform_release") ||
+		hasMeaningfulProtectedValue(pending?.releasedToHotelAt)
+	) {
+		return null;
+	}
+	const marker = validatedHotelRunnerEmailCommercialEvidenceMarker(existing, {
+		provider: evidence.provider,
+		grossTotalSar: evidence.grossTotalSar,
+		currency: evidence.currency,
+	});
+	if (
+		Number(marker?.version) !== 2 ||
+		!constantTimeEvidenceHashMatches(
+			marker?.evidenceHash,
+			evidence.evidenceHash
+		) ||
+		!hotelRunnerEmailCommercialMaterializationState(existing, marker)
+			.onlyDailyCommercialDrift
+	) {
+		return null;
+	}
+	return marker;
+}
+
+function directHotelRunnerCommercialEnrichmentProtectedState(
+	existing = {},
+	{ trustedExistingEvidence = null } = {}
+) {
 	const pricing = existing.adminPricing || {};
 	const summary = existing.ota_financial_summary || {};
 	const visibility = existing.adminPricingVisibility || {};
@@ -11148,7 +11397,7 @@ function directHotelRunnerCommercialEnrichmentProtectedState(existing = {}) {
 			(value) => Math.abs(value - rootCandidates[0]) > 0.02
 		);
 	const unverifiedCommercialFields = Boolean(
-		!verifiedExistingEvidence &&
+		!(verifiedExistingEvidence || trustedExistingEvidence) &&
 			(pricing.commercialVerified === true ||
 				summary.commercialVerified === true ||
 				hasMeaningfulProtectedValue(pricing.netAfterExpensesTotal) ||
@@ -11245,21 +11494,36 @@ function directHotelRunnerEmailCommercialGuard({
 	const hotelRunnerReportedTotal = directHotelRunnerAuthoritativeGrossTotal(existing);
 	const evidenceGross = Number(evidence.grossTotalSar || 0);
 	const evidencePayout = Number(evidence.payoutTotalSar || 0);
-	const reportedTotalRole =
+	const reportedTotalMatchesGross = Boolean(
 		hotelRunnerReportedTotal > 0 &&
-		Math.abs(hotelRunnerReportedTotal - evidenceGross) <= 0.02
-			? "gross"
-			: hotelRunnerReportedTotal > 0 &&
-			  Math.abs(hotelRunnerReportedTotal - evidencePayout) <= 0.02
-				? "payout"
-				: "unknown";
-	if (
-		agodaMultiRoomAllocationReviewAllowsCommercialOnly(normalized) &&
-		reportedTotalRole === "unknown"
-	) {
+			commercialEvidenceWithinCents(
+				hotelRunnerReportedTotal,
+				evidenceGross,
+				HOTELRUNNER_AMOUNT_ROLE_MATCH_MAX_DRIFT_CENTS
+			)
+	);
+	const reportedTotalMatchesPayout = Boolean(
+		hotelRunnerReportedTotal > 0 &&
+			commercialEvidenceWithinCents(
+				hotelRunnerReportedTotal,
+				evidencePayout,
+				HOTELRUNNER_AMOUNT_ROLE_MATCH_MAX_DRIFT_CENTS
+			)
+	);
+	if (reportedTotalMatchesGross && reportedTotalMatchesPayout) {
+		return reject("hotelrunner_amount_ambiguous");
+	}
+	if (!reportedTotalMatchesGross && !reportedTotalMatchesPayout) {
 		return reject("hotelrunner_amount");
 	}
-	if (directHotelRunnerCommercialEnrichmentProtectedState(existing)) {
+	const reportedTotalRole = reportedTotalMatchesGross ? "gross" : "payout";
+	const sameEvidenceRematerialization =
+		sameEvidenceHotelRunnerDailyCommercialRematerialization(existing, evidence);
+	if (
+		directHotelRunnerCommercialEnrichmentProtectedState(existing, {
+			trustedExistingEvidence: sameEvidenceRematerialization,
+		})
+	) {
 		return reject("protected_state");
 	}
 	const commercialPricing = buildDirectHotelRunnerCommercialPricing(
@@ -11282,9 +11546,28 @@ function directHotelRunnerEmailCommercialGuard({
 	) {
 		return reject("daily_pricing");
 	}
+	let sameEvidenceRematerializationSet = null;
+	if (sameEvidenceRematerialization) {
+		const generatedSet = directHotelRunnerCommercialEnrichmentSet(
+			normalized,
+			sameEvidenceRematerialization,
+			{
+				reportedTotalRole,
+				existing,
+				commercialPricing,
+			}
+		);
+		sameEvidenceRematerializationSet =
+			directHotelRunnerSameEvidenceDailyCommercialSet(existing, generatedSet);
+		if (!sameEvidenceRematerializationSet) {
+			return reject("non_daily_commercial_drift");
+		}
+	}
 	return {
 		ok: true,
 		evidence,
+		sameEvidenceRematerialization,
+		sameEvidenceRematerializationSet,
 		hotelRunnerReportedTotal,
 		reportedTotalRole,
 		commercialPricing,
@@ -11359,13 +11642,24 @@ function buildDirectHotelRunnerCommercialPricing(
 		? slots.map((slot) => Number(nightlyByDate.get(slot.date)?.clientAmountSar))
 		: [];
 	const currentSlots = slots.map((slot) => slot.currentSource);
-	const moneyCents = (value) =>
-		Math.round((Number(value) + Number.EPSILON) * 100);
-	const sumsTo = (values, target) =>
-		values.length === slots.length &&
-		values.every((value) => Number.isFinite(value) && value > 0) &&
-		moneyCents(values.reduce((sum, value) => sum + value, 0)) ===
-			moneyCents(target);
+	const sumsTo = (values, target) => {
+		if (
+			values.length !== slots.length ||
+			!values.every((value) => Number.isFinite(value) && value > 0)
+		) {
+			return false;
+		}
+		const cents = values.map(decimalMoneyCents);
+		const targetCents = decimalMoneyCents(target);
+		if (
+			!cents.every(Number.isSafeInteger) ||
+			!Number.isSafeInteger(targetCents)
+		) {
+			return false;
+		}
+		const totalCents = cents.reduce((sum, value) => sum + value, 0);
+		return Number.isSafeInteger(totalCents) && totalCents === targetCents;
+	};
 	let payoutSlots = sumsTo(sourcePayoutSlots, payout)
 		? sourcePayoutSlots.map(round2)
 		: reportedTotalRole === "payout" && sumsTo(currentSlots, payout)
@@ -11514,6 +11808,155 @@ function directHotelRunnerCommercialEnrichmentSet(
 			: {}),
 	};
 	return set;
+}
+
+const HOTELRUNNER_DAILY_COMMERCIAL_LEAF_KEYS = Object.freeze([
+	"price",
+	"clientPrice",
+	"mainPrice",
+	"totalPriceWithCommission",
+	"netAfterExpenses",
+	"netAfterOtaExpenses",
+	"otaExpenseAmount",
+	"platformMargin",
+	"commercialVerification",
+]);
+const HOTELRUNNER_ROOM_COMMERCIAL_LEAF_KEYS = Object.freeze([
+	"chosenPrice",
+	"totalPriceWithCommission",
+]);
+
+function dottedDocumentValue(document = {}, path = "") {
+	return String(path)
+		.split(".")
+		.reduce((value, segment) => value?.[segment], document);
+}
+
+function withoutObjectKeys(value = {}, excludedKeys = []) {
+	const excluded = new Set(excludedKeys);
+	return Object.fromEntries(
+		Object.entries(value).filter(([key]) => !excluded.has(key))
+	);
+}
+
+function exactHotelRunnerCommercialRoomLeafSet(
+	existingRooms = [],
+	generatedRooms = [],
+	pathPrefix = ""
+) {
+	if (
+		!Array.isArray(existingRooms) ||
+		!Array.isArray(generatedRooms) ||
+		existingRooms.length !== generatedRooms.length
+	) {
+		return null;
+	}
+	const set = {};
+	for (let roomIndex = 0; roomIndex < existingRooms.length; roomIndex += 1) {
+		const existingRoom = existingRooms[roomIndex];
+		const generatedRoom = generatedRooms[roomIndex];
+		if (
+			!existingRoom ||
+			typeof existingRoom !== "object" ||
+			Array.isArray(existingRoom) ||
+			!generatedRoom ||
+			typeof generatedRoom !== "object" ||
+			Array.isArray(generatedRoom) ||
+			!protectedValuesEqual(
+				withoutObjectKeys(existingRoom, [
+					"pricingByDay",
+					...HOTELRUNNER_ROOM_COMMERCIAL_LEAF_KEYS,
+				]),
+				withoutObjectKeys(generatedRoom, [
+					"pricingByDay",
+					...HOTELRUNNER_ROOM_COMMERCIAL_LEAF_KEYS,
+				])
+			) ||
+			!Array.isArray(existingRoom.pricingByDay) ||
+			!Array.isArray(generatedRoom.pricingByDay) ||
+			existingRoom.pricingByDay.length !== generatedRoom.pricingByDay.length
+		) {
+			return null;
+		}
+		for (const key of HOTELRUNNER_ROOM_COMMERCIAL_LEAF_KEYS) {
+			if (!Object.prototype.hasOwnProperty.call(generatedRoom, key)) {
+				return null;
+			}
+			if (!protectedValuesEqual(existingRoom[key], generatedRoom[key])) {
+				set[`${pathPrefix}.${roomIndex}.${key}`] = generatedRoom[key];
+			}
+		}
+		for (
+			let dayIndex = 0;
+			dayIndex < existingRoom.pricingByDay.length;
+			dayIndex += 1
+		) {
+			const existingDay = existingRoom.pricingByDay[dayIndex];
+			const generatedDay = generatedRoom.pricingByDay[dayIndex];
+			if (
+				!existingDay ||
+				typeof existingDay !== "object" ||
+				Array.isArray(existingDay) ||
+				!generatedDay ||
+				typeof generatedDay !== "object" ||
+				Array.isArray(generatedDay) ||
+				!protectedValuesEqual(
+					withoutObjectKeys(
+						existingDay,
+						HOTELRUNNER_DAILY_COMMERCIAL_LEAF_KEYS
+					),
+					withoutObjectKeys(
+						generatedDay,
+						HOTELRUNNER_DAILY_COMMERCIAL_LEAF_KEYS
+					)
+				)
+			) {
+				return null;
+			}
+			for (const key of HOTELRUNNER_DAILY_COMMERCIAL_LEAF_KEYS) {
+				if (!Object.prototype.hasOwnProperty.call(generatedDay, key)) {
+					return null;
+				}
+				if (!protectedValuesEqual(existingDay[key], generatedDay[key])) {
+					set[
+						`${pathPrefix}.${roomIndex}.pricingByDay.${dayIndex}.${key}`
+					] = generatedDay[key];
+				}
+			}
+		}
+	}
+	return set;
+}
+
+function directHotelRunnerSameEvidenceDailyCommercialSet(
+	existing = {},
+	generatedSet = {}
+) {
+	if (!generatedSet || typeof generatedSet !== "object") return null;
+	for (const [path, generatedValue] of Object.entries(generatedSet)) {
+		if (["pickedRoomsType", "pickedRoomsPricing"].includes(path)) continue;
+		if (
+			!protectedValuesEqual(
+				dottedDocumentValue(existing, path),
+				generatedValue
+			)
+		) {
+			return null;
+		}
+	}
+	const pickedRoomsTypeSet = exactHotelRunnerCommercialRoomLeafSet(
+		existing.pickedRoomsType,
+		generatedSet.pickedRoomsType,
+		"pickedRoomsType"
+	);
+	const pickedRoomsPricingSet = exactHotelRunnerCommercialRoomLeafSet(
+		existing.pickedRoomsPricing,
+		generatedSet.pickedRoomsPricing,
+		"pickedRoomsPricing"
+	);
+	if (!pickedRoomsTypeSet || !pickedRoomsPricingSet) return null;
+	const set = { ...pickedRoomsTypeSet, ...pickedRoomsPricingSet };
+	return Object.keys(set).length ? set : null;
 }
 
 function applyHotelRunnerEmailCommercialEvidenceToDocument(
@@ -11806,11 +12249,17 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 			matchedReservationBy,
 		};
 	}
-	const set = directHotelRunnerCommercialEnrichmentSet(normalized, evidence, {
-		reportedTotalRole: guard.reportedTotalRole,
-		existing,
-		commercialPricing: guard.commercialPricing,
-	});
+	const set = guard.sameEvidenceRematerialization
+		? guard.sameEvidenceRematerializationSet
+		: directHotelRunnerCommercialEnrichmentSet(
+				normalized,
+				evidence,
+				{
+					reportedTotalRole: guard.reportedTotalRole,
+					existing,
+					commercialPricing: guard.commercialPricing,
+				}
+		  );
 	if (!set) {
 		return {
 			status: "needs_review",
@@ -11829,9 +12278,10 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 	const updateResult = await Reservations.updateOne(
 		{
 			...directHotelRunnerCommercialSnapshotFilter(existing),
-			"supplierData.hotelRunnerEmailCommercialEvidence.evidenceHash": {
-				$ne: evidence.evidenceHash,
-			},
+			"supplierData.hotelRunnerEmailCommercialEvidence.evidenceHash":
+				guard.sameEvidenceRematerialization
+					? evidence.evidenceHash
+					: { $ne: evidence.evidenceHash },
 		},
 		addReservationVersionBump({
 			$set: set,
@@ -18015,6 +18465,8 @@ module.exports = {
 	isAuthoritativeSourceUpgrade,
 	buildHotelRunnerEmailCommercialEvidence,
 	hotelRunnerEmailCommercialEvidenceHash,
+	decimalMoneyCents,
+	multipliedMoneyCents,
 	verifiedHotelRunnerEmailCommercialEvidence,
 	directHotelRunnerEmailCommercialGuard,
 	buildDirectHotelRunnerCommercialPricing,
