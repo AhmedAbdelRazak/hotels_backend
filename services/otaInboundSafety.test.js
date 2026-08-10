@@ -8341,6 +8341,7 @@ const makeVerifiedHotelRunnerCommercialEmail = (overrides = {}) => {
 		currency: "SAR",
 		exchangeRateToSar: 1,
 		sourceExchangeRateToSar: 1,
+		paidOnline: true,
 		paymentCollectionModel: "ota_collect",
 		paymentInstructions: isAgoda
 			? "Agoda collected by platform"
@@ -10078,7 +10079,130 @@ test("dormant BofA Secure Acceptance defaults are not payment activity", () => {
 	}
 });
 
-test("a direct-owned reservation accepts verified gross, net, and daily commercial enrichment", async () => {
+test("HotelRunner commercial enrichment promotes only exact verified OTA-collect payment evidence", () => {
+	const normalized = makeVerifiedHotelRunnerCommercialEmail();
+	const existing = makeDirectHotelRunnerCommercialReservation();
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-06T15:01:00.000Z"),
+	});
+	assert.ok(evidence);
+	const commercialPricing = buildDirectHotelRunnerCommercialPricing(
+		existing,
+		normalized,
+		evidence
+	);
+	assert.ok(commercialPricing);
+	const paymentPaths = [
+		"payment",
+		"financeStatus",
+		"paid_amount",
+		"paid_amount_breakdown",
+		"financial_cycle",
+		"supplierData.otaPaymentCollectionModel",
+	];
+	const collectSet = directHotelRunnerCommercialEnrichmentSet(
+		normalized,
+		evidence,
+		{
+			existing,
+			commercialPricing,
+			materializeVerifiedOtaCollectPayment: true,
+		}
+	);
+	assert.equal(collectSet.payment, "paid online");
+	assert.equal(collectSet.financeStatus, "paid online");
+	assert.equal(collectSet.paid_amount, 100);
+	assert.equal(
+		collectSet.paid_amount_breakdown.paid_online_other_platforms,
+		100
+	);
+	assert.equal(collectSet.financial_cycle.pmsCollectedAmount, 100);
+	assert.equal(collectSet.financial_cycle.hotelPayoutDue, 70);
+	assert.equal(
+		collectSet["supplierData.otaPaymentCollectionModel"],
+		"ota_collect"
+	);
+
+	const unchangedCases = [
+		{
+			label: "unknown collection model",
+			normalized: { ...normalized, paymentCollectionModel: "unknown" },
+		},
+		{
+			label: "hotel collect",
+			normalized: { ...normalized, paymentCollectionModel: "hotel_collect" },
+		},
+		{
+			label: "virtual card",
+			normalized: { ...normalized, paymentCollectionModel: "virtual_card" },
+		},
+		{
+			label: "collection model absent from source",
+			normalized: {
+				...normalized,
+				sourcePresence: {
+					...normalized.sourcePresence,
+					paymentCollectionModel: false,
+				},
+			},
+		},
+		{
+			label: "paid-online fact absent",
+			normalized: { ...normalized, paidOnline: false },
+		},
+		{
+			label: "source not authenticated",
+			normalized: { ...normalized, sourceSenderAuthenticated: false },
+		},
+		{
+			label: "commercial total mismatch",
+			normalized,
+			commercialPricing: { ...commercialPricing, clientTotal: 99.99 },
+		},
+		{
+			label: "commercial evidence hash mismatch",
+			normalized,
+			evidence: { ...evidence, evidenceHash: "f".repeat(64) },
+		},
+		{
+			label: "commercial evidence not verified",
+			normalized,
+			evidence: { ...evidence, verified: false },
+		},
+		{
+			label: "terminal reservation",
+			normalized,
+			existing: {
+				...existing,
+				state: "cancelled",
+				reservation_status: "cancelled",
+			},
+		},
+	];
+	for (const candidate of unchangedCases) {
+		const set = directHotelRunnerCommercialEnrichmentSet(
+			candidate.normalized,
+			candidate.evidence || evidence,
+			{
+				existing: candidate.existing || existing,
+				commercialPricing:
+					candidate.commercialPricing || commercialPricing,
+				materializeVerifiedOtaCollectPayment: true,
+			}
+		);
+		assert.ok(set, candidate.label);
+		assert.equal(set["adminPricing.clientTotal"], 100, candidate.label);
+		for (const path of paymentPaths) {
+			assert.equal(
+				Object.prototype.hasOwnProperty.call(set, path),
+				false,
+				`${candidate.label}: ${path}`
+			);
+		}
+	}
+});
+
+test("a direct-owned reservation accepts verified gross, net, daily, and OTA-collect payment enrichment", async () => {
 	const originalReservationFind = Reservations.find;
 	const originalReservationUpdateOne = Reservations.updateOne;
 	const originalHotelFind = HotelDetails.find;
@@ -10118,6 +10242,19 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 		assert.equal(writtenFilter.belongsTo, existing.belongsTo);
 		assert.equal(writtenFilter.state, "confirmed");
 		assert.equal(writtenFilter.total_amount, 100);
+		assert.equal(writtenFilter.payment, "");
+		assert.equal(writtenFilter.financeStatus, "not paid");
+		assert.equal(writtenFilter.paid_amount, 0);
+		assert.deepEqual(writtenFilter.payment_details, {
+			captured: false,
+			onsite_paid_amount: 0,
+		});
+		assert.equal(writtenFilter.paid_amount_breakdown, null);
+		assert.equal(writtenFilter.financial_cycle, null);
+		assert.equal(
+			writtenFilter["supplierData.otaPaymentCollectionModel"],
+			null
+		);
 		assert.equal(
 			writtenFilter["supplierData.hotelRunner.transport"],
 			"hotelrunner_api"
@@ -10134,6 +10271,24 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 		);
 		assert.equal(writtenUpdate.$inc.__v, 1);
 		assert.equal(writtenUpdate.$set.commission, 0);
+		assert.equal(writtenUpdate.$set.payment, "paid online");
+		assert.equal(writtenUpdate.$set.financeStatus, "paid online");
+		assert.equal(writtenUpdate.$set.paid_amount, 100);
+		assert.equal(
+			writtenUpdate.$set.paid_amount_breakdown
+				.paid_online_other_platforms,
+			100
+		);
+		assert.equal(
+			writtenUpdate.$set.financial_cycle.collectionModel,
+			"pms_collected"
+		);
+		assert.equal(writtenUpdate.$set.financial_cycle.pmsCollectedAmount, 100);
+		assert.equal(writtenUpdate.$set.financial_cycle.hotelPayoutDue, 70);
+		assert.equal(
+			writtenUpdate.$set["supplierData.otaPaymentCollectionModel"],
+			"ota_collect"
+		);
 		assert.equal(
 			writtenUpdate.$set.commission_ota,
 			null,
@@ -10178,9 +10333,7 @@ test("a direct-owned reservation accepts verified gross, net, and daily commerci
 			"checkout_date",
 			"total_rooms",
 			"sub_total",
-			"payment",
-			"financeStatus",
-			"paid_amount",
+			"payment_details",
 			"supplierData.hotelRunner",
 			"supplierData.otaSourceAuthority",
 		]) {
@@ -10496,10 +10649,12 @@ test("same v2 evidence exactly rematerializes a one-cent nightly drift only whil
 	const exactSet = directHotelRunnerCommercialEnrichmentSet(
 		normalized,
 		evidence,
-		{ existing }
+		{ existing, materializeVerifiedOtaCollectPayment: true }
 	);
 	assert.ok(exactSet);
 	const exactMaterialized = applyDottedCommercialSet(existing, exactSet);
+	assert.equal(exactMaterialized.payment, "paid online");
+	assert.equal(exactMaterialized.paid_amount, 421.58);
 	assert.ok(
 		verifiedHotelRunnerEmailCommercialEvidence(exactMaterialized, {
 			provider: "booking",
@@ -10545,6 +10700,15 @@ test("same v2 evidence exactly rematerializes a one-cent nightly drift only whil
 		evidence,
 	};
 	assert.equal(directHotelRunnerEmailCommercialGuard(guardInput).ok, true);
+	const paymentStateDrift = structuredClone(drifted);
+	paymentStateDrift.payment = "finance hold";
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			...guardInput,
+			existing: paymentStateDrift,
+		}).reason,
+		"protected_state"
+	);
 	const withAdditionalGrossDrift = (reservation, additionalDrift) => {
 		const changed = structuredClone(reservation);
 		changed.pickedRoomsType = structuredClone(reservation.pickedRoomsType);
@@ -10918,6 +11082,31 @@ test("production-shaped Agoda 687715051 enriches the same HotelRunner reservatio
 		checkout_date: "2026-08-11",
 		total_amount: 106.74,
 		sub_total: 150,
+		payment: "not provided",
+		paid_amount_breakdown: {
+			paid_online_via_link: 0,
+			paid_at_hotel_cash: 0,
+			paid_at_hotel_card: 0,
+			paid_to_hotel: 0,
+			paid_online_jannatbooking: 0,
+			paid_online_other_platforms: 0,
+			paid_online_via_instapay: 0,
+			paid_no_show: 0,
+			payment_comments: "",
+		},
+		financial_cycle: {
+			collectionModel: "pending",
+			status: "open",
+			commissionType: "amount",
+			commissionValue: 0,
+			commissionAmount: 0,
+			commissionAssigned: false,
+			pmsCollectedAmount: 0,
+			hotelCollectedAmount: 0,
+			hotelPayoutDue: 0,
+			commissionDueToPms: 0,
+			lastUpdatedAt: null,
+		},
 		pickedRoomsType: structuredClone(sourceRooms),
 		pickedRoomsPricing: structuredClone(sourceRooms),
 		adminPricing: {
@@ -10941,6 +11130,7 @@ test("production-shaped Agoda 687715051 enriches the same HotelRunner reservatio
 			hotelRunner: {
 				...base.supplierData.hotelRunner,
 				reservationId: "40369350",
+				reportedPaymentMethod: "not provided",
 				pricing: { total: 106.74, currency: "SAR" },
 			},
 		},
@@ -11004,8 +11194,30 @@ test("production-shaped Agoda 687715051 enriches the same HotelRunner reservatio
 		assert.equal(writtenFilter._id, existing._id);
 		assert.equal(writtenFilter.__v, 0);
 		assert.equal(writtenFilter.total_amount, 106.74);
+		assert.equal(writtenFilter.payment, "not provided");
+		assert.equal(writtenFilter.financeStatus, "not paid");
+		assert.equal(writtenFilter.paid_amount, 0);
+		assert.deepEqual(
+			writtenFilter.paid_amount_breakdown,
+			existing.paid_amount_breakdown
+		);
+		assert.deepEqual(writtenFilter.financial_cycle, existing.financial_cycle);
 		assert.deepEqual(writtenFilter.pickedRoomsPricing, sourceRooms);
 		assert.equal(writtenUpdate.$set.total_amount, 172.48);
+		assert.equal(writtenUpdate.$set.payment, "paid online");
+		assert.equal(writtenUpdate.$set.financeStatus, "paid online");
+		assert.equal(writtenUpdate.$set.paid_amount, 172.48);
+		assert.equal(
+			writtenUpdate.$set.paid_amount_breakdown
+				.paid_online_other_platforms,
+			172.48
+		);
+		assert.equal(writtenUpdate.$set.financial_cycle.pmsCollectedAmount, 172.48);
+		assert.equal(writtenUpdate.$set.financial_cycle.hotelPayoutDue, 150);
+		assert.equal(
+			writtenUpdate.$set["supplierData.otaPaymentCollectionModel"],
+			"ota_collect"
+		);
 		assert.equal(writtenUpdate.$set.commission, 0);
 		assert.equal(writtenUpdate.$set.commission_ota, 25.88);
 		assert.equal(writtenUpdate.$set["adminPricing.clientTotal"], 172.48);
@@ -11067,9 +11279,7 @@ test("production-shaped Agoda 687715051 enriches the same HotelRunner reservatio
 			"checkout_date",
 			"customer_details",
 			"roomId",
-			"payment",
 			"payment_details",
-			"financeStatus",
 			"supplierData.hotelRunner",
 		]) {
 			assert.equal(
@@ -11328,6 +11538,20 @@ test("an Agoda two-room allocation review enriches only the already direct-owned
 		assert.equal(writtenFilter._id, existing._id);
 		assert.equal(writtenFilter.__v, 0);
 		assert.equal(writtenUpdate.$set.total_amount, 588);
+		assert.equal(writtenUpdate.$set.payment, "paid online");
+		assert.equal(writtenUpdate.$set.financeStatus, "paid online");
+		assert.equal(writtenUpdate.$set.paid_amount, 588);
+		assert.equal(
+			writtenUpdate.$set.paid_amount_breakdown
+				.paid_online_other_platforms,
+			588
+		);
+		assert.equal(writtenUpdate.$set.financial_cycle.pmsCollectedAmount, 588);
+		assert.equal(writtenUpdate.$set.financial_cycle.hotelPayoutDue, 534);
+		assert.equal(
+			writtenUpdate.$set["supplierData.otaPaymentCollectionModel"],
+			"ota_collect"
+		);
 		assert.equal(writtenUpdate.$set.commission_ota, 88.2);
 		assert.equal(writtenUpdate.$set["adminPricing.clientTotal"], 588);
 		assert.equal(
@@ -11377,9 +11601,7 @@ test("an Agoda two-room allocation review enriches only the already direct-owned
 			"total_rooms",
 			"sub_total",
 			"roomId",
-			"payment",
-			"financeStatus",
-			"paid_amount",
+			"payment_details",
 			"supplierData.hotelRunner",
 		]) {
 			assert.equal(
@@ -12279,6 +12501,94 @@ test("concurrent duplicate commercial emails produce one enrichment write", asyn
 		Reservations.findById = originalReservationFindById;
 		Reservations.updateOne = originalReservationUpdateOne;
 		HotelDetails.find = originalHotelFind;
+	}
+});
+
+test("HotelRunner OTA-collect enrichment loses its snapshot CAS to concurrent finance or release changes", async () => {
+	const originalReservationFindById = Reservations.findById;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+	});
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const existing = makeDirectHotelRunnerCommercialReservation({
+		otaIdentityKey: `agoda:${HOTELRUNNER_COMMERCIAL_CONFIRMATION}`,
+		booking_source: "Agoda",
+		customer_details: {
+			...base.customer_details,
+			booking_source: "Agoda",
+		},
+		supplierData: {
+			...base.supplierData,
+			supplierName: "Agoda",
+			otaProvider: "agoda",
+		},
+	});
+	const evidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-06T15:01:00.000Z"),
+	});
+	assert.ok(evidence);
+	const scenarios = [
+		{
+			label: "finance",
+			latest: { ...existing, financeStatus: "finance hold" },
+			assertSnapshot(filter) {
+				assert.equal(filter.financeStatus, "not paid");
+				assert.notEqual(filter.financeStatus, this.latest.financeStatus);
+			},
+		},
+		{
+			label: "release",
+			latest: {
+				...existing,
+				state: "Pending Confirmation",
+				reservation_status: "Pending Confirmation",
+			},
+			assertSnapshot(filter) {
+				assert.equal(filter.state, "confirmed");
+				assert.notEqual(filter.state, this.latest.state);
+			},
+		},
+	];
+	try {
+		for (const scenario of scenarios) {
+			let updateCalls = 0;
+			Reservations.updateOne = async (filter, update) => {
+				updateCalls += 1;
+				scenario.assertSnapshot(filter);
+				assert.equal(update.$set.payment, "paid online");
+				assert.equal(update.$set.paid_amount, 100);
+				return { matchedCount: 0 };
+			};
+			Reservations.findById = () => ({
+				lean() {
+					return this;
+				},
+				async exec() {
+					return scenario.latest;
+				},
+			});
+			const result = await reconcileDirectHotelRunnerOwnedEmail({
+				normalized,
+				existing,
+				hotelDetails: hotelRunnerCommercialHotel(),
+				matchedReservationBy: ["otaIdentityKey"],
+				warnings: [],
+				errors: [],
+			});
+			assert.equal(result.status, "needs_review", scenario.label);
+			assert.equal(
+				result.skipReason,
+				"hotelrunner_email_commercial_enrichment_concurrent_change",
+				scenario.label
+			);
+			assert.equal(updateCalls, 1, scenario.label);
+		}
+	} finally {
+		Reservations.findById = originalReservationFindById;
+		Reservations.updateOne = originalReservationUpdateOne;
 	}
 });
 

@@ -522,6 +522,40 @@ test("compact admin rows retain verified OTA gross and net without exposing nest
   assert.equal(result.body.data[0].supplierData.otaCommercialEvidence, undefined);
 });
 
+test("compact admin rows show provider-collected OTA money as captured without a local gateway capture", async () => {
+  const otaReservation = baseReservation({
+    id: "65f000000000000000000006",
+    hotelId: HOTEL_A,
+    hotelName: "Hotel Alpha",
+    confirmation: "ota-provider-collected-1",
+    name: "Provider Collected Guest",
+    createdAt: now,
+  });
+  otaReservation.booking_source = "channel-partner";
+  otaReservation.payment = "paid online";
+  otaReservation.financeStatus = "paid online";
+  otaReservation.total_amount = 95.06;
+  otaReservation.paid_amount = 95.06;
+  otaReservation.payment_details = { captured: false, onsite_paid_amount: 0 };
+  otaReservation.paid_amount_breakdown = {
+    paid_online_other_platforms: 95.06,
+    payment_comments: "OTA collected by platform",
+  };
+  otaReservation.paypal_details = {};
+
+  const result = await runHandler({
+    honorProjection: true,
+    query: { searchQuery: "ota-provider-collected-1", filterType: "captured" },
+    profile: { _id: ADMIN_ID, role: 7000, roleDescription: "order taker" },
+    sourceDocuments: [otaReservation],
+  });
+
+  assert.equal(result.body.data.length, 1);
+  assert.equal(result.body.data[0].payment_status, "Captured");
+  assert.equal(result.body.data[0].paid_amount, 95.06);
+  assert.equal(result.body.scorecards.capturedReservations, 1);
+});
+
 test("compact admin rows reflect an already-saved OTA pricing breakdown", async () => {
   const otaReservation = baseReservation({
     id: "65e000000000000000000005",

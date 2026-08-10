@@ -1138,6 +1138,7 @@ function directQueuedInbound(overrides = {}) {
 		netAfterExpensesTotal: 58.82,
 		exchangeRateToSar: 1,
 		exchangeRateSource: "identity",
+		paidOnline: true,
 		paymentCollectionModel: "ota_collect",
 		paymentInstructions: "OTA collected payment",
 		paymentSummary: {
@@ -2982,6 +2983,21 @@ test("queued Trip stored-FX evidence creates one authority-4 API reservation wit
 	assert.equal(created.adminPricing.rootTotal, 161);
 	assert.equal(created.adminPricing.platformMarginTotal, -91.84);
 	assert.equal(created.adminPricing.commercialVerified, true);
+	assert.equal(created.payment, "paid online");
+	assert.equal(created.financeStatus, "paid online");
+	assert.equal(created.paid_amount, 81.32);
+	assert.equal(
+		created.paid_amount_breakdown.paid_online_other_platforms,
+		81.32
+	);
+	assert.equal(created.payment_details.captured, false);
+	assert.equal(created.financial_cycle.collectionModel, "pms_collected");
+	assert.equal(created.financial_cycle.pmsCollectedAmount, 81.32);
+	assert.equal(created.financial_cycle.hotelPayoutDue, 161);
+	assert.equal(
+		created.supplierData.otaPaymentCollectionModel,
+		"ota_collect"
+	);
 	assert.equal(created.ota_financial_summary.show, true);
 	assert.equal(created.ota_financial_summary.netAfterExpenses, 69.16);
 	assert.equal(created.supplierData.otaSourceAuthority, 4);
@@ -3189,6 +3205,21 @@ test("incident-shaped two-room Agoda queue creates 588/363.78/root 534 while Hot
 	assert.equal(created.adminPricing.otaExpenseTotal, 224.22);
 	assert.equal(created.adminPricing.rootTotal, 534);
 	assert.equal(created.adminPricing.platformMarginTotal, -170.22);
+	assert.equal(created.payment, "paid online");
+	assert.equal(created.financeStatus, "paid online");
+	assert.equal(created.paid_amount, 588);
+	assert.equal(
+		created.paid_amount_breakdown.paid_online_other_platforms,
+		588
+	);
+	assert.equal(created.payment_details.captured, false);
+	assert.equal(created.financial_cycle.collectionModel, "pms_collected");
+	assert.equal(created.financial_cycle.pmsCollectedAmount, 588);
+	assert.equal(created.financial_cycle.hotelPayoutDue, 534);
+	assert.equal(
+		created.supplierData.otaPaymentCollectionModel,
+		"ota_collect"
+	);
 	const daily = created.pickedRoomsPricing.flatMap((entry) => entry.pricingByDay);
 	assert.equal(daily.length, 6);
 	assert.ok(daily.every((day) => day.clientPrice === 98));

@@ -919,6 +919,7 @@ function applyQueuedEmailCommercialEvidenceToCreateDocument(
 			reportedTotalRole: bridge.amountRole,
 			existing: document,
 			commercialPricing,
+			materializeVerifiedOtaCollectPayment: true,
 		}
 	);
 	if (!commercialSet) return fail("queued_commercial_set_invalid");
