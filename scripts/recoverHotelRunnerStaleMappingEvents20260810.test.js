@@ -8,30 +8,40 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mongoose = require("mongoose");
+const BSON = require("bson");
 
 const {
 	AWAITING_MESSAGE,
 	RECOVERY_HOLD_MS,
 	RECOVERY_ID,
 	REOPEN_DECISION,
+	SERIAL_LEASE_MS,
 	STALE_MAPPING_CODE,
+	STANDALONE_APPLY_STRATEGY,
 	TARGETS,
 	TERMINAL_CODE,
 	TERMINAL_DECISION,
 	TERMINAL_MESSAGE,
 	applyPlan,
+	applyPlanStandalone,
 	assertPostconditions,
 	buildAuditReopenUpdate,
 	buildJobReopenUpdate,
 	buildPlan,
 	buildTerminalAuditFilter,
 	buildTerminalJobFilter,
+	buildFullDocumentCasFilter,
+	canonicalEjsonSha256,
 	classifyScope,
+	cloneFullBson,
 	loadScopes,
 	parseArguments,
+	resolveApplyStrategy,
 } = require("./recoverHotelRunnerStaleMappingEvents20260810");
 
 const APPLY_AT = new Date("2026-08-10T16:00:00.000Z");
+const RUN_ID = "a".repeat(32);
+const LEASE_UNTIL = new Date(APPLY_AT.getTime() + SERIAL_LEASE_MS);
 
 const oid = (value) => new mongoose.Types.ObjectId(value);
 const id = (value) => String(value?._id || value || "").toLowerCase();
@@ -267,16 +277,21 @@ function applyUpdate(document, update) {
 }
 
 class FakeCollection {
-	constructor(documents) {
+	constructor(documents, { role = "", onReplace = null, onFind = null } = {}) {
 		this.documents = new Map(
 			documents.map((document) => [id(document._id), document])
 		);
+		this.role = role;
+		this.onReplace = onReplace;
+		this.onFind = onFind;
 		this.findOneCalls = 0;
 		this.updateOneCalls = 0;
+		this.replaceOneCalls = 0;
 	}
 
-	async findOne(filter) {
+	async findOne(filter, options) {
 		this.findOneCalls += 1;
+		if (this.onFind) await this.onFind({ collection: this, filter, options });
 		return this.documents.get(id(filter._id)) || null;
 	}
 
@@ -289,19 +304,112 @@ class FakeCollection {
 		applyUpdate(document, update);
 		return { matchedCount: 1, modifiedCount: 1 };
 	}
+
+	async replaceOne(filter, replacement, options) {
+		this.replaceOneCalls += 1;
+		const document = this.documents.get(id(filter._id));
+		const entries = filter?.$expr?.$eq?.[1]?.$literal;
+		const exactBefore = Array.isArray(entries)
+			? Object.fromEntries(entries.map(({ k, v }) => [k, v]))
+			: null;
+		const context = {
+			collection: this,
+			filter,
+			replacement,
+			options,
+			phase: "before",
+		};
+		if (this.onReplace) await this.onReplace(context);
+		if (
+			!document ||
+			!exactBefore ||
+			canonicalEjsonSha256(document) !== canonicalEjsonSha256(exactBefore)
+		) {
+			return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
+		}
+		this.documents.set(id(filter._id), cloneFullBson(replacement));
+		if (this.onReplace) {
+			await this.onReplace({ ...context, phase: "after" });
+		}
+		return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+	}
 }
 
-function fixtureCollections() {
+function fixtureCollections(options = {}) {
 	const scopes = TARGETS.map(terminalScope);
 	return {
 		scopes,
 		collections: {
-			events: new FakeCollection(scopes.map((scope) => scope.event)),
-			mirrors: new FakeCollection(scopes.map((scope) => scope.mirror)),
-			jobs: new FakeCollection(scopes.map((scope) => scope.job)),
-			audits: new FakeCollection(scopes.map((scope) => scope.audit)),
+			events: new FakeCollection(
+				scopes.map((scope) => scope.event),
+				{
+					role: "events",
+					...options.events,
+				}
+			),
+			mirrors: new FakeCollection(
+				scopes.map((scope) => scope.mirror),
+				{
+					role: "mirrors",
+					...options.mirrors,
+				}
+			),
+			jobs: new FakeCollection(
+				scopes.map((scope) => scope.job),
+				{
+					role: "jobs",
+					...options.jobs,
+				}
+			),
+			audits: new FakeCollection(
+				scopes.map((scope) => scope.audit),
+				{
+					role: "audits",
+					...options.audits,
+				}
+			),
 		},
 	};
+}
+
+const isForwardReplacement = (collection, replacement) =>
+	collection.role === "audits"
+		? replacement.processingStatus === "awaiting_hotelrunner"
+		: collection.role === "jobs" &&
+		  replacement.status === "awaiting_hotelrunner";
+
+function exactCollectionHashes(collections) {
+	return {
+		jobs: Array.from(collections.jobs.documents.values()).map(
+			canonicalEjsonSha256
+		),
+		audits: Array.from(collections.audits.documents.values()).map(
+			canonicalEjsonSha256
+		),
+		events: Array.from(collections.events.documents.values()).map(
+			canonicalEjsonSha256
+		),
+		mirrors: Array.from(collections.mirrors.documents.values()).map(
+			canonicalEjsonSha256
+		),
+	};
+}
+
+function simulateKilledAfterAuditPhase(collections, serialRunId = RUN_ID) {
+	for (const target of TARGETS) {
+		const job = collections.jobs.documents.get(target.jobId);
+		const audit = collections.audits.documents.get(target.auditId);
+		applyUpdate(
+			audit,
+			buildAuditReopenUpdate(
+				target,
+				APPLY_AT,
+				{ job, audit },
+				serialRunId,
+				LEASE_UNTIL
+			)
+		);
+	}
 }
 
 test("scope is exactly the four confirmed stale-mapping identities", () => {
@@ -407,8 +515,14 @@ test("any identity or expected terminal drift fails closed", () => {
 test("reopen updates clear only terminal queue/audit lifecycle with a hold", () => {
 	const target = TARGETS[0];
 	const scope = terminalScope(target);
-	const jobUpdate = buildJobReopenUpdate(APPLY_AT);
-	const auditUpdate = buildAuditReopenUpdate(target, APPLY_AT, scope);
+	const jobUpdate = buildJobReopenUpdate(APPLY_AT, RUN_ID, LEASE_UNTIL);
+	const auditUpdate = buildAuditReopenUpdate(
+		target,
+		APPLY_AT,
+		scope,
+		RUN_ID,
+		LEASE_UNTIL
+	);
 	assert.equal(jobUpdate.$set.status, "awaiting_hotelrunner");
 	assert.equal(jobUpdate.$set.lastDecision, REOPEN_DECISION);
 	assert.equal(jobUpdate.$set.attemptCount, 0);
@@ -671,5 +785,387 @@ test("compare-and-set miss aborts instead of widening scope", async () => {
 			runTransaction: async (work) => work({ testSession: true }),
 		}),
 		(error) => error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_JOB_CAS_LOST"
+	);
+});
+
+test("standalone primary applies all audits before any job and is idempotent", async () => {
+	const order = [];
+	const hook = async ({ collection, replacement, phase }) => {
+		if (phase === "before") {
+			order.push(`${collection.role}:${id(replacement._id)}`);
+		}
+	};
+	const { collections } = fixtureCollections({
+		audits: { onReplace: hook },
+		jobs: { onReplace: hook },
+	});
+	const result = await applyPlanStandalone({
+		collections,
+		appliedAt: APPLY_AT,
+		serialRunId: RUN_ID,
+		clock: () => APPLY_AT,
+	});
+	assert.equal(result.changed, 4);
+	assert.equal(result.acknowledgementsRecovered, 0);
+	assert.deepEqual(
+		order.map((entry) => entry.split(":")[0]),
+		["audits", "audits", "audits", "audits", "jobs", "jobs", "jobs", "jobs"]
+	);
+	assert.ok(
+		result.plan.targets.every(
+			(entry) => entry.state === "reopened_waiting_mapping"
+		)
+	);
+	assert.equal(collections.events.replaceOneCalls, 0);
+	assert.equal(collections.mirrors.replaceOneCalls, 0);
+
+	const writes = order.length;
+	const rerun = await applyPlanStandalone({
+		collections,
+		appliedAt: new Date(APPLY_AT.getTime() + 1_000),
+		serialRunId: "b".repeat(32),
+		clock: () => new Date(APPLY_AT.getTime() + 1_000),
+	});
+	assert.equal(rerun.changed, 0);
+	assert.equal(order.length, writes);
+});
+
+test("topology strategy requires a positive writable hello", async () => {
+	assert.equal(
+		await resolveApplyStrategy({
+			command: async () => ({ ok: 1, isWritablePrimary: true }),
+		}),
+		STANDALONE_APPLY_STRATEGY
+	);
+	assert.equal(
+		await resolveApplyStrategy({
+			command: async () => ({
+				ok: 1,
+				isWritablePrimary: true,
+				setName: "rs0",
+			}),
+		}),
+		"snapshot_transaction"
+	);
+	await assert.rejects(
+		resolveApplyStrategy({
+			command: async () => ({ ok: 1, isWritablePrimary: false }),
+		}),
+		(error) =>
+			error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_PRIMARY_REQUIRED"
+	);
+	await assert.rejects(
+		resolveApplyStrategy({
+			command: async () => ({ isWritablePrimary: true }),
+		}),
+		(error) =>
+			error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+	);
+	await assert.rejects(
+		resolveApplyStrategy({
+			command: async () => ({
+				ok: 1,
+				isWritablePrimary: true,
+				hosts: ["unexpected-replica:27017"],
+			}),
+		}),
+		(error) =>
+			error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+	);
+	let calls = 0;
+	assert.equal(
+		await resolveApplyStrategy({
+			command: async (command) => {
+				calls += 1;
+				if (command.hello) {
+					const error = new Error("no hello");
+					error.code = 59;
+					throw error;
+				}
+				return { ok: 1, ismaster: true };
+			},
+		}),
+		STANDALONE_APPLY_STRATEGY
+	);
+	assert.equal(calls, 2);
+});
+
+test("full-document CAS distinguishes a missing null from a swapped extra key", () => {
+	const original = { _id: oid(TARGETS[0].jobId), nullable: null, stable: 1 };
+	const filter = buildFullDocumentCasFilter(original);
+	const literal = Object.fromEntries(
+		filter.$expr.$eq[1].$literal.map(({ k, v }) => [k, v])
+	);
+	const drifted = { _id: original._id, replacement: "extra", stable: 1 };
+	assert.equal(canonicalEjsonSha256(literal), canonicalEjsonSha256(original));
+	assert.notEqual(canonicalEjsonSha256(literal), canonicalEjsonSha256(drifted));
+});
+
+test("standalone compensates exactly after a clean failure at each of eight writes", async () => {
+	for (let failAt = 1; failAt <= 8; failAt += 1) {
+		let forwardWrites = 0;
+		let failed = false;
+		const hook = async ({ collection, replacement, phase }) => {
+			if (phase !== "before" || !isForwardReplacement(collection, replacement))
+				return;
+			forwardWrites += 1;
+			if (!failed && forwardWrites === failAt) {
+				failed = true;
+				throw new Error(`fail forward write ${failAt}`);
+			}
+		};
+		const { collections } = fixtureCollections({
+			audits: { onReplace: hook },
+			jobs: { onReplace: hook },
+		});
+		const original = exactCollectionHashes(collections);
+		await assert.rejects(
+			applyPlanStandalone({
+				collections,
+				appliedAt: APPLY_AT,
+				serialRunId: RUN_ID,
+				clock: () => APPLY_AT,
+			}),
+			(error) => error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_COMPENSATED"
+		);
+		assert.deepEqual(
+			exactCollectionHashes(collections),
+			original,
+			`write ${failAt}`
+		);
+	}
+});
+
+test("lost acknowledgement at each standalone write is recovered without retry", async () => {
+	for (let loseAt = 1; loseAt <= 8; loseAt += 1) {
+		let forwardWrites = 0;
+		let lost = false;
+		const hook = async ({ collection, replacement, phase }) => {
+			if (phase !== "after" || !isForwardReplacement(collection, replacement))
+				return;
+			forwardWrites += 1;
+			if (!lost && forwardWrites === loseAt) {
+				lost = true;
+				throw new Error(`lost acknowledgement ${loseAt}`);
+			}
+		};
+		const { collections } = fixtureCollections({
+			audits: { onReplace: hook },
+			jobs: { onReplace: hook },
+		});
+		const result = await applyPlanStandalone({
+			collections,
+			appliedAt: APPLY_AT,
+			serialRunId: RUN_ID,
+			clock: () => APPLY_AT,
+		});
+		assert.equal(result.changed, 4);
+		assert.equal(result.acknowledgementsRecovered, 1);
+		assert.equal(collections.audits.replaceOneCalls, 4);
+		assert.equal(collections.jobs.replaceOneCalls, 4);
+	}
+});
+
+test("compensation failure leaves the audit open whenever its job remains active", async () => {
+	let forwardWrites = 0;
+	let forwardFailed = false;
+	let compensationFailed = false;
+	const hook = async ({ collection, replacement, phase }) => {
+		if (phase !== "before") return;
+		if (isForwardReplacement(collection, replacement)) {
+			forwardWrites += 1;
+			if (!forwardFailed && forwardWrites === 6) {
+				forwardFailed = true;
+				throw new Error("fail second job");
+			}
+			return;
+		}
+		if (
+			forwardFailed &&
+			!compensationFailed &&
+			collection.role === "jobs" &&
+			replacement.status === "needs_review"
+		) {
+			compensationFailed = true;
+			throw new Error("fail job compensation");
+		}
+	};
+	const { collections } = fixtureCollections({
+		audits: { onReplace: hook },
+		jobs: { onReplace: hook },
+	});
+	await assert.rejects(
+		applyPlanStandalone({
+			collections,
+			appliedAt: APPLY_AT,
+			serialRunId: RUN_ID,
+			clock: () => APPLY_AT,
+		}),
+		(error) =>
+			error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_COMPENSATION_FAILED"
+	);
+	const first = TARGETS[0];
+	assert.equal(
+		collections.jobs.documents.get(first.jobId).status,
+		"awaiting_hotelrunner"
+	);
+	assert.equal(
+		collections.audits.documents.get(first.auditId).processingStatus,
+		"awaiting_hotelrunner"
+	);
+});
+
+test("third-state drift is never overwritten during compensation", async () => {
+	let forwardWrites = 0;
+	let drifted = false;
+	const hook = async ({ collection, replacement, phase }) => {
+		if (phase !== "before" || !isForwardReplacement(collection, replacement))
+			return;
+		forwardWrites += 1;
+		if (!drifted && forwardWrites === 6) {
+			drifted = true;
+			collections.audits.documents.get(
+				TARGETS[0].auditId
+			).foreignConcurrent = true;
+			throw new Error("fail after concurrent audit drift");
+		}
+	};
+	const { collections } = fixtureCollections({
+		audits: { onReplace: hook },
+		jobs: { onReplace: hook },
+	});
+	await assert.rejects(
+		applyPlanStandalone({
+			collections,
+			appliedAt: APPLY_AT,
+			serialRunId: RUN_ID,
+			clock: () => APPLY_AT,
+		}),
+		(error) =>
+			error.code ===
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_MANUAL_INTERVENTION_REQUIRED"
+	);
+	assert.equal(
+		collections.audits.documents.get(TARGETS[0].auditId).foreignConcurrent,
+		true
+	);
+	assert.equal(
+		collections.jobs.documents.get(TARGETS[0].jobId).status,
+		"needs_review"
+	);
+});
+
+test("a killed audit phase is held by its lease then resumed exactly after expiry", async () => {
+	const { collections } = fixtureCollections();
+	simulateKilledAfterAuditPhase(collections);
+	await assert.rejects(
+		applyPlanStandalone({
+			collections,
+			appliedAt: new Date(APPLY_AT.getTime() + 1_000),
+			serialRunId: "b".repeat(32),
+			clock: () => new Date(APPLY_AT.getTime() + 1_000),
+		}),
+		(error) => error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_LOCK_HELD"
+	);
+	const resumedAt = new Date(LEASE_UNTIL.getTime() + 1);
+	const resumed = await applyPlanStandalone({
+		collections,
+		appliedAt: resumedAt,
+		serialRunId: "c".repeat(32),
+		clock: () => resumedAt,
+	});
+	assert.equal(resumed.changed, 4);
+	assert.ok(
+		resumed.plan.targets.every(
+			(entry) => entry.state === "reopened_waiting_mapping"
+		)
+	);
+});
+
+test("a concurrent loser observes the active lease and never compensates the winner", async () => {
+	let releaseFirst;
+	let firstWrittenResolve;
+	const firstWritten = new Promise((resolve) => {
+		firstWrittenResolve = resolve;
+	});
+	const release = new Promise((resolve) => {
+		releaseFirst = resolve;
+	});
+	let paused = false;
+	const hook = async ({ collection, replacement, phase }) => {
+		if (
+			!paused &&
+			phase === "after" &&
+			collection.role === "audits" &&
+			id(replacement._id) === TARGETS[0].auditId
+		) {
+			paused = true;
+			firstWrittenResolve();
+			await release;
+		}
+	};
+	const { collections } = fixtureCollections({ audits: { onReplace: hook } });
+	const winner = applyPlanStandalone({
+		collections,
+		appliedAt: APPLY_AT,
+		serialRunId: RUN_ID,
+		clock: () => APPLY_AT,
+	});
+	await firstWritten;
+	await assert.rejects(
+		applyPlanStandalone({
+			collections,
+			appliedAt: new Date(APPLY_AT.getTime() + 1_000),
+			serialRunId: "d".repeat(32),
+			clock: () => new Date(APPLY_AT.getTime() + 1_000),
+		}),
+		(error) => error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_LOCK_HELD"
+	);
+	releaseFirst();
+	const completed = await winner;
+	assert.equal(completed.changed, 4);
+});
+
+test("full BSON snapshots preserve exotic types and unknown fields", async () => {
+	const { collections } = fixtureCollections();
+	const job = collections.jobs.documents.get(TARGETS[0].jobId);
+	job.unknownBson = {
+		decimal: BSON.Decimal128.fromString("123.4500"),
+		binary: new BSON.Binary(Buffer.from([0, 1, 2, 255])),
+		long: BSON.Long.fromString("9223372036854775806"),
+		date: new Date("2026-08-10T15:59:59.999Z"),
+		objectId: oid("6a79ffff0000000000000002"),
+	};
+	const expectedHash = canonicalEjsonSha256(job.unknownBson);
+	await applyPlanStandalone({
+		collections,
+		appliedAt: APPLY_AT,
+		serialRunId: RUN_ID,
+		clock: () => APPLY_AT,
+	});
+	assert.equal(
+		canonicalEjsonSha256(
+			collections.jobs.documents.get(TARGETS[0].jobId).unknownBson
+		),
+		expectedHash
+	);
+});
+
+test("mixed killed-run recovery images fail closed", async () => {
+	const { collections } = fixtureCollections();
+	simulateKilledAfterAuditPhase(collections);
+	const second = collections.audits.documents.get(TARGETS[1].auditId);
+	second.hotelRunnerFirstFallback.serialRunId = "e".repeat(32);
+	second.hotelRunnerFirstFallback.recoveryHistory[0].serialRunId = "e".repeat(
+		32
+	);
+	await assert.rejects(
+		applyPlanStandalone({
+			collections,
+			appliedAt: new Date(LEASE_UNTIL.getTime() + 1),
+			serialRunId: "f".repeat(32),
+			clock: () => new Date(LEASE_UNTIL.getTime() + 1),
+		}),
+		(error) => error.code === "HOTELRUNNER_STALE_MAPPING_RECOVERY_MIXED_IMAGES"
 	);
 });

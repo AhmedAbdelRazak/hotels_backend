@@ -22,19 +22,18 @@
  */
 
 const path = require("path");
+const crypto = require("crypto");
 
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
 const mongoose = require("mongoose");
+const BSON = require("bson");
 
 mongoose.set("autoIndex", false);
 mongoose.set("autoCreate", false);
 
 const {
-	applyUpdateToDocument,
-	buildExactCasFilter,
 	canonicalEjsonSha256,
-	cloneBson,
 } = require("../services/tripHotelRunnerRepair20260805");
 
 const REPAIR_ID = "hotelrunner-expedia-2531071530-event-20260810-v1";
@@ -44,6 +43,18 @@ const MANIFEST_COLLECTION =
 	"ota_hotelrunner_expedia_2531071530_event_manifest_20260810_v1";
 const PROOF_MAX_AGE_MS = 30 * 60 * 1000;
 const CLOCK_SKEW_MS = 5_000;
+const STANDALONE_LOCK_MS = 5 * 60 * 1000;
+// A proof can be applied at the end of its validity window. Keep the event
+// unclaimable for two full owner leases beyond that boundary so one stale-lock
+// adoption can still finish before the event is released explicitly.
+const STANDALONE_EVENT_HOLD_MS = PROOF_MAX_AGE_MS + 2 * STANDALONE_LOCK_MS;
+const APPLY_STRATEGIES = Object.freeze({
+	TRANSACTION: "transaction",
+	STANDALONE: "serialized_full_document_cas",
+});
+const STANDALONE_WRITE_OPTIONS = Object.freeze({
+	writeConcern: Object.freeze({ w: "majority" }),
+});
 
 const COLLECTION_NAMES = Object.freeze({
 	events: "hotelrunnerevents",
@@ -142,6 +153,117 @@ const dateKey = (value) => {
 const sameDate = (value, expected) => dateMs(value) === dateMs(expected);
 const validObjectId = (value) => mongoose.Types.ObjectId.isValid(id(value));
 const validSha256 = (value) => /^[a-f0-9]{64}$/i.test(clean(value));
+const validRunToken = (value) => /^[a-f0-9]{64}$/i.test(clean(value));
+const sha256 = (value) =>
+	crypto.createHash("sha256").update(String(value)).digest("hex");
+const createRunToken = () => crypto.randomBytes(32).toString("hex");
+
+const cloneFullBson = (value) =>
+	BSON.deserialize(BSON.serialize({ value }, { ignoreUndefined: false }), {
+		promoteBuffers: false,
+		promoteLongs: false,
+		promoteValues: false,
+	}).value;
+
+const getDocumentPath = (document, dotted) =>
+	String(dotted)
+		.split(".")
+		.reduce((value, key) => value?.[key], document);
+
+function setDocumentPath(document, dotted, value) {
+	const parts = String(dotted).split(".");
+	const final = parts.pop();
+	let cursor = document;
+	for (const part of parts) {
+		if (!cursor[part] || typeof cursor[part] !== "object") cursor[part] = {};
+		cursor = cursor[part];
+	}
+	cursor[final] = cloneFullBson(value);
+}
+
+function unsetDocumentPath(document, dotted) {
+	const parts = String(dotted).split(".");
+	const final = parts.pop();
+	const parent = parts.reduce((value, key) => value?.[key], document);
+	if (parent && typeof parent === "object") delete parent[final];
+}
+
+function applyFullBsonUpdateToDocument(original, update) {
+	const document = cloneFullBson(original);
+	for (const [key, value] of Object.entries(update.$set || {})) {
+		setDocumentPath(document, key, value);
+	}
+	for (const key of Object.keys(update.$unset || {})) {
+		unsetDocumentPath(document, key);
+	}
+	for (const [key, increment] of Object.entries(update.$inc || {})) {
+		setDocumentPath(
+			document,
+			key,
+			Number(getDocumentPath(document, key) || 0) + Number(increment)
+		);
+	}
+	return document;
+}
+
+function buildFullDocumentCasFilter(document) {
+	return {
+		_id: cloneFullBson(document._id),
+		$expr: {
+			$eq: [
+				{ $objectToArray: "$$ROOT" },
+				{
+					$literal: Object.entries(cloneFullBson(document)).map(
+						([key, value]) => ({ k: key, v: value })
+					),
+				},
+			],
+		},
+	};
+}
+
+async function resolveApplyStrategy(admin) {
+	let hello;
+	try {
+		hello = await admin.command({ hello: 1 });
+	} catch (helloError) {
+		try {
+			hello = await admin.command({ isMaster: 1 });
+		} catch (legacyError) {
+			legacyError.helloError = helloError;
+			fail(
+				"MongoDB topology could not be positively attested.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_TOPOLOGY_UNATTESTED"
+			);
+		}
+	}
+	const writablePrimary =
+		hello?.isWritablePrimary === true || hello?.ismaster === true;
+	if (hello?.ok !== 1 || !writablePrimary) {
+		fail(
+			"MongoDB did not attest a writable primary for recovery.",
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_PRIMARY_REQUIRED"
+		);
+	}
+	if (hello?.msg === "isdbgrid" || clean(hello?.setName)) {
+		return APPLY_STRATEGIES.TRANSACTION;
+	}
+	const clusteredMarkersPresent =
+		Boolean(hello?.msg) ||
+		hello?.setName != null ||
+		Array.isArray(hello?.hosts) ||
+		Array.isArray(hello?.passives) ||
+		Array.isArray(hello?.arbiters) ||
+		Boolean(hello?.primary) ||
+		Boolean(hello?.serviceId);
+	if (clusteredMarkersPresent) {
+		fail(
+			"MongoDB returned an unsupported topology for recovery.",
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_TOPOLOGY_UNSUPPORTED"
+		);
+	}
+	return APPLY_STRATEGIES.STANDALONE;
+}
 
 function parseArguments(argv = []) {
 	const options = { apply: false, repairId: "", proof: "", help: false };
@@ -192,7 +314,7 @@ function parseArguments(argv = []) {
 	return options;
 }
 
-function parseProof(proof, now = new Date()) {
+function parseProof(proof, now = new Date(), { allowExpired = false } = {}) {
 	const match = lower(proof).match(/^(\d{13})\.([a-f0-9]{64})$/);
 	if (!match) {
 		fail(
@@ -205,7 +327,7 @@ function parseProof(proof, now = new Date()) {
 	if (
 		!Number.isSafeInteger(plannedAtMs) ||
 		plannedAtMs > nowMs + CLOCK_SKEW_MS ||
-		nowMs - plannedAtMs > PROOF_MAX_AGE_MS
+		(!allowExpired && nowMs - plannedAtMs > PROOF_MAX_AGE_MS)
 	) {
 		fail(
 			"The dry-run proof is expired or from the future.",
@@ -541,17 +663,23 @@ function validateOriginalFailure(scope, target = TARGET) {
 	return true;
 }
 
-function buildEventRequeueUpdate(repairAt) {
+function buildEventRequeueUpdate(repairAt, recoveryMarker = "") {
 	const at = new Date(repairAt);
 	return {
 		$set: {
 			status: "pending",
 			attempts: 0,
-			nextAttemptAt: at,
+			nextAttemptAt: new Date(at.getTime() + STANDALONE_EVENT_HOLD_MS),
 			processedAt: null,
 			errorCode: "",
 			errorMessage: "",
-			result: {},
+			result: {
+				incidentRecovery: {
+					repairId: REPAIR_ID,
+					marker: recoveryMarker,
+					plannedAt: at,
+				},
+			},
 			finalRecoveryAttempted: false,
 			finalRecoveryClaimedAt: null,
 			updatedAt: at,
@@ -566,8 +694,14 @@ function buildEventRequeueUpdate(repairAt) {
 }
 
 function planBasis(scope, repairAt, target = TARGET) {
-	const update = buildEventRequeueUpdate(repairAt);
-	const expectedEvent = applyUpdateToDocument(scope.event, update);
+	const originalEventHash = canonicalEjsonSha256(scope.event);
+	const recoveryMarker = sha256(
+		`${REPAIR_ID}\u0000${target.eventId}\u0000${new Date(
+			repairAt
+		).toISOString()}\u0000${originalEventHash}`
+	);
+	const update = buildEventRequeueUpdate(repairAt, recoveryMarker);
+	const expectedEvent = applyFullBsonUpdateToDocument(scope.event, update);
 	return {
 		recoveryId: REPAIR_ID,
 		repairAt: new Date(repairAt),
@@ -579,7 +713,8 @@ function planBasis(scope, repairAt, target = TARGET) {
 			confirmationNumber: target.confirmationNumber,
 			hotelRunnerReservationId: target.hotelRunnerReservationId,
 		},
-		originalEventHash: canonicalEjsonSha256(scope.event),
+		originalEventHash,
+		recoveryMarker,
 		mirrorEvidenceHash: canonicalEjsonSha256(scope.mirror),
 		reservationEvidenceHash: canonicalEjsonSha256(scope.reservation),
 		commercialEvidenceHash:
@@ -589,7 +724,7 @@ function planBasis(scope, repairAt, target = TARGET) {
 	};
 }
 
-function verifyBackup(backup, target = TARGET) {
+function verifyBackup(backup, target = TARGET, expectedPlan = null) {
 	requireCondition(Boolean(backup), "durable backup missing");
 	requireCondition(backup._id === REPAIR_ID, "backup._id");
 	requireCondition(backup.repairId === REPAIR_ID, "backup.repairId");
@@ -598,43 +733,140 @@ function verifyBackup(backup, target = TARGET) {
 		backup.originalEventHash === target.eventDocumentHash,
 		"backup.originalEventHash"
 	);
+	requireCondition(validSha256(backup.planHash), "backup.planHash");
+	requireCondition(
+		validSha256(backup.expectedEventHash),
+		"backup.expectedEventHash"
+	);
+	requireCondition(validSha256(backup.recoveryMarker), "backup.recoveryMarker");
+	requireCondition(Number.isFinite(dateMs(backup.repairAt)), "backup.repairAt");
+	requireCondition(
+		Number.isFinite(dateMs(backup.createdAt)),
+		"backup.createdAt"
+	);
+	requireCondition(
+		id(backup.evidence?.mirrorId) === target.mirrorId,
+		"backup.evidence.mirrorId"
+	);
+	requireCondition(
+		id(backup.evidence?.reservationMongoId) === target.reservationMongoId,
+		"backup.evidence.reservationMongoId"
+	);
+	for (const [key, value] of Object.entries({
+		mirrorHash: backup.evidence?.mirrorHash,
+		reservationHash: backup.evidence?.reservationHash,
+		commercialEvidenceHash: backup.evidence?.commercialEvidenceHash,
+	})) {
+		requireCondition(validSha256(value), `backup.evidence.${key}`);
+	}
 	requireCondition(
 		canonicalEjsonSha256(backup.originalDocument) === backup.originalEventHash,
 		"backup original document hash"
 	);
+	if (expectedPlan) {
+		requireCondition(
+			backup.planHash === expectedPlan.planHash,
+			"backup planHash"
+		);
+		requireCondition(
+			sameDate(backup.repairAt, expectedPlan.repairAt),
+			"backup repairAt"
+		);
+		requireCondition(
+			backup.expectedEventHash === expectedPlan.basis.expectedEventHash,
+			"backup expectedEventHash"
+		);
+		requireCondition(
+			backup.recoveryMarker === expectedPlan.basis.recoveryMarker,
+			"backup recoveryMarker"
+		);
+		requireCondition(
+			backup.evidence.mirrorHash === expectedPlan.basis.mirrorEvidenceHash,
+			"backup mirror evidence hash"
+		);
+		requireCondition(
+			backup.evidence.reservationHash ===
+				expectedPlan.basis.reservationEvidenceHash,
+			"backup reservation evidence hash"
+		);
+		requireCondition(
+			backup.evidence.commercialEvidenceHash ===
+				expectedPlan.basis.commercialEvidenceHash,
+			"backup commercial evidence hash"
+		);
+	}
 	return true;
 }
 
-function classifyAppliedEvent(scope, manifest, target = TARGET) {
+function exactConverged(scope, target = TARGET) {
 	const { event, mirror } = scope;
-	const reservationId = id(event.reservationMongoId);
-	if (
+	return (
 		lower(event.status) === "completed" &&
-		reservationId === target.reservationMongoId &&
+		id(event.reservationMongoId) === target.reservationMongoId &&
 		id(event.mirrorId) === target.mirrorId &&
 		id(mirror.reservationMongoId) === target.reservationMongoId &&
 		["created", "updated"].includes(lower(mirror.projectionStatus))
-	) {
-		return "converged";
+	);
+}
+
+function exactRecoveryMarker(event, basis) {
+	const marker = event?.result?.incidentRecovery;
+	return (
+		marker?.repairId === REPAIR_ID &&
+		marker?.marker === basis.recoveryMarker &&
+		sameDate(marker?.plannedAt, basis.repairAt)
+	);
+}
+
+function classifyDurableEvent(scope, manifest, target = TARGET) {
+	const eventHash = canonicalEjsonSha256(scope.event);
+	if (exactConverged(scope, target)) return "converged";
+	if (manifest.state === "prepared") {
+		if (eventHash === manifest.originalEventHash) return "prepared_original";
+		if (
+			eventHash === manifest.expectedEventHash &&
+			exactRecoveryMarker(scope.event, manifest.planBasis)
+		) {
+			return "prepared_requeued";
+		}
+		return "prepared_state_drift";
 	}
-	if (
-		["pending", "processing", "retry"].includes(lower(event.status)) &&
-		canonicalEjsonSha256(event) === manifest.expectedEventHash
-	) {
+	if (eventHash === manifest.expectedEventHash) return "requeued_held";
+	if (eventHash === manifest.releaseBasis?.expectedEventHash) {
 		return "requeued_pending";
 	}
-	if (["pending", "processing", "retry"].includes(lower(event.status))) {
+	if (
+		["pending", "processing", "retry"].includes(lower(scope.event.status)) &&
+		exactRecoveryMarker(scope.event, manifest.planBasis) &&
+		scope.event?.result?.incidentRecovery?.releaseMarker ===
+			manifest.releaseBasis?.releaseMarker
+	) {
 		return "replay_in_progress";
 	}
-	if (lower(event.status) === "failed") return "replay_failed";
+	if (lower(scope.event.status) === "failed") return "replay_failed";
 	return "applied_state_drift";
+}
+
+function verifyFencedEvidenceHashes(scope, basis) {
+	requireCondition(
+		canonicalEjsonSha256(scope.mirror) === basis.mirrorEvidenceHash,
+		"fenced mirror evidence hash"
+	);
+	requireCondition(
+		canonicalEjsonSha256(scope.reservation) === basis.reservationEvidenceHash,
+		"fenced reservation evidence hash"
+	);
 }
 
 function verifyManifest(scope, target = TARGET) {
 	const { manifest, backup } = scope;
 	requireCondition(Boolean(manifest), "manifest missing");
 	requireCondition(manifest._id === REPAIR_ID, "manifest._id");
-	requireCondition(manifest.state === "applied", "manifest.state");
+	requireCondition(manifest.repairId === REPAIR_ID, "manifest.repairId");
+	requireCondition(
+		["prepared", "applied"].includes(manifest.state),
+		"manifest.state"
+	);
 	requireCondition(id(manifest.eventId) === target.eventId, "manifest.eventId");
 	requireCondition(
 		manifest.originalEventHash === target.eventDocumentHash,
@@ -645,25 +877,118 @@ function verifyManifest(scope, target = TARGET) {
 		canonicalEjsonSha256(manifest.planBasis) === manifest.planHash,
 		"manifest.planBasis"
 	);
-	verifyBackup(backup, target);
+	requireCondition(
+		manifest.expectedEventHash === manifest.planBasis.expectedEventHash,
+		"manifest.expectedEventHash"
+	);
+	requireCondition(
+		sameDate(manifest.repairAt, manifest.planBasis.repairAt),
+		"manifest.repairAt"
+	);
+	if (manifest.state === "prepared") {
+		requireCondition(
+			manifest.applyStrategy === APPLY_STRATEGIES.STANDALONE,
+			"prepared manifest strategy"
+		);
+		requireCondition(validRunToken(manifest.ownerToken), "manifest.ownerToken");
+		requireCondition(
+			Number.isFinite(dateMs(manifest.lockAcquiredAt)) &&
+				Number.isFinite(dateMs(manifest.lockUntil)) &&
+				dateMs(manifest.lockUntil) > dateMs(manifest.lockAcquiredAt),
+			"manifest lock"
+		);
+	} else if (manifest.applyStrategy === APPLY_STRATEGIES.STANDALONE) {
+		requireCondition(
+			validSha256(manifest.completionOwnerTokenHash),
+			"manifest.completionOwnerTokenHash"
+		);
+	}
+	const plan = {
+		planHash: manifest.planHash,
+		repairAt: new Date(manifest.repairAt),
+		basis: manifest.planBasis,
+	};
+	verifyBackup(backup, target, plan);
+	if (manifest.state === "applied") {
+		const release = manifest.releaseBasis;
+		requireCondition(Boolean(release), "manifest.releaseBasis");
+		requireCondition(
+			Number.isFinite(dateMs(release.releasedAt)),
+			"manifest.releaseBasis.releasedAt"
+		);
+		requireCondition(
+			validSha256(release.releaseMarker),
+			"manifest.releaseBasis.releaseMarker"
+		);
+		requireCondition(
+			validSha256(release.expectedEventHash),
+			"manifest.releaseBasis.expectedEventHash"
+		);
+		const heldEvent = applyFullBsonUpdateToDocument(
+			backup.originalDocument,
+			manifest.planBasis.update
+		);
+		requireCondition(
+			canonicalEjsonSha256(heldEvent) === manifest.expectedEventHash,
+			"manifest held event hash"
+		);
+		const releasedEvent = applyFullBsonUpdateToDocument(
+			heldEvent,
+			release.update
+		);
+		requireCondition(
+			canonicalEjsonSha256(releasedEvent) === release.expectedEventHash,
+			"manifest released event hash"
+		);
+		requireCondition(
+			releasedEvent?.result?.incidentRecovery?.releaseMarker ===
+				release.releaseMarker,
+			"manifest released event marker"
+		);
+	}
 	return true;
 }
 
+function planFromBackup(scope, target = TARGET) {
+	verifyBackup(scope.backup, target);
+	validateOriginalFailure(scope, target);
+	const repairAt = new Date(scope.backup.repairAt);
+	const basis = planBasis(scope, repairAt, target);
+	const plan = {
+		state: "backup_only",
+		repairAt,
+		planHash: canonicalEjsonSha256(basis),
+		basis,
+		scope,
+		target,
+	};
+	verifyBackup(scope.backup, target, plan);
+	return plan;
+}
+
 function buildPlan(scope, repairAt = new Date(), target = TARGET) {
-	if (scope.manifest || scope.backup) {
-		requireCondition(
-			Boolean(scope.manifest) && Boolean(scope.backup),
-			"partial backup/manifest state"
-		);
+	if (scope.manifest && !scope.backup) {
+		requireCondition(false, "manifest exists without durable backup");
+	}
+	if (scope.backup && !scope.manifest) return planFromBackup(scope, target);
+	if (scope.manifest && scope.backup) {
 		verifyManifest(scope, target);
 		validateIdentityAndEvidence(scope, target, {
 			requireOriginalHashes: false,
 		});
+		const state = classifyDurableEvent(scope, scope.manifest, target);
+		if (
+			["prepared_original", "prepared_requeued", "requeued_held"].includes(
+				state
+			)
+		) {
+			verifyFencedEvidenceHashes(scope, scope.manifest.planBasis);
+		}
 		return {
-			state: classifyAppliedEvent(scope, scope.manifest, target),
+			state,
 			repairAt: new Date(scope.manifest.repairAt),
 			planHash: scope.manifest.planHash,
-			basis: cloneBson(scope.manifest.planBasis),
+			basis: cloneFullBson(scope.manifest.planBasis),
 			scope,
 			target,
 		};
@@ -680,8 +1005,44 @@ function buildPlan(scope, repairAt = new Date(), target = TARGET) {
 	};
 }
 
+function eventReleaseBasis(plan, releasedAt) {
+	const at = new Date(releasedAt);
+	const releaseMarker = sha256(
+		`${REPAIR_ID}\u0000${plan.planHash}\u0000${at.toISOString()}\u0000release`
+	);
+	const update = {
+		$set: {
+			nextAttemptAt: at,
+			updatedAt: at,
+			"result.incidentRecovery.manifestAppliedAt": at,
+			"result.incidentRecovery.releaseMarker": releaseMarker,
+		},
+		$inc: { __v: 1 },
+	};
+	const heldEvent = applyFullBsonUpdateToDocument(
+		plan.scope.backup?.originalDocument || plan.scope.event,
+		plan.basis.update
+	);
+	requireCondition(
+		canonicalEjsonSha256(heldEvent) === plan.basis.expectedEventHash,
+		"held event release basis"
+	);
+	const releasedEvent = applyFullBsonUpdateToDocument(heldEvent, update);
+	return {
+		releasedAt: at,
+		releaseMarker,
+		update,
+		expectedEventHash: canonicalEjsonSha256(releasedEvent),
+	};
+}
+
 function proofToken(plan) {
-	return plan.state === "ready"
+	return [
+		"ready",
+		"backup_only",
+		"prepared_original",
+		"prepared_requeued",
+	].includes(plan.state)
 		? `${plan.repairAt.getTime()}.${plan.planHash}`
 		: "";
 }
@@ -692,7 +1053,11 @@ function backupRecord(plan, createdAt) {
 		repairId: REPAIR_ID,
 		eventId: oid(plan.target.eventId),
 		originalEventHash: plan.basis.originalEventHash,
-		originalDocument: cloneBson(plan.scope.event),
+		expectedEventHash: plan.basis.expectedEventHash,
+		recoveryMarker: plan.basis.recoveryMarker,
+		planHash: plan.planHash,
+		repairAt: new Date(plan.repairAt),
+		originalDocument: cloneFullBson(plan.scope.event),
 		evidence: {
 			mirrorId: oid(plan.target.mirrorId),
 			mirrorHash: plan.basis.mirrorEvidenceHash,
@@ -704,20 +1069,43 @@ function backupRecord(plan, createdAt) {
 	};
 }
 
-function manifestRecord(plan, appliedAt) {
+function manifestBase(plan) {
 	return {
 		_id: REPAIR_ID,
 		repairId: REPAIR_ID,
-		state: "applied",
 		eventId: oid(plan.target.eventId),
 		originalEventHash: plan.basis.originalEventHash,
 		expectedEventHash: plan.basis.expectedEventHash,
 		planHash: plan.planHash,
-		planBasis: cloneBson(plan.basis),
+		planBasis: cloneFullBson(plan.basis),
 		repairAt: new Date(plan.repairAt),
-		appliedAt: new Date(appliedAt),
 		backupCollection: BACKUP_COLLECTION,
 		mutatedCollection: COLLECTION_NAMES.events,
+	};
+}
+
+function manifestRecord(plan, appliedAt) {
+	return {
+		...manifestBase(plan),
+		state: "applied",
+		applyStrategy: APPLY_STRATEGIES.TRANSACTION,
+		appliedAt: new Date(appliedAt),
+		releaseBasis: eventReleaseBasis(plan, appliedAt),
+	};
+}
+
+function preparedManifestRecord(plan, acquiredAt, ownerToken) {
+	requireCondition(validRunToken(ownerToken), "standalone owner token");
+	const at = new Date(acquiredAt);
+	return {
+		...manifestBase(plan),
+		state: "prepared",
+		applyStrategy: APPLY_STRATEGIES.STANDALONE,
+		ownerToken,
+		lockAcquiredAt: at,
+		lockUntil: new Date(at.getTime() + STANDALONE_LOCK_MS),
+		preparedAt: at,
+		appliedAt: null,
 	};
 }
 
@@ -725,35 +1113,497 @@ const matchedOne = (result) =>
 	Number(result?.matchedCount ?? result?.n ?? 0) === 1 &&
 	Number(result?.modifiedCount ?? result?.nModified ?? 0) === 1;
 
-async function applyRecovery({
+const acknowledgedInsert = (result) =>
+	result?.acknowledged === true || Number(result?.insertedCount || 0) === 1;
+
+async function ensureStandaloneBackup(collections, plan, now) {
+	const desired = backupRecord(plan, now);
+	let insertionError = null;
+	try {
+		const result = await collections.backups.insertOne(
+			desired,
+			STANDALONE_WRITE_OPTIONS
+		);
+		if (!acknowledgedInsert(result)) {
+			insertionError = new RecoveryError(
+				"Durable backup insertion was not acknowledged.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_BACKUP_ACK_UNKNOWN"
+			);
+		}
+	} catch (error) {
+		insertionError = error;
+	}
+	if (!insertionError)
+		return { inserted: true, acknowledgementRecovered: false };
+	const observed = await collections.backups.findOne({ _id: REPAIR_ID });
+	try {
+		verifyBackup(observed, plan.target, plan);
+	} catch (verificationError) {
+		insertionError.verificationError = verificationError;
+		throw insertionError;
+	}
+	return { inserted: false, acknowledgementRecovered: true };
+}
+
+function assertRecoverablePreparedState(plan) {
+	if (
+		!["prepared_original", "prepared_requeued", "converged"].includes(
+			plan.state
+		)
+	) {
+		fail(
+			`Prepared recovery cannot safely resume from ${plan.state}.`,
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_PREPARED_STATE_DRIFT"
+		);
+	}
+}
+
+async function acquireStandaloneManifest({
 	collections,
-	proof,
-	now = new Date(),
-	target = TARGET,
-	runTransaction = async (work) => work(null),
+	plan,
+	now,
+	ownerToken,
+	target,
 }) {
-	const parsedProof = parseProof(proof, now);
-	const preflight = buildPlan(
+	const desired = preparedManifestRecord(plan, now, ownerToken);
+	if (!plan.scope.manifest) {
+		let insertionError = null;
+		try {
+			const result = await collections.manifests.insertOne(
+				desired,
+				STANDALONE_WRITE_OPTIONS
+			);
+			if (!acknowledgedInsert(result)) {
+				insertionError = new RecoveryError(
+					"Prepared manifest insertion was not acknowledged.",
+					"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_MANIFEST_ACK_UNKNOWN"
+				);
+			}
+		} catch (error) {
+			insertionError = error;
+		}
+		if (!insertionError) {
+			return {
+				manifest: desired,
+				inserted: true,
+				acknowledgementRecovered: false,
+			};
+		}
+		const observedScope = await loadScope(collections, null, target);
+		if (!observedScope.manifest) throw insertionError;
+		const observedPlan = buildPlan(observedScope, plan.repairAt, target);
+		if (observedPlan.planHash !== plan.planHash) throw insertionError;
+		if (
+			observedScope.manifest?.state === "prepared" &&
+			observedScope.manifest.ownerToken === ownerToken
+		) {
+			assertRecoverablePreparedState(observedPlan);
+			return {
+				manifest: observedScope.manifest,
+				inserted: false,
+				acknowledgementRecovered: true,
+			};
+		}
+		plan = observedPlan;
+	}
+
+	if (plan.scope.manifest?.state === "applied") {
+		return {
+			appliedPlan: plan,
+			inserted: false,
+			acknowledgementRecovered: false,
+		};
+	}
+	assertRecoverablePreparedState(plan);
+	const current = plan.scope.manifest;
+	if (current.ownerToken === ownerToken) {
+		return {
+			manifest: current,
+			inserted: false,
+			acknowledgementRecovered: true,
+		};
+	}
+	if (dateMs(current.lockUntil) > new Date(now).getTime()) {
+		fail(
+			"Another exact recovery owner holds the prepared manifest lease.",
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_LOCK_ACTIVE"
+		);
+	}
+	const adopted = {
+		$set: {
+			ownerToken,
+			lockAcquiredAt: new Date(now),
+			lockUntil: new Date(new Date(now).getTime() + STANDALONE_LOCK_MS),
+			adoptedAt: new Date(now),
+		},
+		$inc: { adoptionCount: 1 },
+	};
+	let adoptionError = null;
+	try {
+		const result = await collections.manifests.updateOne(
+			buildFullDocumentCasFilter(current),
+			adopted,
+			STANDALONE_WRITE_OPTIONS
+		);
+		if (!matchedOne(result)) {
+			adoptionError = new RecoveryError(
+				"Prepared manifest adoption compare-and-set was lost.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_LOCK_CAS_LOST"
+			);
+		}
+	} catch (error) {
+		adoptionError = error;
+	}
+	const observedScope = await loadScope(collections, null, target);
+	const observedPlan = buildPlan(observedScope, plan.repairAt, target);
+	if (observedPlan.planHash !== plan.planHash) {
+		throw (
+			adoptionError ||
+			new RecoveryError(
+				"Prepared manifest changed during adoption.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_LOCK_CAS_LOST"
+			)
+		);
+	}
+	if (observedScope.manifest?.state === "applied") {
+		return {
+			appliedPlan: observedPlan,
+			inserted: false,
+			acknowledgementRecovered: false,
+		};
+	}
+	if (observedScope.manifest?.ownerToken !== ownerToken) {
+		throw (
+			adoptionError ||
+			new RecoveryError(
+				"Prepared manifest ownership was not acquired.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_LOCK_CAS_LOST"
+			)
+		);
+	}
+	assertRecoverablePreparedState(observedPlan);
+	return {
+		manifest: observedScope.manifest,
+		inserted: false,
+		acknowledgementRecovered: Boolean(adoptionError),
+	};
+}
+
+async function finalizeStandaloneManifest({
+	collections,
+	preparedManifest,
+	plan,
+	now,
+	ownerToken,
+	target,
+}) {
+	const livePlan = buildPlan(
+		await loadScope(collections, null, target),
+		plan.repairAt,
+		target
+	);
+	requireCondition(livePlan.planHash === plan.planHash, "finalization plan");
+	requireCondition(
+		livePlan.scope.manifest?.ownerToken === ownerToken,
+		"finalization owner"
+	);
+	assertRecoverablePreparedState(livePlan);
+	plan = livePlan;
+	preparedManifest = livePlan.scope.manifest;
+	const ownerHash = sha256(ownerToken);
+	const releaseBasis = eventReleaseBasis(plan, now);
+	const update = {
+		$set: {
+			state: "applied",
+			appliedAt: new Date(now),
+			completionOwnerTokenHash: ownerHash,
+			releaseBasis,
+		},
+		$unset: { ownerToken: "", lockAcquiredAt: "", lockUntil: "" },
+	};
+	let finalizeError = null;
+	try {
+		const result = await collections.manifests.updateOne(
+			buildFullDocumentCasFilter(preparedManifest),
+			update,
+			STANDALONE_WRITE_OPTIONS
+		);
+		if (!matchedOne(result)) {
+			finalizeError = new RecoveryError(
+				"Prepared manifest finalization compare-and-set was lost.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_MANIFEST_CAS_LOST"
+			);
+		}
+	} catch (error) {
+		finalizeError = error;
+	}
+	const observedScope = await loadScope(collections, null, target);
+	const observedPlan = buildPlan(observedScope, plan.repairAt, target);
+	if (observedPlan.planHash !== plan.planHash) {
+		throw (
+			finalizeError ||
+			new RecoveryError(
+				"Manifest changed during finalization.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_MANIFEST_CAS_LOST"
+			)
+		);
+	}
+	if (observedScope.manifest?.state !== "applied") {
+		throw (
+			finalizeError ||
+			new RecoveryError(
+				"Prepared manifest was not finalized.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_MANIFEST_CAS_LOST"
+			)
+		);
+	}
+	return {
+		plan: observedPlan,
+		acknowledgementRecovered:
+			Boolean(finalizeError) &&
+			observedScope.manifest.completionOwnerTokenHash === ownerHash,
+		concurrentWinnerObserved:
+			observedScope.manifest.completionOwnerTokenHash !== ownerHash,
+	};
+}
+
+async function releaseAppliedEvent({ collections, plan, target }) {
+	plan = buildPlan(
+		await loadScope(collections, null, target),
+		plan.repairAt,
+		target
+	);
+	if (
+		["requeued_pending", "replay_in_progress", "converged"].includes(plan.state)
+	) {
+		return { changed: 0, acknowledgementRecovered: false, plan };
+	}
+	if (plan.state !== "requeued_held") {
+		fail(
+			`Applied recovery cannot release event from ${plan.state}.`,
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_RELEASE_STATE_DRIFT"
+		);
+	}
+	let releaseError = null;
+	try {
+		const result = await collections.events.updateOne(
+			buildFullDocumentCasFilter(plan.scope.event),
+			plan.scope.manifest.releaseBasis.update,
+			STANDALONE_WRITE_OPTIONS
+		);
+		if (!matchedOne(result)) {
+			releaseError = new RecoveryError(
+				"Applied event release compare-and-set was lost.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_RELEASE_CAS_LOST"
+			);
+		}
+	} catch (error) {
+		releaseError = error;
+	}
+	const observed = buildPlan(
+		await loadScope(collections, null, target),
+		plan.repairAt,
+		target
+	);
+	if (
+		observed.planHash !== plan.planHash ||
+		!["requeued_pending", "replay_in_progress", "converged"].includes(
+			observed.state
+		)
+	) {
+		throw (
+			releaseError ||
+			new RecoveryError(
+				"Applied event release did not reach an attributable state.",
+				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_RELEASE_CAS_LOST"
+			)
+		);
+	}
+	return {
+		changed: 1,
+		acknowledgementRecovered: Boolean(releaseError),
+		plan: observed,
+	};
+}
+
+async function applyStandaloneRecovery({
+	collections,
+	preflight,
+	parsedProof,
+	now,
+	target,
+	ownerToken,
+}) {
+	requireCondition(validRunToken(ownerToken), "standalone owner token");
+	if (
+		preflight.state === "applied_state_drift" ||
+		preflight.state === "replay_failed"
+	) {
+		fail(
+			`Recovery is not safely resumable from ${preflight.state}.`,
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_POSTCONDITION_FAILED"
+		);
+	}
+	if (
+		[
+			"requeued_held",
+			"requeued_pending",
+			"replay_in_progress",
+			"converged",
+		].includes(preflight.state)
+	) {
+		const released = await releaseAppliedEvent({
+			collections,
+			plan: preflight,
+			target,
+		});
+		return {
+			changed: released.changed,
+			acknowledgementRecovered: released.acknowledgementRecovered,
+			plan: released.plan,
+			applyStrategy: APPLY_STRATEGIES.STANDALONE,
+		};
+	}
+	let backupResult = { inserted: false, acknowledgementRecovered: false };
+	if (preflight.state === "ready") {
+		backupResult = await ensureStandaloneBackup(collections, preflight, now);
+	}
+	let live = buildPlan(
 		await loadScope(collections, null, target),
 		parsedProof.plannedAt,
 		target
 	);
-	if (preflight.state !== "ready") {
-		if (preflight.planHash !== parsedProof.planHash) {
-			fail(
-				"The supplied proof does not match the durable applied manifest.",
-				"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_PROOF_MISMATCH"
+	requireCondition(
+		live.planHash === parsedProof.planHash,
+		"standalone durable plan"
+	);
+	const manifestResult = await acquireStandaloneManifest({
+		collections,
+		plan: live,
+		now,
+		ownerToken,
+		target,
+	});
+	if (manifestResult.appliedPlan) {
+		const released = await releaseAppliedEvent({
+			collections,
+			plan: manifestResult.appliedPlan,
+			target,
+		});
+		return {
+			changed: released.changed,
+			acknowledgementRecovered: released.acknowledgementRecovered,
+			plan: released.plan,
+			applyStrategy: APPLY_STRATEGIES.STANDALONE,
+		};
+	}
+	live = buildPlan(
+		await loadScope(collections, null, target),
+		parsedProof.plannedAt,
+		target
+	);
+	requireCondition(
+		live.planHash === parsedProof.planHash,
+		"owned standalone plan"
+	);
+	requireCondition(
+		live.scope.manifest.ownerToken === ownerToken,
+		"owned standalone manifest"
+	);
+	assertRecoverablePreparedState(live);
+	let eventChanged = 0;
+	let eventAcknowledgementRecovered = false;
+	if (live.state === "prepared_original") {
+		let eventError = null;
+		try {
+			const result = await collections.events.updateOne(
+				buildFullDocumentCasFilter(live.scope.event),
+				live.basis.update,
+				STANDALONE_WRITE_OPTIONS
+			);
+			if (!matchedOne(result)) {
+				eventError = new RecoveryError(
+					"The standalone full-document event compare-and-set was lost.",
+					"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_EVENT_CAS_LOST"
+				);
+			}
+		} catch (error) {
+			eventError = error;
+		}
+		const observed = buildPlan(
+			await loadScope(collections, null, target),
+			parsedProof.plannedAt,
+			target
+		);
+		if (
+			observed.planHash !== parsedProof.planHash ||
+			!["prepared_requeued", "converged"].includes(observed.state)
+		) {
+			throw (
+				eventError ||
+				new RecoveryError(
+					"Standalone event write did not reach an attributable state.",
+					"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_EVENT_CAS_LOST"
+				)
 			);
 		}
-		return { changed: 0, acknowledgementRecovered: false, plan: preflight };
+		eventChanged = 1;
+		eventAcknowledgementRecovered = Boolean(eventError);
+		live = observed;
 	}
-	if (preflight.planHash !== parsedProof.planHash) {
+	const finalized = await finalizeStandaloneManifest({
+		collections,
+		preparedManifest: live.scope.manifest,
+		plan: live,
+		now,
+		ownerToken,
+		target,
+	});
+	if (["replay_failed", "applied_state_drift"].includes(finalized.plan.state)) {
 		fail(
-			"The live exact scope does not match the supplied dry-run proof.",
-			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_PROOF_MISMATCH"
+			`Event recovery postcondition failed: ${finalized.plan.state}.`,
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_POSTCONDITION_FAILED"
 		);
 	}
+	const released = await releaseAppliedEvent({
+		collections,
+		plan: finalized.plan,
+		target,
+	});
+	return {
+		changed: eventChanged || released.changed ? 1 : 0,
+		acknowledgementRecovered:
+			backupResult.acknowledgementRecovered ||
+			manifestResult.acknowledgementRecovered ||
+			eventAcknowledgementRecovered ||
+			finalized.acknowledgementRecovered ||
+			released.acknowledgementRecovered,
+		concurrentWinnerObserved: finalized.concurrentWinnerObserved,
+		plan: released.plan,
+		applyStrategy: APPLY_STRATEGIES.STANDALONE,
+	};
+}
 
+async function applyTransactionalRecovery({
+	collections,
+	preflight,
+	parsedProof,
+	now,
+	target,
+	runTransaction,
+}) {
+	if (preflight.state !== "ready") {
+		const released = await releaseAppliedEvent({
+			collections,
+			plan: preflight,
+			target,
+		});
+		return {
+			changed: released.changed,
+			acknowledgementRecovered: released.acknowledgementRecovered,
+			plan: released.plan,
+		};
+	}
 	try {
 		await runTransaction(async (session) => {
 			const live = buildPlan(
@@ -774,7 +1624,7 @@ async function applyRecovery({
 				session ? { session } : undefined
 			);
 			const updateResult = await collections.events.updateOne(
-				buildExactCasFilter(live.scope.event),
+				buildFullDocumentCasFilter(live.scope.event),
 				live.basis.update,
 				session ? { session } : undefined
 			);
@@ -802,15 +1652,23 @@ async function applyRecovery({
 			throw error;
 		}
 		if (
-			observed.state !== "ready" &&
+			observed.scope.manifest?.state === "applied" &&
 			observed.planHash === parsedProof.planHash &&
 			!["replay_failed", "applied_state_drift"].includes(observed.state)
 		) {
-			return { changed: 1, acknowledgementRecovered: true, plan: observed };
+			const released = await releaseAppliedEvent({
+				collections,
+				plan: observed,
+				target,
+			});
+			return {
+				changed: 1,
+				acknowledgementRecovered: true,
+				plan: released.plan,
+			};
 		}
 		throw error;
 	}
-
 	const after = buildPlan(
 		await loadScope(collections, null, target),
 		parsedProof.plannedAt,
@@ -822,7 +1680,65 @@ async function applyRecovery({
 			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_POSTCONDITION_FAILED"
 		);
 	}
-	return { changed: 1, acknowledgementRecovered: false, plan: after };
+	const released = await releaseAppliedEvent({
+		collections,
+		plan: after,
+		target,
+	});
+	return {
+		changed: 1,
+		acknowledgementRecovered: released.acknowledgementRecovered,
+		plan: released.plan,
+	};
+}
+
+async function applyRecovery({
+	collections,
+	proof,
+	now = new Date(),
+	target = TARGET,
+	runTransaction = async (work) => work(null),
+	applyStrategy = APPLY_STRATEGIES.TRANSACTION,
+	ownerToken = createRunToken(),
+}) {
+	const parsedProof = parseProof(proof, now, { allowExpired: true });
+	const preflight = buildPlan(
+		await loadScope(collections, null, target),
+		parsedProof.plannedAt,
+		target
+	);
+	if (preflight.state === "ready") parseProof(proof, now);
+	if (preflight.planHash !== parsedProof.planHash) {
+		fail(
+			"The live exact scope does not match the supplied dry-run proof.",
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_PROOF_MISMATCH"
+		);
+	}
+	if (applyStrategy === APPLY_STRATEGIES.STANDALONE) {
+		return applyStandaloneRecovery({
+			collections,
+			preflight,
+			parsedProof,
+			now,
+			target,
+			ownerToken,
+		});
+	}
+	if (applyStrategy !== APPLY_STRATEGIES.TRANSACTION) {
+		fail(
+			"Recovery apply strategy is unsupported.",
+			"HOTELRUNNER_EXPEDIA_EVENT_RECOVERY_TOPOLOGY_UNSUPPORTED"
+		);
+	}
+	const result = await applyTransactionalRecovery({
+		collections,
+		preflight,
+		parsedProof,
+		now,
+		target,
+		runTransaction,
+	});
+	return { ...result, applyStrategy: APPLY_STRATEGIES.TRANSACTION };
 }
 
 function sanitizedOutput(plan, mode, extra = {}) {
@@ -875,6 +1791,8 @@ async function main(
 		collections: injectedCollections = null,
 		db: injectedDb = null,
 		runTransaction: injectedTransaction = null,
+		resolveStrategy = resolveApplyStrategy,
+		runTokenFactory = createRunToken,
 		skipConnect = false,
 		target = TARGET,
 	} = {}
@@ -914,36 +1832,43 @@ async function main(
 			return sanitizedOutput(plan, "dry_run");
 		}
 
+		const applyStrategy = await resolveStrategy(db.admin());
 		const runTransaction =
-			injectedTransaction ||
-			(async (work) => {
-				const session = await mongoose.startSession();
-				try {
-					let value;
-					await session.withTransaction(
-						async () => {
-							value = await work(session);
-						},
-						{
-							readConcern: { level: "snapshot" },
-							writeConcern: { w: "majority" },
+			applyStrategy === APPLY_STRATEGIES.TRANSACTION
+				? injectedTransaction ||
+				  (async (work) => {
+						const session = await mongoose.startSession();
+						try {
+							let value;
+							await session.withTransaction(
+								async () => {
+									value = await work(session);
+								},
+								{
+									readConcern: { level: "snapshot" },
+									writeConcern: { w: "majority" },
+								}
+							);
+							return value;
+						} finally {
+							await session.endSession();
 						}
-					);
-					return value;
-				} finally {
-					await session.endSession();
-				}
-			});
+				  })
+				: undefined;
 		const result = await applyRecovery({
 			collections,
 			proof: options.proof,
 			now,
 			target,
 			runTransaction,
+			applyStrategy,
+			ownerToken: runTokenFactory(),
 		});
 		return sanitizedOutput(result.plan, "apply", {
 			changedEvents: result.changed,
 			acknowledgementRecovered: result.acknowledgementRecovered,
+			concurrentWinnerObserved: result.concurrentWinnerObserved || false,
+			applyStrategy: result.applyStrategy,
 		});
 	} finally {
 		if (connectedHere) await disconnect();
@@ -971,27 +1896,39 @@ if (require.main === module) {
 }
 
 module.exports = {
+	APPLY_STRATEGIES,
 	BACKUP_COLLECTION,
 	CLOCK_SKEW_MS,
 	COLLECTION_NAMES,
 	MANIFEST_COLLECTION,
 	PROOF_MAX_AGE_MS,
 	REPAIR_ID,
+	STANDALONE_EVENT_HOLD_MS,
+	STANDALONE_LOCK_MS,
 	TARGET,
 	RecoveryError,
 	applyRecovery,
+	applyStandaloneRecovery,
+	applyFullBsonUpdateToDocument,
 	backupRecord,
 	buildEventRequeueUpdate,
+	buildFullDocumentCasFilter,
 	buildPlan,
-	classifyAppliedEvent,
+	classifyDurableEvent,
 	collectionsFromDb,
+	cloneFullBson,
+	createRunToken,
+	finalizeStandaloneManifest,
 	loadScope,
 	main,
 	manifestRecord,
 	parseArguments,
 	parseProof,
 	planBasis,
+	preparedManifestRecord,
 	proofToken,
+	releaseAppliedEvent,
+	resolveApplyStrategy,
 	sanitizedOutput,
 	validateIdentityAndEvidence,
 	validateOriginalFailure,
