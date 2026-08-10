@@ -15,7 +15,8 @@
  * Dry run (default):
  *   node scripts/recoverHotelRunnerStaleMappingEvents20260810.js
  *
- * Apply the exact job/audit reopen transaction:
+ * Apply using a transaction on replica set/mongos, or serialized exact-CAS
+ * writes with compensation on a positively identified standalone primary:
  *   node scripts/recoverHotelRunnerStaleMappingEvents20260810.js --apply \
  *     --repair-id=hotelrunner-stale-mapping-events-20260810-v1
  *
@@ -25,11 +26,16 @@
  */
 
 const path = require("path");
+const crypto = require("node:crypto");
 
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
 const mongoose = require("mongoose");
-const { cloneBson } = require("../services/tripHotelRunnerRepair20260805");
+const BSON = require("bson");
+const {
+	canonicalEjsonSha256,
+	cloneBson,
+} = require("../services/tripHotelRunnerRepair20260805");
 
 mongoose.set("autoIndex", false);
 mongoose.set("autoCreate", false);
@@ -46,6 +52,9 @@ const TERMINAL_MESSAGE =
 	"HotelRunner evidence exists but cannot be selected safely; email fallback was not allowed.";
 const AWAITING_MESSAGE =
 	"Authenticated direct-OTA reservation was archived for HotelRunner-first processing.";
+const TRANSACTION_APPLY_STRATEGY = "snapshot_transaction";
+const STANDALONE_APPLY_STRATEGY = "serialized_full_document_cas";
+const SERIAL_LEASE_MS = 5 * 60 * 1000;
 
 const COLLECTION_NAMES = Object.freeze({
 	events: "hotelrunnerevents",
@@ -173,6 +182,91 @@ const exactArray = (value, expected) =>
 	value.length === expected.length &&
 	value.every((entry, index) => clean(entry) === clean(expected[index]));
 
+// A full-document standalone rollback must retain BSON numeric and binary
+// types. The repair helper's normal operational clone intentionally promotes
+// numbers, so whole-document snapshots use a BSON byte round trip instead.
+const cloneFullBson = (value) =>
+	BSON.deserialize(BSON.serialize({ value }, { ignoreUndefined: false }), {
+		promoteBuffers: false,
+		promoteLongs: false,
+		promoteValues: false,
+	}).value;
+
+const getDocumentPath = (document, dotted) =>
+	String(dotted)
+		.split(".")
+		.reduce((value, key) => value?.[key], document);
+
+function setDocumentPath(document, dotted, value) {
+	const parts = String(dotted).split(".");
+	const final = parts.pop();
+	let cursor = document;
+	for (const part of parts) {
+		if (!cursor[part] || typeof cursor[part] !== "object") cursor[part] = {};
+		cursor = cursor[part];
+	}
+	cursor[final] = cloneFullBson(value);
+}
+
+function unsetDocumentPath(document, dotted) {
+	const parts = String(dotted).split(".");
+	const final = parts.pop();
+	const parent = parts.reduce((value, key) => value?.[key], document);
+	if (parent && typeof parent === "object") delete parent[final];
+}
+
+function applyRecoveryUpdateToDocument(original, update) {
+	const document = cloneFullBson(original);
+	for (const [key, value] of Object.entries(update.$set || {})) {
+		setDocumentPath(document, key, value);
+	}
+	for (const key of Object.keys(update.$unset || {})) {
+		unsetDocumentPath(document, key);
+	}
+	for (const [key, instruction] of Object.entries(update.$push || {})) {
+		const current = Array.isArray(getDocumentPath(document, key))
+			? [...getDocumentPath(document, key)]
+			: [];
+		const additions = Array.isArray(instruction?.$each)
+			? instruction.$each
+			: [instruction];
+		current.push(...cloneFullBson(additions));
+		const sliced = Number.isInteger(instruction?.$slice)
+			? instruction.$slice < 0
+				? current.slice(instruction.$slice)
+				: current.slice(0, instruction.$slice)
+			: current;
+		setDocumentPath(document, key, sliced);
+	}
+	for (const [key, increment] of Object.entries(update.$inc || {})) {
+		setDocumentPath(
+			document,
+			key,
+			Number(getDocumentPath(document, key) || 0) + Number(increment)
+		);
+	}
+	return document;
+}
+
+function buildFullDocumentCasFilter(document) {
+	return {
+		_id: cloneFullBson(document._id),
+		$expr: {
+			$eq: [
+				{ $objectToArray: "$$ROOT" },
+				{
+					$literal: Object.entries(cloneFullBson(document)).map(
+						([key, value]) => ({ k: key, v: value })
+					),
+				},
+			],
+		},
+	};
+}
+
+const newSerialRunId = () => crypto.randomBytes(16).toString("hex");
+const validSerialRunId = (value) => /^[a-f0-9]{32}$/.test(clean(value));
+
 function parseArguments(argv = []) {
 	const options = {
 		apply: false,
@@ -229,8 +323,16 @@ function collectionsFromDb(db) {
 	};
 }
 
-async function loadTargetScope(collections, target, session = null) {
-	const option = session ? { session } : undefined;
+async function loadTargetScope(
+	collections,
+	target,
+	session = null,
+	readOptions = null
+) {
+	const option =
+		session || readOptions
+			? { ...(readOptions || {}), ...(session ? { session } : {}) }
+			: undefined;
 	if (session) {
 		const event = await collections.events.findOne(
 			{ _id: oid(target.eventId) },
@@ -259,16 +361,20 @@ async function loadTargetScope(collections, target, session = null) {
 	return { target, event, mirror, job, audit };
 }
 
-async function loadScopes(collections, session = null) {
+async function loadScopes(collections, session = null, readOptions = null) {
 	if (session) {
 		const scopes = [];
 		for (const target of TARGETS) {
-			scopes.push(await loadTargetScope(collections, target, session));
+			scopes.push(
+				await loadTargetScope(collections, target, session, readOptions)
+			);
 		}
 		return scopes;
 	}
 	return Promise.all(
-		TARGETS.map((target) => loadTargetScope(collections, target, session))
+		TARGETS.map((target) =>
+			loadTargetScope(collections, target, session, readOptions)
+		)
 	);
 }
 
@@ -873,6 +979,11 @@ function reopenedLifecycleMismatches(scope) {
 	);
 	mismatch(
 		errors,
+		validSerialRunId(audit.hotelRunnerFirstFallback?.serialRunId),
+		"audit.hotelRunnerFirstFallback.serialRunId"
+	);
+	mismatch(
+		errors,
 		!dateMs(audit.hotelRunnerFirstFallback?.finalizedAt),
 		"audit.hotelRunnerFirstFallback.finalizedAt"
 	);
@@ -910,6 +1021,39 @@ function reopenedLifecycleMismatches(scope) {
 		.find((entry) => lower(entry?.recoveryId) === RECOVERY_ID);
 	const previousTerminal = recoveryEntry?.previousTerminal;
 	mismatch(errors, Boolean(recoveryEntry), "audit.recoveryHistory");
+	mismatch(
+		errors,
+		clean(recoveryEntry?.serialRunId) ===
+			clean(audit.hotelRunnerFirstFallback?.serialRunId),
+		"audit.recoveryHistory.serialRunId"
+	);
+	mismatch(
+		errors,
+		sameDate(
+			recoveryEntry?.recoveryLeaseUntil,
+			audit.hotelRunnerFirstFallback?.recoveryLeaseUntil
+		),
+		"audit.recoveryHistory.leaseUntil"
+	);
+	mismatch(
+		errors,
+		sameDate(
+			recoveryEntry?.reopenedAt,
+			audit.hotelRunnerFirstFallback?.reopenedAt
+		) && sameDate(audit.updatedAt, audit.hotelRunnerFirstFallback?.reopenedAt),
+		"audit.recoveryHistory.reopenedAt"
+	);
+	mismatch(
+		errors,
+		lower(job.hotelRunnerStaleMappingRecovery?.recoveryId) === RECOVERY_ID &&
+			clean(job.hotelRunnerStaleMappingRecovery?.serialRunId) ===
+				clean(audit.hotelRunnerFirstFallback?.serialRunId) &&
+			sameDate(
+				job.hotelRunnerStaleMappingRecovery?.leaseUntil,
+				audit.hotelRunnerFirstFallback?.recoveryLeaseUntil
+			),
+		"job.recoveryMarker"
+	);
 	mismatch(
 		errors,
 		previousTerminal &&
@@ -1001,12 +1145,99 @@ function convergedMismatches(scope) {
 	return errors;
 }
 
+function recoveryHistoryEntry(audit) {
+	const history = Array.isArray(
+		audit?.hotelRunnerFirstFallback?.recoveryHistory
+	)
+		? audit.hotelRunnerFirstFallback.recoveryHistory
+		: [];
+	return [...history]
+		.reverse()
+		.find((entry) => lower(entry?.recoveryId) === RECOVERY_ID);
+}
+
+function exactRecoveryImage(scope) {
+	const entry = recoveryHistoryEntry(scope.audit);
+	if (!entry) return null;
+	const serialRunId = clean(entry.serialRunId);
+	const reopenedAt = new Date(entry.reopenedAt);
+	const leaseUntil = new Date(entry.recoveryLeaseUntil);
+	const errors = [];
+	mismatch(errors, validSerialRunId(serialRunId), "recovery.serialRunId");
+	mismatch(errors, Number.isFinite(dateMs(reopenedAt)), "recovery.reopenedAt");
+	mismatch(errors, Number.isFinite(dateMs(leaseUntil)), "recovery.leaseUntil");
+	mismatch(
+		errors,
+		dateMs(leaseUntil) === dateMs(reopenedAt) + SERIAL_LEASE_MS,
+		"recovery.leaseDuration"
+	);
+	if (errors.length) return { state: "invalid", errors };
+	const fakeReopenedJob = applyRecoveryUpdateToDocument(
+		scope.job,
+		buildJobReopenUpdate(reopenedAt, serialRunId, leaseUntil)
+	);
+	const terminalJobFilter = buildTerminalJobFilter(scope.target, scope.job);
+	const terminalJob = Object.entries(terminalJobFilter).every(
+		([key, expected]) =>
+			canonicalEjsonSha256(getDocumentPath(scope.job, key)) ===
+			canonicalEjsonSha256(expected)
+	);
+	const auditWithExpectedJobErrors = reopenedLifecycleMismatches({
+		...scope,
+		job: fakeReopenedJob,
+	});
+	if (terminalJob && !auditWithExpectedJobErrors.length) {
+		return {
+			state: "audit_reopened_job_terminal",
+			errors: [],
+			serialRunId,
+			reopenedAt,
+			leaseUntil,
+		};
+	}
+	const reopenedErrors = reopenedLifecycleMismatches(scope);
+	return {
+		state: reopenedErrors.length ? "invalid" : "reopened",
+		errors: reopenedErrors,
+		serialRunId,
+		reopenedAt,
+		leaseUntil,
+	};
+}
+
 function classifyScope(scope) {
 	const identityErrors = identityMismatches(scope);
 	if (identityErrors.length) return { state: "drift", errors: identityErrors };
 
 	const convergedErrors = convergedMismatches(scope);
 	if (!convergedErrors.length) return { state: "converged", errors: [] };
+
+	const recoveryImage = exactRecoveryImage(scope);
+	if (recoveryImage?.state === "audit_reopened_job_terminal") {
+		return {
+			state: "audit_reopened_job_terminal",
+			errors: [],
+			recoveryImage,
+		};
+	}
+	if (recoveryImage?.state === "reopened") {
+		if (!projectedEvidenceMismatches(scope).length) {
+			return { state: "projected_waiting_fallback", errors: [], recoveryImage };
+		}
+		if (!requeuedProjectionMismatches(scope).length) {
+			return {
+				state: "requeued_waiting_projection",
+				errors: [],
+				recoveryImage,
+			};
+		}
+		if (!staleEvidenceMismatches(scope).length) {
+			return { state: "reopened_waiting_mapping", errors: [], recoveryImage };
+		}
+	}
+	if (recoveryImage?.state === "invalid") {
+		return { state: "drift", errors: recoveryImage.errors };
+	}
 
 	const reopenedErrors = reopenedLifecycleMismatches(scope);
 	if (!reopenedErrors.length) {
@@ -1060,7 +1291,9 @@ function buildPlan(scopes, plannedAt = new Date()) {
 		plannedAt: new Date(plannedAt),
 		targets,
 		actions: targets.filter(
-			(entry) => entry.state === "terminal_stale_mapping"
+			(entry) =>
+				entry.state === "terminal_stale_mapping" ||
+				entry.state === "audit_reopened_job_terminal"
 		),
 	};
 }
@@ -1150,7 +1383,23 @@ function buildAwaitingReconciliation(target) {
 	};
 }
 
-function buildJobReopenUpdate(appliedAt) {
+function assertSerialRun(serialRunId, leaseUntil) {
+	if (!validSerialRunId(serialRunId)) {
+		fail(
+			"Standalone recovery requires a cryptographic serial run ID.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_RUN_ID_INVALID"
+		);
+	}
+	if (!Number.isFinite(dateMs(leaseUntil))) {
+		fail(
+			"Standalone recovery requires a bounded lease.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_LEASE_INVALID"
+		);
+	}
+}
+
+function buildJobReopenUpdate(appliedAt, serialRunId, leaseUntil) {
+	assertSerialRun(serialRunId, leaseUntil);
 	const reopenedAt = new Date(appliedAt);
 	const holdUntil = new Date(reopenedAt.getTime() + RECOVERY_HOLD_MS);
 	return {
@@ -1163,6 +1412,12 @@ function buildJobReopenUpdate(appliedAt) {
 			lastErrorCode: "",
 			lastErrorMessage: "",
 			inboundAuditFinalizationStatus: "",
+			hotelRunnerStaleMappingRecovery: {
+				recoveryId: RECOVERY_ID,
+				serialRunId,
+				leaseUntil: new Date(leaseUntil),
+				reopenedAt,
+			},
 			updatedAt: reopenedAt,
 		},
 		$unset: {
@@ -1183,15 +1438,25 @@ function buildJobReopenUpdate(appliedAt) {
 	};
 }
 
-function buildAuditReopenUpdate(target, appliedAt, { job, audit } = {}) {
+function buildAuditReopenUpdate(
+	target,
+	appliedAt,
+	{ job, audit } = {},
+	serialRunId,
+	leaseUntil,
+	ownerToken = serialRunId,
+	ownerLeaseUntil = leaseUntil
+) {
 	if (!job || !audit) {
 		fail(
 			"The exact terminal job and audit are required to preserve recovery history.",
 			"HOTELRUNNER_STALE_MAPPING_RECOVERY_HISTORY_REQUIRED"
 		);
 	}
+	assertSerialRun(serialRunId, leaseUntil);
 	const reopenedAt = new Date(appliedAt);
 	const holdUntil = new Date(reopenedAt.getTime() + RECOVERY_HOLD_MS);
+	const isLockAudit = target.auditId === TARGETS[0].auditId;
 	return {
 		$set: {
 			processingStatus: "awaiting_hotelrunner",
@@ -1223,6 +1488,16 @@ function buildAuditReopenUpdate(target, appliedAt, { job, audit } = {}) {
 			"hotelRunnerFirstFallback.lastErrorCode": "",
 			"hotelRunnerFirstFallback.lastErrorMessage": "",
 			"hotelRunnerFirstFallback.recoveryId": RECOVERY_ID,
+			"hotelRunnerFirstFallback.serialRunId": serialRunId,
+			"hotelRunnerFirstFallback.recoveryLeaseUntil": new Date(leaseUntil),
+			...(isLockAudit
+				? {
+						"hotelRunnerFirstFallback.recoveryOwnerToken": ownerToken,
+						"hotelRunnerFirstFallback.recoveryOwnerLeaseUntil": new Date(
+							ownerLeaseUntil
+						),
+				  }
+				: {}),
 			"hotelRunnerFirstFallback.reopenedAt": reopenedAt,
 			"hotelRunnerFirstFallback.recoveryHoldUntil": holdUntil,
 			updatedAt: reopenedAt,
@@ -1236,6 +1511,8 @@ function buildAuditReopenUpdate(target, appliedAt, { job, audit } = {}) {
 				$each: [
 					{
 						recoveryId: RECOVERY_ID,
+						serialRunId,
+						recoveryLeaseUntil: new Date(leaseUntil),
 						reopenedAt,
 						previousTerminal: {
 							status: "needs_review",
@@ -1263,37 +1540,56 @@ const matchedOne = (result) =>
 	Number(result?.matchedCount ?? result?.n ?? 0) === 1 &&
 	Number(result?.modifiedCount ?? result?.nModified ?? 0) === 1;
 
-async function applyPlan({
+async function applyPlanInTransaction({
 	collections,
 	appliedAt = new Date(),
 	runTransaction = async (work) => work(null),
+	serialRunId = newSerialRunId(),
 }) {
+	const leaseUntil = new Date(appliedAt.getTime() + SERIAL_LEASE_MS);
 	const changed = await runTransaction(async (session) => {
 		let attemptChanged = 0;
 		const liveScopes = await loadScopes(collections, session);
 		const livePlan = buildPlan(liveScopes, appliedAt);
 		for (const entry of livePlan.actions) {
 			const { target, scope } = entry;
+			const recovery = entry.recoveryImage || {
+				serialRunId,
+				reopenedAt: appliedAt,
+				leaseUntil,
+			};
+			if (entry.state === "terminal_stale_mapping") {
+				const auditResult = await collections.audits.updateOne(
+					buildTerminalAuditFilter(target, scope.audit),
+					buildAuditReopenUpdate(
+						target,
+						recovery.reopenedAt,
+						scope,
+						recovery.serialRunId,
+						recovery.leaseUntil
+					),
+					session ? { session } : undefined
+				);
+				if (!matchedOne(auditResult)) {
+					fail(
+						`${target.key}: exact inbound audit compare-and-set failed.`,
+						"HOTELRUNNER_STALE_MAPPING_RECOVERY_AUDIT_CAS_LOST"
+					);
+				}
+			}
 			const jobResult = await collections.jobs.updateOne(
 				buildTerminalJobFilter(target, scope.job),
-				buildJobReopenUpdate(appliedAt),
+				buildJobReopenUpdate(
+					recovery.reopenedAt,
+					recovery.serialRunId,
+					recovery.leaseUntil
+				),
 				session ? { session } : undefined
 			);
 			if (!matchedOne(jobResult)) {
 				fail(
 					`${target.key}: exact fallback job compare-and-set failed.`,
 					"HOTELRUNNER_STALE_MAPPING_RECOVERY_JOB_CAS_LOST"
-				);
-			}
-			const auditResult = await collections.audits.updateOne(
-				buildTerminalAuditFilter(target, scope.audit),
-				buildAuditReopenUpdate(target, appliedAt, scope),
-				session ? { session } : undefined
-			);
-			if (!matchedOne(auditResult)) {
-				fail(
-					`${target.key}: exact inbound audit compare-and-set failed.`,
-					"HOTELRUNNER_STALE_MAPPING_RECOVERY_AUDIT_CAS_LOST"
 				);
 			}
 			attemptChanged += 1;
@@ -1317,6 +1613,385 @@ async function applyPlan({
 	return { changed, plan: afterPlan };
 }
 
+const standaloneReadOptions = Object.freeze({
+	readPreference: "primary",
+	readConcern: { level: "local" },
+	promoteBuffers: false,
+	promoteLongs: false,
+	promoteValues: false,
+});
+
+function standaloneDocumentPlan(collectionName, target, role, before, update) {
+	const originalDocument = cloneFullBson(before);
+	const expectedDocument = applyRecoveryUpdateToDocument(
+		originalDocument,
+		update
+	);
+	return {
+		collectionName,
+		target,
+		role,
+		originalDocument,
+		expectedDocument,
+		originalHash: canonicalEjsonSha256(originalDocument),
+		expectedHash: canonicalEjsonSha256(expectedDocument),
+	};
+}
+
+async function readStandaloneDocument(collections, documentPlan) {
+	return collections[documentPlan.collectionName].findOne(
+		{ _id: cloneFullBson(documentPlan.originalDocument._id) },
+		standaloneReadOptions
+	);
+}
+
+async function replaceStandaloneWithReadback({
+	collections,
+	documentPlan,
+	beforeDocument,
+	afterDocument,
+	beforeHash,
+	afterHash,
+}) {
+	let acknowledgementError = null;
+	try {
+		const result = await collections[documentPlan.collectionName].replaceOne(
+			buildFullDocumentCasFilter(beforeDocument),
+			cloneFullBson(afterDocument),
+			{ writeConcern: { w: "majority" } }
+		);
+		if (result?.acknowledged === false || !matchedOne(result)) {
+			throw new Error(
+				`${documentPlan.target.key}:${documentPlan.role} did not replace exactly one document.`
+			);
+		}
+	} catch (error) {
+		acknowledgementError = error;
+	}
+	const observed = await readStandaloneDocument(collections, documentPlan);
+	const observedHash = observed ? canonicalEjsonSha256(observed) : "";
+	if (observedHash === afterHash) {
+		return {
+			acknowledgementLost: Boolean(acknowledgementError),
+			document: observed,
+		};
+	}
+	if (observedHash === beforeHash) {
+		const error = new RecoveryError(
+			`${documentPlan.target.key}:${
+				documentPlan.role
+			} standalone CAS did not commit${
+				acknowledgementError ? `: ${acknowledgementError.message}` : "."
+			}`,
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_STANDALONE_CAS_LOST"
+		);
+		error.writeResolution = "before";
+		throw error;
+	}
+	const error = new RecoveryError(
+		`${documentPlan.target.key}:${documentPlan.role} is neither the exact before nor after image.`,
+		"HOTELRUNNER_STALE_MAPPING_RECOVERY_THIRD_STATE"
+	);
+	error.writeResolution = "changed_or_missing";
+	throw error;
+}
+
+async function classifyStandaloneDocuments(collections, documentPlans) {
+	const classifications = [];
+	for (const documentPlan of documentPlans) {
+		const observed = await readStandaloneDocument(collections, documentPlan);
+		const hash = observed ? canonicalEjsonSha256(observed) : "";
+		classifications.push({
+			documentPlan,
+			state:
+				hash === documentPlan.originalHash
+					? "original"
+					: hash === documentPlan.expectedHash
+					? "reopened"
+					: "changed_or_missing",
+		});
+	}
+	return classifications;
+}
+
+async function compensateStandaloneApply({
+	collections,
+	documentPlans,
+	cause,
+}) {
+	const errors = [];
+	let classifications = await classifyStandaloneDocuments(
+		collections,
+		documentPlans
+	);
+	const jobs = classifications
+		.filter((entry) => entry.documentPlan.role === "job")
+		.reverse();
+	for (const entry of jobs) {
+		if (entry.state !== "reopened") continue;
+		try {
+			await replaceStandaloneWithReadback({
+				collections,
+				documentPlan: entry.documentPlan,
+				beforeDocument: entry.documentPlan.expectedDocument,
+				afterDocument: entry.documentPlan.originalDocument,
+				beforeHash: entry.documentPlan.expectedHash,
+				afterHash: entry.documentPlan.originalHash,
+			});
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	classifications = await classifyStandaloneDocuments(
+		collections,
+		documentPlans
+	);
+	const audits = classifications
+		.filter((entry) => ["audit", "lock"].includes(entry.documentPlan.role))
+		.reverse();
+	for (const entry of audits) {
+		if (entry.state !== "reopened") continue;
+		const pairedJob = classifications.find(
+			(item) =>
+				item.documentPlan.role === "job" &&
+				item.documentPlan.target.key === entry.documentPlan.target.key
+		);
+		if (pairedJob && pairedJob.state !== "original") continue;
+		try {
+			await replaceStandaloneWithReadback({
+				collections,
+				documentPlan: entry.documentPlan,
+				beforeDocument: entry.documentPlan.expectedDocument,
+				afterDocument: entry.documentPlan.originalDocument,
+				beforeHash: entry.documentPlan.expectedHash,
+				afterHash: entry.documentPlan.originalHash,
+			});
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	const final = await classifyStandaloneDocuments(collections, documentPlans);
+	if (final.some((entry) => entry.state === "changed_or_missing")) {
+		fail(
+			`Standalone recovery stopped on a concurrent third state: ${cause.message}`,
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_MANUAL_INTERVENTION_REQUIRED"
+		);
+	}
+	if (errors.length || !final.every((entry) => entry.state === "original")) {
+		fail(
+			`Standalone compensation could not restore every safe original: ${cause.message}`,
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_COMPENSATION_FAILED"
+		);
+	}
+	fail(
+		`Standalone apply failed and every write was restored exactly: ${cause.message}`,
+		"HOTELRUNNER_STALE_MAPPING_RECOVERY_COMPENSATED"
+	);
+}
+
+async function assertStandaloneOwner(
+	collections,
+	ownerToken,
+	now = new Date()
+) {
+	const lockAudit = await collections.audits.findOne(
+		{ _id: oid(TARGETS[0].auditId) },
+		standaloneReadOptions
+	);
+	if (
+		clean(lockAudit?.hotelRunnerFirstFallback?.recoveryOwnerToken) !==
+			ownerToken ||
+		dateMs(lockAudit?.hotelRunnerFirstFallback?.recoveryOwnerLeaseUntil) <=
+			now.getTime()
+	) {
+		fail(
+			"The standalone recovery ownership lease is not held by this invocation.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_LOCK_LOST"
+		);
+	}
+}
+
+async function applyPlanStandalone({
+	collections,
+	appliedAt = new Date(),
+	serialRunId = newSerialRunId(),
+	clock = () => new Date(),
+}) {
+	const liveScopes = await loadScopes(collections, null, standaloneReadOptions);
+	const livePlan = buildPlan(liveScopes, appliedAt);
+	if (!livePlan.actions.length) {
+		return { changed: 0, acknowledgementsRecovered: 0, plan: livePlan };
+	}
+	const ownerLeaseUntil = new Date(appliedAt.getTime() + SERIAL_LEASE_MS);
+	const recoveryImages = livePlan.targets
+		.map((entry) => entry.recoveryImage)
+		.filter(Boolean);
+	const recoveryImageKeys = new Set(
+		recoveryImages.map((image) =>
+			[
+				clean(image.serialRunId),
+				dateMs(image.reopenedAt),
+				dateMs(image.leaseUntil),
+			].join(":")
+		)
+	);
+	if (recoveryImageKeys.size > 1) {
+		fail(
+			"Existing standalone targets carry mixed recovery images.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_MIXED_IMAGES"
+		);
+	}
+	const existingRecovery = recoveryImages[0] || null;
+	if (
+		existingRecovery &&
+		dateMs(
+			liveScopes[0]?.audit?.hotelRunnerFirstFallback?.recoveryOwnerLeaseUntil
+		) > appliedAt.getTime()
+	) {
+		fail(
+			"A standalone recovery invocation still owns the bounded lease.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_LOCK_HELD"
+		);
+	}
+	const imageRecovery = existingRecovery || {
+		serialRunId,
+		reopenedAt: appliedAt,
+		leaseUntil: ownerLeaseUntil,
+	};
+	const lockPlans = [];
+	const auditPlans = [];
+	const jobPlans = [];
+	if (existingRecovery) {
+		const currentLockAudit = liveScopes[0].audit;
+		const adoptedLockAudit = cloneFullBson(currentLockAudit);
+		setDocumentPath(
+			adoptedLockAudit,
+			"hotelRunnerFirstFallback.recoveryOwnerToken",
+			serialRunId
+		);
+		setDocumentPath(
+			adoptedLockAudit,
+			"hotelRunnerFirstFallback.recoveryOwnerLeaseUntil",
+			ownerLeaseUntil
+		);
+		lockPlans.push({
+			collectionName: "audits",
+			target: TARGETS[0],
+			role: "lock",
+			originalDocument: cloneFullBson(currentLockAudit),
+			expectedDocument: adoptedLockAudit,
+			originalHash: canonicalEjsonSha256(currentLockAudit),
+			expectedHash: canonicalEjsonSha256(adoptedLockAudit),
+		});
+	}
+	for (const entry of livePlan.actions) {
+		const recovery = entry.recoveryImage || imageRecovery;
+		if (entry.state === "terminal_stale_mapping") {
+			auditPlans.push(
+				standaloneDocumentPlan(
+					"audits",
+					entry.target,
+					"audit",
+					entry.scope.audit,
+					buildAuditReopenUpdate(
+						entry.target,
+						recovery.reopenedAt,
+						entry.scope,
+						recovery.serialRunId,
+						recovery.leaseUntil,
+						serialRunId,
+						ownerLeaseUntil
+					)
+				)
+			);
+		}
+		jobPlans.push(
+			standaloneDocumentPlan(
+				"jobs",
+				entry.target,
+				"job",
+				entry.scope.job,
+				buildJobReopenUpdate(
+					recovery.reopenedAt,
+					recovery.serialRunId,
+					recovery.leaseUntil
+				)
+			)
+		);
+	}
+	const documentPlans = [...lockPlans, ...auditPlans, ...jobPlans];
+	let acknowledgementsRecovered = 0;
+	try {
+		for (let index = 0; index < documentPlans.length; index += 1) {
+			if (index > 0)
+				await assertStandaloneOwner(collections, serialRunId, clock());
+			const resolution = await replaceStandaloneWithReadback({
+				collections,
+				documentPlan: documentPlans[index],
+				beforeDocument: documentPlans[index].originalDocument,
+				afterDocument: documentPlans[index].expectedDocument,
+				beforeHash: documentPlans[index].originalHash,
+				afterHash: documentPlans[index].expectedHash,
+			});
+			if (resolution.acknowledgementLost) acknowledgementsRecovered += 1;
+		}
+	} catch (error) {
+		const observedLock = await collections.audits.findOne(
+			{ _id: oid(TARGETS[0].auditId) },
+			standaloneReadOptions
+		);
+		if (
+			clean(observedLock?.hotelRunnerFirstFallback?.recoveryOwnerToken) &&
+			clean(observedLock.hotelRunnerFirstFallback.recoveryOwnerToken) !==
+				serialRunId &&
+			dateMs(observedLock.hotelRunnerFirstFallback.recoveryOwnerLeaseUntil) >
+				clock().getTime()
+		) {
+			fail(
+				"Another standalone recovery invocation owns the bounded lease.",
+				"HOTELRUNNER_STALE_MAPPING_RECOVERY_LOCK_HELD"
+			);
+		}
+		return compensateStandaloneApply({
+			collections,
+			documentPlans,
+			cause: error,
+		});
+	}
+	const final = await classifyStandaloneDocuments(collections, documentPlans);
+	if (!final.every((entry) => entry.state === "reopened")) {
+		return compensateStandaloneApply({
+			collections,
+			documentPlans,
+			cause: new Error("Standalone post-write verification was not all-new."),
+		});
+	}
+	let afterPlan;
+	try {
+		afterPlan = buildPlan(
+			await loadScopes(collections, null, standaloneReadOptions),
+			appliedAt
+		);
+	} catch (error) {
+		return compensateStandaloneApply({
+			collections,
+			documentPlans,
+			cause: error,
+		});
+	}
+	return {
+		changed: livePlan.actions.length,
+		acknowledgementsRecovered,
+		plan: afterPlan,
+	};
+}
+
+async function applyPlan(options) {
+	return options.applyStrategy === STANDALONE_APPLY_STRATEGY
+		? applyPlanStandalone(options)
+		: applyPlanInTransaction(options);
+}
+
 function assertPostconditions(plan) {
 	const incomplete = plan.targets.filter((entry) =>
 		["terminal_stale_mapping", "drift"].includes(entry.state)
@@ -1332,7 +2007,7 @@ function assertPostconditions(plan) {
 	return true;
 }
 
-function sanitizedOutput(plan, mode, changed = 0) {
+function sanitizedOutput(plan, mode, changed = 0, details = {}) {
 	const counts = {};
 	for (const entry of plan.targets) {
 		counts[entry.state] = Number(counts[entry.state] || 0) + 1;
@@ -1342,6 +2017,11 @@ function sanitizedOutput(plan, mode, changed = 0) {
 		recoveryId: RECOVERY_ID,
 		targetCount: TARGETS.length,
 		changedJobAuditPairs: changed,
+		applyStrategy: details.applyStrategy,
+		acknowledgementsRecovered:
+			details.acknowledgementsRecovered == null
+				? undefined
+				: Number(details.acknowledgementsRecovered),
 		counts,
 		targets: plan.targets.map((entry) => ({
 			key: entry.target.key,
@@ -1373,6 +2053,69 @@ async function connectDatabase(database) {
 	});
 }
 
+async function resolveApplyStrategy(admin = mongoose.connection.db?.admin()) {
+	if (!admin || typeof admin.command !== "function") {
+		fail(
+			"MongoDB topology could not be positively inspected before apply.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+		);
+	}
+	let hello;
+	try {
+		hello = await admin.command({ hello: 1 });
+	} catch (error) {
+		if (
+			Number(error?.code) !== 59 &&
+			lower(error?.codeName) !== "commandnotfound"
+		) {
+			throw error;
+		}
+		hello = await admin.command({ isMaster: 1 });
+	}
+	if (Number(hello?.ok) !== 1) {
+		fail(
+			"MongoDB topology inspection did not return ok:1.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+		);
+	}
+	if (hello?.isWritablePrimary !== true && hello?.ismaster !== true) {
+		fail(
+			"The recovery must connect directly to a writable primary or mongos.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_PRIMARY_REQUIRED"
+		);
+	}
+	if (hello?.msg && hello.msg !== "isdbgrid") {
+		fail(
+			"MongoDB returned an unrecognized writable topology.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+		);
+	}
+	if (hello?.setName || hello?.msg === "isdbgrid") {
+		return TRANSACTION_APPLY_STRATEGY;
+	}
+	const nonStandaloneSignals = [
+		hello?.hosts,
+		hello?.passives,
+		hello?.arbiters,
+		hello?.primary,
+		hello?.serviceId,
+	].some((value) =>
+		Array.isArray(value) ? value.length > 0 : value != null && value !== ""
+	);
+	if (
+		nonStandaloneSignals ||
+		hello?.secondary === true ||
+		hello?.arbiterOnly === true ||
+		hello?.hidden === true
+	) {
+		fail(
+			"MongoDB did not positively identify a standalone writable primary.",
+			"HOTELRUNNER_STALE_MAPPING_RECOVERY_TOPOLOGY_UNKNOWN"
+		);
+	}
+	return STANDALONE_APPLY_STRATEGY;
+}
+
 async function main(
 	argv = process.argv.slice(2),
 	{
@@ -1382,6 +2125,7 @@ async function main(
 		db: injectedDb = null,
 		collections: injectedCollections = null,
 		runTransaction: injectedTransaction = null,
+		resolveDatabaseApplyStrategy = resolveApplyStrategy,
 		skipConnect = false,
 	} = {}
 ) {
@@ -1419,6 +2163,7 @@ async function main(
 			return sanitizedOutput(before, "postconditions", 0);
 		}
 		if (!options.apply) return sanitizedOutput(before, "dry_run", 0);
+		const applyStrategy = await resolveDatabaseApplyStrategy(db?.admin?.());
 
 		const runTransaction =
 			injectedTransaction ||
@@ -1444,8 +2189,12 @@ async function main(
 			collections,
 			appliedAt: now,
 			runTransaction,
+			applyStrategy,
 		});
-		return sanitizedOutput(applied.plan, "apply", applied.changed);
+		return sanitizedOutput(applied.plan, "apply", applied.changed, {
+			applyStrategy,
+			acknowledgementsRecovered: applied.acknowledgementsRecovered,
+		});
 	} finally {
 		if (connectedHere) await disconnect();
 	}
@@ -1478,26 +2227,38 @@ module.exports = {
 	RECOVERY_HOLD_MS,
 	RECOVERY_ID,
 	REOPEN_DECISION,
+	SERIAL_LEASE_MS,
 	STALE_MAPPING_CODE,
+	STANDALONE_APPLY_STRATEGY,
 	TARGETS,
 	TERMINAL_CODE,
 	TERMINAL_DECISION,
 	TERMINAL_MESSAGE,
+	TRANSACTION_APPLY_STRATEGY,
 	RecoveryError,
 	applyPlan,
+	applyPlanInTransaction,
+	applyPlanStandalone,
+	applyRecoveryUpdateToDocument,
 	assertPostconditions,
 	buildAuditReopenUpdate,
 	buildAwaitingReconciliation,
 	buildJobReopenUpdate,
+	buildFullDocumentCasFilter,
 	buildPlan,
 	buildTerminalAuditFilter,
 	buildTerminalJobFilter,
+	canonicalEjsonSha256,
 	classifyScope,
+	cloneFullBson,
+	compensateStandaloneApply,
 	collectionsFromDb,
 	identityMismatches,
 	loadScopes,
 	main,
 	parseArguments,
+	replaceStandaloneWithReadback,
+	resolveApplyStrategy,
 	requeuedProjectionMismatches,
 	reopenedLifecycleMismatches,
 	sanitizedOutput,
