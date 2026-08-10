@@ -587,6 +587,7 @@ test("admin status counts only cutoff-eligible push events and archives every co
 test("admin status fails health when the live worker release does not match the backend checkout", async () => {
 	await withSyntheticConfig(async () => {
 		process.env.HOTELRUNNER_PROJECTION_ENABLED = "true";
+		process.env.HOTELRUNNER_ROOM_LIST_SYNC_ENABLED = "true";
 		process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE =
 			"2026-08-09T15:00:00.000Z";
 		const hotelId = "64b000000000000000000001";
@@ -735,6 +736,7 @@ test("admin mapping activation requires room-list proof and repeats that proof i
 			process.env.SUPER_ADMIN_ID = ownerId;
 
 			process.env.HOTELRUNNER_PROJECTION_ENABLED = "true";
+			process.env.HOTELRUNNER_ROOM_LIST_SYNC_ENABLED = "true";
 			process.env.HOTELRUNNER_PROJECTION_NOT_BEFORE =
 				"2026-08-06T23:45:12Z";
 			const activeProjectionResponse = responseRecorder();

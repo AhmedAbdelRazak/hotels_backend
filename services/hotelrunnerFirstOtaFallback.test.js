@@ -726,6 +726,102 @@ test("pending HotelRunner local work blocks lookup and email fallback", async ()
 	assert.deepEqual(context.calls, { lookup: 0, persist: 0, api: 0, fallback: 0 });
 });
 
+test("needs-mapping evidence keeps the email job alive until HotelRunner projection recovers", async () => {
+	let projectionRecovered = false;
+	const context = harness({
+		inspect: async () =>
+			projectionRecovered
+				? {
+						kind: "api",
+						reservationId: RESERVATION_ID,
+						eventId: EVENT_ID,
+				  }
+				: {
+						events: [
+							{
+								_id: EVENT_ID,
+								hotelId: HOTEL_ID,
+								providerNumber: CONFIRMATION,
+								channel: "agoda",
+								hotelRunnerReservationId: "hotelrunner-needs-mapping",
+								status: "needs_mapping",
+								source: "push",
+								errorCode: "hotelrunner_room_mapping_stale",
+								result: {
+									code: "hotelrunner_room_mapping_stale",
+									staleInvCodes: ["INV-1"],
+									missingInvCodes: ["INV-1"],
+								},
+							},
+						],
+						mirrors: [],
+						reservations: [],
+				  },
+	});
+	await enqueueDefault(context);
+	context.clock.advance(DEFAULT_GRACE_MS);
+
+	const waiting = await context.coordinator.runOnce();
+	assert.equal(waiting.status, "retry");
+	assert.equal(waiting.lastDecision, "hotelrunner_projection_pending");
+	assert.equal(waiting.attemptCount, 0);
+	assert.deepEqual(context.calls, {
+		lookup: 0,
+		persist: 0,
+		api: 0,
+		fallback: 0,
+	});
+	assert.equal(context.finalizations.length, 0);
+
+	projectionRecovered = true;
+	context.clock.advance(5_000);
+	const completed = await context.coordinator.runOnce();
+	assert.equal(completed.status, "completed_api");
+	assert.equal(completed.reservationMongoId, RESERVATION_ID);
+	assert.deepEqual(context.calls, {
+		lookup: 0,
+		persist: 0,
+		api: 1,
+		fallback: 0,
+	});
+	assert.equal(context.finalizations.length, 1);
+});
+
+test("a failed currency-waiting event keeps the email job non-consuming for late evidence recovery", async () => {
+	const context = harness({
+		inspect: async () => ({
+			events: [
+				{
+					_id: EVENT_ID,
+					hotelId: HOTEL_ID,
+					providerNumber: CONFIRMATION,
+					channel: "agoda",
+					hotelRunnerReservationId: "hotelrunner-late-evidence",
+					status: "failed",
+					source: "push",
+					errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+				},
+			],
+			mirrors: [],
+			reservations: [],
+		}),
+	});
+	await enqueueDefault(context);
+	context.clock.advance(DEFAULT_GRACE_MS);
+
+	const waiting = await context.coordinator.runOnce();
+	assert.equal(waiting.status, "retry");
+	assert.equal(waiting.lastDecision, "hotelrunner_projection_pending");
+	assert.equal(waiting.attemptCount, 0);
+	assert.equal(context.finalizations.length, 0);
+	assert.deepEqual(context.calls, {
+		lookup: 0,
+		persist: 0,
+		api: 0,
+		fallback: 0,
+	});
+});
+
 test("an API-observed marker survives an event-insert crash and redelivery still wins", async () => {
 	let eventVisible = false;
 	const context = harness({
@@ -1986,6 +2082,242 @@ test("local classifier treats ambiguity and blocked HotelRunner evidence as revi
 		).kind,
 		"needs_review"
 	);
+	for (const [label, event] of [
+		["failed", { status: "failed" }],
+		["quarantined", { status: "quarantined" }],
+		["identity conflict", { status: "pending", channel: "booking" }],
+		[
+			"manual mapping",
+			{
+				status: "needs_mapping",
+				result: { code: "hotelrunner_room_mapping_required" },
+			},
+		],
+		[
+			"integrity conflict",
+			{
+				status: "needs_mapping",
+				integrityConflict: true,
+				result: { code: "hotelrunner_room_mapping_stale" },
+			},
+		],
+	]) {
+		assert.equal(
+			classifyLocalHotelRunnerState(
+				{
+					events: [
+						{
+							hotelId: HOTEL_ID,
+							providerNumber: CONFIRMATION,
+							channel: "agoda",
+							hotelRunnerReservationId: "one",
+							...event,
+						},
+					],
+					mirrors: [],
+					reservations: [],
+				},
+				identity
+			).kind,
+			"needs_review",
+			label
+		);
+	}
+	assert.equal(
+		classifyLocalHotelRunnerState(
+			{
+				events: [],
+				mirrors: [
+					{
+						hotelId: HOTEL_ID,
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+						hotelRunnerReservationId: "one",
+						projectionStatus: "pending",
+						identityConflict: true,
+					},
+				],
+				reservations: [],
+			},
+			identity
+		).kind,
+		"needs_review"
+	);
+});
+
+test("local classifier keeps exact stale-mapping event and mirror evidence pending", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	for (const [kind, raw] of [
+		[
+			"event",
+			{
+				events: [
+					{
+						_id: EVENT_ID,
+						hotelId: HOTEL_ID,
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+						hotelRunnerReservationId: "one",
+						status: "needs_mapping",
+						errorCode: "hotelrunner_room_mapping_stale",
+						result: { code: "hotelrunner_room_mapping_stale" },
+					},
+				],
+				mirrors: [],
+				reservations: [],
+			},
+		],
+		[
+			"mirror",
+			{
+				events: [],
+				mirrors: [
+					{
+						_id: "6a789cf2f77fb5bdaf73b0b4",
+						hotelId: HOTEL_ID,
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+						hotelRunnerReservationId: "one",
+						projectionStatus: "needs_mapping",
+						lastErrorCode: "hotelrunner_room_mapping_stale",
+					},
+				],
+				reservations: [],
+			},
+		],
+	]) {
+		const result = classifyLocalHotelRunnerState(raw, identity);
+		assert.equal(result.kind, "pending", kind);
+		assert.equal(result.code, "hotelrunner_mapping_pending", kind);
+	}
+});
+
+test("local classifier reserves only the exact safe failed currency wait for recovery", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	const classify = (event) =>
+		classifyLocalHotelRunnerState(
+			{
+				events: [
+					{
+						_id: EVENT_ID,
+						hotelId: HOTEL_ID,
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+						hotelRunnerReservationId: "one",
+						source: "push",
+						status: "failed",
+						...event,
+					},
+				],
+				mirrors: [],
+				reservations: [],
+			},
+			identity
+		);
+
+	assert.deepEqual(
+		classify({
+			errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+		}),
+		{
+			kind: "pending",
+			code: "hotelrunner_late_evidence_pending",
+			eventId: EVENT_ID,
+			eventSource: "push",
+			lookupEventProjectable: true,
+		}
+	);
+	for (const [label, event] of [
+		["other failure", { errorCode: "hotelrunner_reservation_cas_conflict" }],
+		[
+			"integrity reason",
+			{
+				errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+				integrityReason: "message_uid_payload_conflict",
+			},
+		],
+		[
+			"integrity conflict",
+			{
+				errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+				integrityConflict: true,
+			},
+		],
+		[
+			"active lease",
+			{
+				errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+				leaseOwner: "another-worker",
+				leaseUntil: new Date("2026-08-10T17:00:00.000Z"),
+			},
+		],
+		[
+			"stale lease residue",
+			{
+				errorCode: "hotelrunner_currency_waiting_for_email_bridge",
+				leaseOwner: "",
+				leaseUntil: new Date("2026-08-10T15:00:00.000Z"),
+			},
+		],
+	]) {
+		const result = classify(event);
+		assert.equal(result.kind, "needs_review", label);
+		assert.equal(result.code, "hotelrunner_local_record_blocked", label);
+	}
+});
+
+test("local classifier requires matching event error and result codes before treating mapping as recoverable", () => {
+	const identity = buildIdentity({
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		confirmationNumber: CONFIRMATION,
+	});
+	for (const [label, evidence] of [
+		[
+			"missing event error code",
+			{ result: { code: "hotelrunner_room_mapping_stale" } },
+		],
+		[
+			"missing projection result code",
+			{ errorCode: "hotelrunner_room_mapping_stale", result: {} },
+		],
+		[
+			"contradictory event error code",
+			{
+				errorCode: "hotelrunner_room_mapping_required",
+				result: { code: "hotelrunner_room_mapping_stale" },
+			},
+		],
+	]) {
+		const result = classifyLocalHotelRunnerState(
+			{
+				events: [
+					{
+						_id: EVENT_ID,
+						hotelId: HOTEL_ID,
+						providerNumber: CONFIRMATION,
+						channel: "agoda",
+						hotelRunnerReservationId: "one",
+						status: "needs_mapping",
+						...evidence,
+					},
+				],
+				mirrors: [],
+				reservations: [],
+			},
+			identity
+		);
+		assert.equal(result.kind, "needs_review", label);
+		assert.equal(result.code, "hotelrunner_local_record_blocked", label);
+	}
 });
 
 test("lookup classifier never calls an empty, malformed, or mismatched result exact", () => {
