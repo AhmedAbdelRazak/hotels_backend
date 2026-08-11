@@ -848,98 +848,89 @@ test("queued Trip API creation bridge accepts exact stored-FX evidence and exact
 	assert.equal(roomVerified.ok, true);
 });
 
-test("queued Trip bridge rematerializes only a legacy one-cent property-money drift", async () => {
-	const fixture = await queuedTripFixture();
-	fixture.audit.normalizedReservation = {
-		...fixture.inbound,
-		amount: 81.31,
-		totalAmountSar: 81.31,
-		paymentSummary: {
-			...fixture.inbound.paymentSummary,
-			totalGuestPaymentAmount: 81.31,
-		},
-	};
-	Object.assign(
-		fixture.job,
-		createArchiveFingerprint({
-			identity: {
-				hotelId: fixture.config.hotelId,
-				provider: "trip",
-				confirmationNumber: fixture.job.confirmationNumber,
-			},
-			audit: fixture.audit,
-		})
-	);
+test("queued Trip bridge rematerializes verified property money through an inclusive 50-cent boundary", async (t) => {
+	const cases = [
+		["one cent", -1, 1, true],
+		["49 cents", 49, -49, true],
+		["positive and negative 50 cents", 50, -50, true],
+		["negative and positive 50 cents", -50, 50, true],
+		["51-cent gross alias", -51, 50, false],
+		["51-cent payout alias", 50, 51, false],
+	];
 
-	const result = await loadHotelRunnerQueuedEmailCommercialBridge(
-		{
-			normalized: fixture.normalized,
-			provider: "trip",
-			hotel: fixture.hotel,
-			config: fixture.config,
-		},
-		{
-			FallbackJobModel: jobsModelFor([fixture.job]),
-			InboundEmailModel: modelFor(fixture.audit),
-			resolveArchivedHotel: async () => fixture.hotel,
-			now: () => new Date("2026-08-09T06:01:00.000Z"),
-		}
-	);
+	for (const [name, grossDriftCents, payoutDriftCents, corrected] of cases) {
+		await t.test(name, async () => {
+			const fixture = await queuedTripFixture();
+			const archivedGross = (8132 + grossDriftCents) / 100;
+			const archivedPayout = (6916 + payoutDriftCents) / 100;
+			fixture.audit.normalizedReservation = {
+				...fixture.inbound,
+				amount: archivedGross,
+				totalAmountSar: archivedGross,
+				totalPayoutSar: archivedPayout,
+				netAfterExpensesTotal: archivedPayout,
+				paymentSummary: {
+					...fixture.inbound.paymentSummary,
+					totalGuestPaymentAmount: archivedGross,
+					totalPayoutAmount: archivedPayout,
+				},
+			};
+			Object.assign(
+				fixture.job,
+				createArchiveFingerprint({
+					identity: {
+						hotelId: fixture.config.hotelId,
+						provider: "trip",
+						confirmationNumber: fixture.job.confirmationNumber,
+					},
+					audit: fixture.audit,
+				})
+			);
+			const archivedBefore = JSON.stringify(
+				fixture.audit.normalizedReservation
+			);
 
-	assert.equal(result.ok, true, JSON.stringify(result));
-	assert.equal(result.evidence.grossTotalSar, 81.32);
-	assert.equal(result.normalizedReservation.amount, 81.32);
-	assert.equal(result.normalizedReservation.totalAmountSar, 81.32);
-	assert.equal(
-		result.normalizedReservation.paymentSummary.totalGuestPaymentAmount,
-		81.32
-	);
-	assert.equal(
-		fixture.audit.normalizedReservation.paymentSummary.totalGuestPaymentAmount,
-		81.31,
-		"the immutable archived audit must not be rewritten"
-	);
+			const result = await loadHotelRunnerQueuedEmailCommercialBridge(
+				{
+					normalized: fixture.normalized,
+					provider: "trip",
+					hotel: fixture.hotel,
+					config: fixture.config,
+				},
+				{
+					FallbackJobModel: jobsModelFor([fixture.job]),
+					InboundEmailModel: modelFor(fixture.audit),
+					resolveArchivedHotel: async () => fixture.hotel,
+					now: () => new Date("2026-08-09T06:01:00.000Z"),
+				}
+			);
 
-	fixture.audit.normalizedReservation = {
-		...fixture.audit.normalizedReservation,
-		amount: 81.3,
-		totalAmountSar: 81.3,
-		paymentSummary: {
-			...fixture.audit.normalizedReservation.paymentSummary,
-			totalGuestPaymentAmount: 81.3,
-		},
-	};
-	Object.assign(
-		fixture.job,
-		createArchiveFingerprint({
-			identity: {
-				hotelId: fixture.config.hotelId,
-				provider: "trip",
-				confirmationNumber: fixture.job.confirmationNumber,
-			},
-			audit: fixture.audit,
-		})
-	);
-	const outOfBounds = await loadHotelRunnerQueuedEmailCommercialBridge(
-		{
-			normalized: fixture.normalized,
-			provider: "trip",
-			hotel: fixture.hotel,
-			config: fixture.config,
-		},
-		{
-			FallbackJobModel: jobsModelFor([fixture.job]),
-			InboundEmailModel: modelFor(fixture.audit),
-			resolveArchivedHotel: async () => fixture.hotel,
-			now: () => new Date("2026-08-09T06:01:00.000Z"),
-		}
-	);
-	assert.equal(outOfBounds.ok, true, JSON.stringify(outOfBounds));
-	assert.equal(
-		outOfBounds.normalizedReservation.paymentSummary.totalGuestPaymentAmount,
-		81.3,
-		"a drift larger than one cent must remain untouched and fail closed later"
-	);
+			assert.equal(result.ok, true, JSON.stringify(result));
+			assert.equal(result.evidence.grossTotalSar, 81.32);
+			assert.equal(result.evidence.payoutTotalSar, 69.16);
+			const expectedGross = corrected ? 81.32 : archivedGross;
+			const expectedPayout = corrected ? 69.16 : archivedPayout;
+			for (const value of [
+				result.normalizedReservation.amount,
+				result.normalizedReservation.totalAmountSar,
+				result.normalizedReservation.paymentSummary.totalGuestPaymentAmount,
+			]) {
+				assert.equal(value, expectedGross);
+			}
+			for (const value of [
+				result.normalizedReservation.totalPayoutSar,
+				result.normalizedReservation.netAfterExpensesTotal,
+				result.normalizedReservation.paymentSummary.totalPayoutAmount,
+			]) {
+				assert.equal(value, expectedPayout);
+			}
+			assert.equal(
+				JSON.stringify(fixture.audit.normalizedReservation),
+				archivedBefore,
+				"the immutable archived audit must not be rewritten"
+			);
+		});
+	}
 });
 
 test("a coordinator-owned nonexpired processing job remains eligible for the read-only API bridge", async () => {
@@ -1117,6 +1108,61 @@ test("queued creation bridge rejects terminal, expired, tampered, manual, and ro
 		);
 		assert.equal(result.ok, false);
 		assert.equal(result.reason, "queued_room_identity_mismatch");
+	});
+
+	await t.test("HotelRunner source room label owns allocation across known rate suffixes", async () => {
+		const fixture = await queuedTripFixture();
+		const bridge = await loadHotelRunnerQueuedEmailCommercialBridge(
+			{
+				normalized: fixture.normalized,
+				provider: "trip",
+				hotel: fixture.hotel,
+				config: fixture.config,
+			},
+			{
+				FallbackJobModel: jobsModelFor([fixture.job]),
+				InboundEmailModel: modelFor(fixture.audit),
+				resolveArchivedHotel: async () => fixture.hotel,
+				now: () => new Date("2026-08-09T06:01:00.000Z"),
+			}
+		);
+		const resolvedRoom = {
+			roomDetails: fixture.hotel.roomCountDetails[0],
+			mapping: {
+				localRoomConfigId: fixture.hotel.roomCountDetails[0]._id,
+			},
+			sourceRoom: {
+				namePresentation:
+					"Double Room - Non-Refundable - 2 Occupancy - NR",
+			},
+		};
+		const accepted = validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+			bridge,
+			{ hotel: fixture.hotel, resolvedRooms: [resolvedRoom] },
+			{
+				resolveArchivedRoom: () =>
+					assert.fail("the exact API source label must avoid PMS-name guessing"),
+			}
+		);
+		assert.equal(accepted.ok, true, JSON.stringify(accepted));
+
+		const rejected = validateHotelRunnerQueuedEmailCommercialBridgeRooms(
+			bridge,
+			{
+				hotel: fixture.hotel,
+				resolvedRooms: [
+					{
+						...resolvedRoom,
+						sourceRoom: {
+							namePresentation: "Double Room - Surprise Upgrade",
+						},
+					},
+				],
+			},
+			{ resolveArchivedRoom: () => null }
+		);
+		assert.equal(rejected.ok, false);
+		assert.equal(rejected.reason, "queued_room_identity_mismatch");
 	});
 });
 

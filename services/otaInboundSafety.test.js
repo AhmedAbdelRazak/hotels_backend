@@ -80,6 +80,7 @@ const {
 } = require("./otaReservationMapper");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 const {
+	buildHotelRunnerUnresolvedCommercialEvidence,
 	validateOtaCommercialEvidence,
 } = require("./otaCommercialEvidence");
 const {
@@ -12119,6 +12120,97 @@ test("direct-owned commercial enrichment requires one unique HotelRunner amount 
 		evidence,
 	};
 	assert.equal(directHotelRunnerEmailCommercialGuard(base).ok, true);
+	const unresolvedApiEvidence = buildHotelRunnerUnresolvedCommercialEvidence({
+		provider: "booking",
+		sourceType: "hotelrunner_webhook",
+		reportedAmount: 80,
+		reportedCurrency: "SAR",
+		propertyCurrency: "SAR",
+		sourceHash: "a".repeat(64),
+		sourceTimestamp: "2026-08-06T14:00:00.000Z",
+		sourceId: "hotelrunner-unresolved-placeholder",
+	});
+	const unresolvedRooms = existing.pickedRoomsPricing.map((room) => ({
+		...room,
+		pricingByDay: room.pricingByDay.map((day) => ({
+			...day,
+			price: null,
+			clientPrice: null,
+			mainPrice: null,
+			totalPriceWithCommission: null,
+			hotelRunnerSourcePrice: 40,
+		})),
+	}));
+	const unresolvedExisting = makeDirectHotelRunnerCommercialReservation({
+		total_amount: null,
+		pickedRoomsType: unresolvedRooms,
+		pickedRoomsPricing: structuredClone(unresolvedRooms),
+		adminPricing: {
+			...existing.adminPricing,
+			clientTotal: null,
+			sourceAmount: 80,
+			sourceCurrency: "SAR",
+			propertyCurrency: "SAR",
+			hotelRunnerAmountRole: "unknown",
+			payoutFallbackReason: "hotelrunner_payout_not_provided",
+		},
+		ota_financial_summary: {
+			...existing.ota_financial_summary,
+			clientTotal: null,
+			sourceAmount: 80,
+			sourceCurrency: "SAR",
+			propertyCurrency: "SAR",
+			hotelRunnerAmountRole: "unknown",
+			payoutFallbackReason: "hotelrunner_payout_not_provided",
+		},
+		supplierData: {
+			...existing.supplierData,
+			otaCommercialEvidence: unresolvedApiEvidence,
+			hotelRunner: {
+				...existing.supplierData.hotelRunner,
+				pricing: { currency: "SAR", grandTotal: 80 },
+			},
+		},
+	});
+	const unresolvedGuard = directHotelRunnerEmailCommercialGuard({
+		...base,
+		existing: unresolvedExisting,
+	});
+	assert.equal(unresolvedGuard.ok, true, JSON.stringify(unresolvedGuard));
+	assert.equal(unresolvedGuard.hotelRunnerReportedTotal, 80);
+	assert.equal(unresolvedGuard.reportedTotalRole, "payout");
+	for (const [label, mutate] of [
+		[
+			"cross-surface API amount mismatch",
+			(candidate) => {
+				candidate.supplierData.hotelRunner.pricing.grandTotal = 80.03;
+			},
+		],
+		[
+			"tampered unresolved evidence hash",
+			(candidate) => {
+				candidate.supplierData.otaCommercialEvidence.hotelRunnerReportedAmount.amount =
+					80.01;
+			},
+		],
+		[
+			"missing redundant API summary amount",
+			(candidate) => {
+				delete candidate.ota_financial_summary.sourceAmount;
+			},
+		],
+	]) {
+		const candidate = structuredClone(unresolvedExisting);
+		mutate(candidate);
+		assert.equal(
+			directHotelRunnerEmailCommercialGuard({
+				...base,
+				existing: candidate,
+			}).reason,
+			"hotelrunner_amount",
+			label
+		);
+	}
 	const roleToleranceExisting = makeDirectHotelRunnerCommercialReservation({
 		total_amount: 99.5,
 		adminPricing: { ...existing.adminPricing, clientTotal: 99.5 },
@@ -12352,6 +12444,263 @@ test("direct-owned commercial enrichment requires one unique HotelRunner amount 
 		null,
 		"a source string and structurally plausible but non-canonical FX object must not establish trusted conversion evidence"
 	);
+});
+
+test("production-shaped Agoda API placeholder enriches in place once and never creates a duplicate", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const originalReservationCreate = Reservations.create;
+	const originalHotelFind = HotelDetails.find;
+	const confirmationNumber = "2040450395";
+	const base = makeDirectHotelRunnerCommercialReservation();
+	const unresolvedApiEvidence = buildHotelRunnerUnresolvedCommercialEvidence({
+		provider: "agoda",
+		sourceType: "hotelrunner_webhook",
+		reportedAmount: 53.97,
+		reportedCurrency: "SAR",
+		propertyCurrency: "SAR",
+		sourceHash: "b".repeat(64),
+		sourceTimestamp: "2026-08-11T17:58:22.000Z",
+		sourceId: "hotelrunner-event-2040450395",
+	});
+	const sourceRoomName =
+		"Deluxe Family Room 2 - Non-Refundable - 2 Occupancy - NR";
+	const roomRow = {
+		...base.pickedRoomsPricing[0],
+		sourceRoomName,
+		pricingByDay: [
+			{
+				date: "2026-08-14",
+				price: null,
+				clientPrice: null,
+				mainPrice: null,
+				rootPrice: 75,
+				totalPriceWithCommission: null,
+				totalPriceWithoutCommission: 75,
+				netAfterExpenses: null,
+				netAfterOtaExpenses: null,
+				otaExpenseAmount: null,
+				platformMargin: null,
+				hotelRunnerSourcePrice: 53.97,
+			},
+		],
+	};
+	let current = makeDirectHotelRunnerCommercialReservation({
+		_id: "agoda-api-placeholder-2040450395",
+		reservation_id: confirmationNumber,
+		otaIdentityKey: `agoda:${confirmationNumber}`,
+		booking_source: "Agoda",
+		customer_details: {
+			...base.customer_details,
+			confirmation_number2: confirmationNumber,
+			booking_source: "Agoda",
+		},
+		state: "OTA Platform Review",
+		reservation_status: "OTA Platform Review",
+		checkin_date: "2026-08-14",
+		checkout_date: "2026-08-15",
+		total_amount: null,
+		sub_total: 75,
+		pickedRoomsType: [roomRow],
+		pickedRoomsPricing: [structuredClone(roomRow)],
+		adminPricing: {
+			...base.adminPricing,
+			clientTotal: null,
+			rootTotal: 75,
+			sourceAmount: 53.97,
+			sourceCurrency: "SAR",
+			propertyCurrency: "SAR",
+			hotelRunnerAmountRole: "unknown",
+			payoutFallbackReason: "hotelrunner_payout_not_provided",
+		},
+		adminPricingVisibility: {
+			rootOnlyForHotelManagement: true,
+			source: "hotelrunner_api",
+			appliedAt: new Date("2026-08-11T17:58:27.000Z"),
+			appliedBy: null,
+		},
+		ota_financial_summary: {
+			...base.ota_financial_summary,
+			show: false,
+			clientTotal: null,
+			hotelVisibleAmount: 75,
+			sourceAmount: 53.97,
+			sourceCurrency: "SAR",
+			propertyCurrency: "SAR",
+			hotelRunnerAmountRole: "unknown",
+			payoutFallbackReason: "hotelrunner_payout_not_provided",
+		},
+		otaPlatformReview: {
+			status: "pending",
+			source: "hotelrunner_api",
+			inboundEmailId: "",
+			provider: "agoda",
+			providerLabel: "Agoda",
+			confirmationNumber,
+			createdAt: new Date("2026-08-11T17:58:27.000Z"),
+			releasedAt: null,
+			releasedBy: null,
+			priceAtRelease: null,
+			hotelRunnerManaged: true,
+			hotelRunnerLinkedAt: new Date("2026-08-11T17:58:27.000Z"),
+			lastHotelRunnerUpdatedAt: new Date("2026-08-11T17:58:27.000Z"),
+			hotelAssignmentRequired: false,
+			hotelAssignmentStatus: "assigned",
+			assignedHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			assignedHotelName: "Zad Ajyad",
+			assignedAt: new Date("2026-08-11T17:58:27.000Z"),
+			roomMappingStatus: "mapped",
+			roomMappingHotelId: HOTELRUNNER_COMMERCIAL_HOTEL_ID,
+			lastUpdatedAt: new Date("2026-08-11T17:58:27.000Z"),
+		},
+		supplierData: {
+			...base.supplierData,
+			supplierName: "Agoda",
+			suppliedBookingNo: confirmationNumber,
+			otaConfirmationNumber: confirmationNumber,
+			platformConfirmationNumber: confirmationNumber,
+			otaProvider: "agoda",
+			otaCommercialEvidence: unresolvedApiEvidence,
+			hotelRunner: {
+				...base.supplierData.hotelRunner,
+				pricing: { currency: "SAR", grandTotal: 53.97 },
+			},
+		},
+	});
+	const normalized = makeVerifiedHotelRunnerCommercialEmail({
+		inboundEmailId: "agoda-direct-2040450395",
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		roomName: "Deluxe Family Room 2",
+		checkinDate: "2026-08-14",
+		checkoutDate: "2026-08-15",
+		amount: 87.22,
+		totalAmountSar: 87.22,
+		sourceAmount: 87.22,
+		totalPayoutSar: 53.97,
+		netAfterExpensesTotal: 53.97,
+		paymentSummary: {
+			sourceCurrency: "SAR",
+			sourceTotalGuestPaymentAmount: 87.22,
+			sourceTotalPayoutAmount: 53.97,
+			totalGuestPaymentAmount: 87.22,
+			totalPayoutAmount: 53.97,
+			currency: "SAR",
+			exchangeRateToSar: 1,
+		},
+		source: {
+			receivedAt: "2026-08-11T17:57:03.000Z",
+			messageId: "agoda-direct-2040450395@agoda.com",
+		},
+	});
+	const hotel = hotelRunnerCommercialHotel();
+	hotel.roomCountDetails[0] = {
+		...hotel.roomCountDetails[0],
+		defaultCost: 75,
+		pricingRate: [{ calendarDate: "2026-08-14", rootPrice: 75 }],
+	};
+	const staleLegacySurfaces = structuredClone(current);
+	staleLegacySurfaces.total_amount = 87.22;
+	staleLegacySurfaces.adminPricing.clientTotal = 87.22;
+	staleLegacySurfaces.ota_financial_summary.clientTotal = 87.22;
+	staleLegacySurfaces.supplierData.hotelRunner.pricing.grandTotal = 54.48;
+	const directEvidence = buildHotelRunnerEmailCommercialEvidence(normalized, {
+		appliedAt: new Date("2026-08-11T18:00:03.000Z"),
+	});
+	assert.ok(directEvidence);
+	assert.equal(
+		directHotelRunnerEmailCommercialGuard({
+			normalized,
+			existing: staleLegacySurfaces,
+			hotelDetails: hotel,
+			matchedReservationBy: ["otaIdentityKey"],
+			evidence: directEvidence,
+		}).reason,
+		"hotelrunner_amount",
+		"stale 87.22 client surfaces must never outrank a mismatched HotelRunner API tuple"
+	);
+	let writes = 0;
+	let createCalls = 0;
+	let writtenUpdate = null;
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return [current];
+		},
+	});
+	Reservations.updateOne = async (_filter, update) => {
+		writes += 1;
+		writtenUpdate = update;
+		current = applyDottedCommercialSet(current, update.$set);
+		current.__v += 1;
+		return { matchedCount: 1 };
+	};
+	Reservations.create = async () => {
+		createCalls += 1;
+		assert.fail("the direct email must never create beside an API reservation");
+	};
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [hotel];
+		},
+	});
+
+	try {
+		const first = await reconcileOtaReservation(normalized);
+		assert.equal(first.status, "updated", JSON.stringify(first));
+		assert.equal(first.actionTaken, "commercial_enrichment");
+		assert.equal(first.reservationId, current._id);
+		assert.equal(createCalls, 0);
+		assert.equal(writes, 1);
+		assert.equal(writtenUpdate.$set.total_amount, 87.22);
+		assert.equal(writtenUpdate.$set["adminPricing.clientTotal"], 87.22);
+		assert.equal(
+			writtenUpdate.$set["adminPricing.netAfterExpensesTotal"],
+			53.97
+		);
+		assert.equal(writtenUpdate.$set["adminPricing.otaExpenseTotal"], 33.25);
+		assert.equal(current.supplierData.otaSourceAuthority, 4);
+		assert.equal(
+			current.supplierData.hotelRunner.pricing.grandTotal,
+			53.97,
+			"commercial enrichment must preserve the raw HotelRunner API amount"
+		);
+		for (const protectedPath of [
+			"reservation_id",
+			"otaIdentityKey",
+			"hotelId",
+			"supplierData.hotelRunner.reservationId",
+		]) {
+			assert.equal(
+				Object.prototype.hasOwnProperty.call(writtenUpdate.$set, protectedPath),
+				false,
+				`${protectedPath} must remain API-owned`
+			);
+		}
+
+		const second = await reconcileOtaReservation(normalized);
+		assert.equal(second.status, "duplicate_reservation", JSON.stringify(second));
+		assert.equal(second.actionTaken, "skipped");
+		assert.equal(
+			second.skipReason,
+			"hotelrunner_email_commercial_evidence_already_applied"
+		);
+		assert.equal(createCalls, 0);
+		assert.equal(writes, 1, "an identical retry must not write twice");
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		Reservations.create = originalReservationCreate;
+		HotelDetails.find = originalHotelFind;
+	}
 });
 
 test("direct-owned stay mismatch and protected state block writes while partial evidence attaches provenance only", async () => {
