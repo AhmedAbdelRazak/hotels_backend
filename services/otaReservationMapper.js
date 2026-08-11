@@ -34,6 +34,11 @@ const {
 	withHotelBaseCommercialEvidence,
 } = require("./otaCommercialEvidence");
 const {
+	decimalMoneyCents,
+	multipliedMoneyCents,
+	roundedMoneyProduct,
+} = require("./otaMoney");
+const {
 	hashStable: canonicalHotelRunnerFallbackHash,
 } = require("./hotelrunnerFirstOtaFallbackCanonical");
 const {
@@ -530,6 +535,13 @@ function roomTypeMatches(roomType = "", mappedRoomType = "") {
 function round2(value) {
 	const parsed = Number(value || 0);
 	return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : 0;
+}
+
+function multiplyMoney2(left, right) {
+	const product = roundedMoneyProduct(left, right);
+	return product === null
+		? round2(Number(left || 0) * Number(right || 0))
+		: product;
 }
 
 function allocateAmountAcrossSlots(totalAmount, slots) {
@@ -1252,7 +1264,7 @@ function getSarConversionMeta(amount, currency) {
 		exchangeRateToSar: exchange.rate ?? null,
 		exchangeRateSource: exchange.source,
 		totalAmountSar: exchange.rate
-			? round2(numericAmount * exchange.rate)
+			? multiplyMoney2(numericAmount, exchange.rate)
 			: null,
 		convertedAt: new Date().toISOString(),
 	};
@@ -1354,7 +1366,7 @@ async function getSarConversionMetaAsync(
 		exchangeRateToSar: exchange.rate ?? null,
 		exchangeRateSource: exchange.source,
 		totalAmountSar: exchange.rate
-			? round2(numericAmount * exchange.rate)
+			? multiplyMoney2(numericAmount, exchange.rate)
 			: null,
 		convertedAt,
 		currencyConversionEvidence: trustedEvidence,
@@ -10480,61 +10492,6 @@ function commercialEvidenceAmountMatches(actual, expected) {
 	return Number.isFinite(numeric) && Math.abs(round2(numeric) - expected) <= 0.02;
 }
 
-function decimalMoneyParts(value) {
-	const source = typeof value === "string" ? value.trim() : String(value);
-	const match = source.match(/^([+-]?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$/i);
-	if (!match) return null;
-	const exponent = Number(match[4] || 0);
-	if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100) return null;
-	const fraction = match[3] || "";
-	const digits = `${match[2]}${fraction}`.replace(/^0+(?=\d)/, "");
-	return {
-		coefficient: BigInt(`${match[1] === "-" ? "-" : ""}${digits || "0"}`),
-		scale: fraction.length - exponent,
-	};
-}
-
-function roundedDecimalInteger(parts, targetScale) {
-	if (!parts || !Number.isSafeInteger(targetScale)) return null;
-	const shift = targetScale - parts.scale;
-	let result;
-	if (shift >= 0) {
-		result = parts.coefficient * 10n ** BigInt(shift);
-	} else {
-		const divisor = 10n ** BigInt(-shift);
-		const negative = parts.coefficient < 0n;
-		const absolute = negative ? -parts.coefficient : parts.coefficient;
-		const quotient = absolute / divisor;
-		const remainder = absolute % divisor;
-		const rounded = remainder * 2n >= divisor ? quotient + 1n : quotient;
-		result = negative ? -rounded : rounded;
-	}
-	if (
-		result > BigInt(Number.MAX_SAFE_INTEGER) ||
-		result < BigInt(Number.MIN_SAFE_INTEGER)
-	) {
-		return null;
-	}
-	return Number(result);
-}
-
-function decimalMoneyCents(value) {
-	return roundedDecimalInteger(decimalMoneyParts(value), 2);
-}
-
-function multipliedMoneyCents(left, right) {
-	const leftParts = decimalMoneyParts(left);
-	const rightParts = decimalMoneyParts(right);
-	if (!leftParts || !rightParts) return null;
-	return roundedDecimalInteger(
-		{
-			coefficient: leftParts.coefficient * rightParts.coefficient,
-			scale: leftParts.scale + rightParts.scale,
-		},
-		2
-	);
-}
-
 function commercialEvidenceExactCentsMatch(actual, expected) {
 	const actualCents = decimalMoneyCents(actual);
 	const expectedCents = decimalMoneyCents(expected);
@@ -14332,7 +14289,7 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 					sourceCurrency,
 					exchangeRateToSar: suppliedEvidence.rate,
 					exchangeRateSource: "exchange_rate_api_stored",
-					totalAmountSar: round2(amount * suppliedEvidence.rate),
+					totalAmountSar: multiplyMoney2(amount, suppliedEvidence.rate),
 					convertedAt: normalizedExchangeRateTimestamp(
 						next.amountConvertedAt,
 						suppliedEvidence.provenance.sourceTimestamp
@@ -14415,7 +14372,10 @@ async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
 				sourcePayoutCurrency === sourceCurrency
 		);
 		const payoutAmountSar = payoutCanMaterialize
-			? round2(sourcePayoutAmount * Number(conversion.exchangeRateToSar))
+			? multiplyMoney2(
+					sourcePayoutAmount,
+					Number(conversion.exchangeRateToSar)
+			  )
 			: null;
 		next.sourcePayoutAmount = hasSourcePayout ? sourcePayoutAmount : null;
 		next.sourcePayoutCurrency = hasSourcePayout ? sourcePayoutCurrency : "";

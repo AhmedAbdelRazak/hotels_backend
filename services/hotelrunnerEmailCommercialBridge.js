@@ -6,6 +6,7 @@ const DefaultFallbackJobModel = require("../models/hotelrunner_ota_fallback_job"
 const {
 	agodaMultiRoomAllocationReviewAllowsCommercialOnly,
 	buildHotelRunnerEmailCommercialEvidence,
+	decimalMoneyCents,
 	resolveHotel,
 	resolveRoomMatch,
 	verifiedHotelRunnerEmailCommercialEvidence,
@@ -154,6 +155,69 @@ const amountMatches = (left, right) =>
 	left !== null &&
 	right !== null &&
 	Math.abs(round2(left) - round2(right)) <= AMOUNT_TOLERANCE;
+
+function rematerializeLegacyOneCentPropertyMoney(inbound = {}, evidence = {}) {
+	const paymentSummary = inbound.paymentSummary || {};
+	if (
+		Number(evidence.version) !== 2 ||
+		evidence.verified !== true ||
+		upper(evidence.currency) !== "SAR" ||
+		inbound.propertyConversionVerified !== true ||
+		upper(inbound.sourceCurrency || paymentSummary.sourceCurrency) === "SAR"
+	) {
+		return inbound;
+	}
+	const grossCents = decimalMoneyCents(evidence.grossTotalSar);
+	const payoutCents = decimalMoneyCents(evidence.payoutTotalSar);
+	if (
+		!Number.isSafeInteger(grossCents) ||
+		grossCents <= 0 ||
+		!Number.isSafeInteger(payoutCents) ||
+		payoutCents <= 0
+	) {
+		return inbound;
+	}
+	const derivedAmounts = [
+		[inbound.amount, grossCents],
+		[inbound.totalAmountSar, grossCents],
+		[paymentSummary.totalGuestPaymentAmount, grossCents],
+		[inbound.totalPayoutSar, payoutCents],
+		[inbound.netAfterExpensesTotal, payoutCents],
+		[paymentSummary.totalPayoutAmount, payoutCents],
+	]
+		.filter(([value]) => value !== null && value !== undefined && value !== "")
+		.map(([value, expected]) => {
+			const actual = decimalMoneyCents(value);
+			return Number.isSafeInteger(actual) ? actual - expected : null;
+		});
+	if (
+		!derivedAmounts.length ||
+		derivedAmounts.some(
+			(drift) => !Number.isSafeInteger(drift) || Math.abs(drift) > 1
+		) ||
+		!derivedAmounts.some((drift) => drift !== 0)
+	) {
+		return inbound;
+	}
+	const gross = grossCents / 100;
+	const payout = payoutCents / 100;
+	// Older queued audits may contain the pre-fix binary half-cent result. The
+	// immutable source amounts and trusted conversion evidence were already
+	// validated before this point, so rematerialize only a bounded one-cent
+	// derived drift in memory; the archived audit itself remains untouched.
+	return {
+		...inbound,
+		amount: gross,
+		totalAmountSar: gross,
+		totalPayoutSar: payout,
+		netAfterExpensesTotal: payout,
+		paymentSummary: {
+			...paymentSummary,
+			totalGuestPaymentAmount: gross,
+			totalPayoutAmount: payout,
+		},
+	};
+}
 
 function id(value) {
 	if (value == null) return "";
@@ -578,6 +642,10 @@ async function loadHotelRunnerQueuedEmailCommercialBridge(
 	) {
 		return reject("queued_commercial_evidence_invalid");
 	}
+	const materializedInbound = rematerializeLegacyOneCentPropertyMoney(
+		inbound,
+		evidence
+	);
 
 	return {
 		ok: true,
@@ -592,7 +660,7 @@ async function loadHotelRunnerQueuedEmailCommercialBridge(
 		normalizedReservationHash: lower(archive.normalizedReservationHash),
 		resolvedHotelProofHash: lower(archive.resolvedHotelProofHash),
 		archiveFingerprint: lower(archive.archiveFingerprint),
-		normalizedReservation: inbound,
+		normalizedReservation: materializedInbound,
 	};
 }
 
