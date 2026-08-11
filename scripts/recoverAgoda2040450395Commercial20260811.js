@@ -370,6 +370,21 @@ function reservationIdentityQuery() {
 	};
 }
 
+function directEligibleAuditQuery() {
+	return {
+		hotelId: oid(TARGET.hotelId),
+		provider: TARGET.provider,
+		confirmationNumber: TARGET.confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		"senderAuthentication.authenticatedAligned": true,
+		"senderAuthentication.trustedProvider": TARGET.provider,
+		"normalizedReservation.trustedTransportProvider": TARGET.provider,
+		"normalizedReservation.sourceSenderAuthenticated": true,
+		"normalizedReservation.sourceSenderTrusted": true,
+	};
+}
+
 async function loadScope(collections) {
 	const [
 		job,
@@ -379,7 +394,7 @@ async function loadScope(collections) {
 		reservation,
 		hotel,
 		jobs,
-		audits,
+		directAudits,
 		events,
 		mirrors,
 		reservations,
@@ -404,16 +419,7 @@ async function loadScope(collections) {
 			)
 		),
 		toArray(
-			collections.audits.find(
-				{
-					hotelId: oid(TARGET.hotelId),
-					provider: TARGET.provider,
-					confirmationNumber: TARGET.confirmationNumber,
-					intent: "new_reservation",
-					eventType: "new",
-				},
-				EXACT_READ_OPTIONS
-			)
+			collections.audits.find(directEligibleAuditQuery(), EXACT_READ_OPTIONS)
 		),
 		toArray(
 			collections.events.find(
@@ -445,9 +451,10 @@ async function loadScope(collections) {
 		mirror,
 		reservation,
 		hotel,
+		directAuditIds: (directAudits || []).map((entry) => id(entry?._id)),
 		counts: {
 			jobs: jobs?.length || 0,
-			audits: audits?.length || 0,
+			directAudits: directAudits?.length || 0,
 			events: events?.length || 0,
 			mirrors: mirrors?.length || 0,
 			reservations: reservations?.length || 0,
@@ -552,9 +559,21 @@ function validateScope(scope, { commercialPreflight = defaultCommercialPreflight
 	for (const key of ["job", "audit", "event", "mirror", "reservation", "hotel"]) {
 		requireCondition(Boolean(scope[key]), `${key}.exists`);
 	}
-	for (const key of ["jobs", "audits", "events", "mirrors", "reservations"]) {
+	for (const key of [
+		"jobs",
+		"directAudits",
+		"events",
+		"mirrors",
+		"reservations",
+	]) {
 		requireCondition(scope.counts?.[key] === 1, `counts.${key}`);
 	}
+	requireCondition(
+		Array.isArray(scope.directAuditIds) &&
+			scope.directAuditIds.length === 1 &&
+			scope.directAuditIds[0] === TARGET.auditId,
+		"directAudit.target"
+	);
 	const { job, audit, event, mirror, reservation, hotel } = scope;
 	requireCondition(id(job._id) === TARGET.jobId, "job.id");
 	requireCondition(Number(job.__v || 0) === 0, "job.version");
@@ -1462,6 +1481,7 @@ module.exports = {
 	collectionsFromDb,
 	compensate,
 	defaultCommercialPreflight,
+	directEligibleAuditQuery,
 	ensureBackups,
 	loadScope,
 	main,
