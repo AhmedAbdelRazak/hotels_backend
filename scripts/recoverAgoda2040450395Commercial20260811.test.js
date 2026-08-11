@@ -22,6 +22,7 @@ const {
 	backupRecord,
 	buildPlan,
 	cloneFullBson,
+	loadScope,
 	parseArguments,
 	parseProof,
 	proofToken,
@@ -391,7 +392,50 @@ function fixtureScope() {
 		mirror,
 		reservation,
 		hotel,
-		counts: { jobs: 1, audits: 1, events: 1, mirrors: 1, reservations: 1 },
+		directAuditIds: [TARGET.auditId],
+		counts: {
+			jobs: 1,
+			directAudits: 1,
+			events: 1,
+			mirrors: 1,
+			reservations: 1,
+		},
+	};
+}
+
+function relayAuditFixture() {
+	return {
+		_id: oid("6a7b62c56d72d17a49d5678d"),
+		hotelId: oid(TARGET.hotelId),
+		provider: TARGET.provider,
+		confirmationNumber: TARGET.confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		source: "sendgrid",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "hotelrunner",
+			method: "spf+dkim",
+			reason: "authenticated_aligned_sender",
+		},
+		normalizedReservation: {
+			provider: TARGET.provider,
+			confirmationNumber: TARGET.confirmationNumber,
+			reservationId: TARGET.confirmationNumber,
+			trustedTransportProvider: "hotelrunner",
+			sourceSenderAuthenticated: true,
+			sourceSenderTrusted: true,
+		},
+		processingStatus: "needs_review",
+		automationAction: "skipped",
+		skipReason: "hotelrunner_relay_audit_only",
+		hasReservationConnection: false,
+		reservationMongoId: null,
+		pmsConfirmationNumber: "",
+		hotelRunnerFirstFallback: {
+			status: "hotelrunner_relay_audit_only",
+			jobId: null,
+		},
 	};
 }
 
@@ -502,7 +546,7 @@ function memoryCollection(initial = []) {
 function fixtureCollections(scope = fixtureScope()) {
 	return {
 		jobs: memoryCollection([scope.job]),
-		audits: memoryCollection([scope.audit]),
+		audits: memoryCollection([scope.audit, relayAuditFixture()]),
 		events: memoryCollection([scope.event]),
 		mirrors: memoryCollection([scope.mirror]),
 		reservations: memoryCollection([scope.reservation]),
@@ -546,6 +590,45 @@ test("the exact production-shaped terminal scope validates", () => {
 	const validated = validateScope(fixtureScope(), { commercialPreflight });
 	assert.equal(validated.archive.ok, true);
 	assert.deepEqual(validated.commercial, commercialSummary());
+});
+
+test("the production-shaped HotelRunner relay is excluded from the one direct audit scope", async () => {
+	const collections = fixtureCollections();
+	const scope = await loadScope(collections);
+	assert.deepEqual(scope.directAuditIds, [TARGET.auditId]);
+	assert.equal(scope.counts.directAudits, 1);
+	assert.equal(collections.audits.documents.size, 2);
+	assert.equal(
+		collections.audits.documents.get("6a7b62c56d72d17a49d5678d")
+			.skipReason,
+		"hotelrunner_relay_audit_only"
+	);
+	assert.equal(
+		validateScope(scope, { commercialPreflight }).archive.ok,
+		true
+	);
+});
+
+test("a second authenticated direct Agoda audit fails closed even with the expected relay", async () => {
+	const collections = fixtureCollections();
+	const duplicate = cloneFullBson(fixtureScope().audit);
+	duplicate._id = oid("6a7b626f6d72d17a49d5663f");
+	duplicate.hasReservationConnection = false;
+	duplicate.reservationMongoId = null;
+	duplicate.hotelRunnerFirstFallback.jobId = null;
+	collections.audits.documents.set(String(duplicate._id), duplicate);
+	const scope = await loadScope(collections);
+	assert.equal(scope.counts.directAudits, 2);
+	assert.deepEqual(scope.directAuditIds.sort(), [
+		TARGET.auditId,
+		"6a7b626f6d72d17a49d5663f",
+	].sort());
+	assert.throws(
+		() => validateScope(scope, { commercialPreflight }),
+		(error) =>
+			error.code === "AGODA_2040450395_RECOVERY_SCOPE_DRIFT" &&
+			/counts\.directAudits/.test(error.message)
+	);
 });
 
 test("the real commercial guard accepts the exact production-shaped fixture", () => {
