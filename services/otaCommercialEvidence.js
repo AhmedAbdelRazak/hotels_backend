@@ -3,8 +3,10 @@
 "use strict";
 
 const crypto = require("crypto");
+const { roundedMoneyProduct } = require("./otaMoney");
 
-const CONTRACT_VERSION = 1;
+const CONTRACT_VERSION = 2;
+const SUPPORTED_CONTRACT_VERSIONS = new Set([1, CONTRACT_VERSION]);
 const MAX_MONEY = 1_000_000_000_000;
 const DEFAULT_BOOKING_BASIS = "reservation_total";
 
@@ -315,11 +317,11 @@ function normalizeConversion(value, { sourceCurrency, propertyCurrency, provider
 
 function convertedPropertyAmount(sourceAmount, conversion) {
 	if (!conversion) return null;
-	const converted = sourceAmount * conversion.rate;
-	if (!Number.isFinite(converted) || converted < 0 || converted > MAX_MONEY) {
+	const converted = roundedMoneyProduct(sourceAmount, conversion.rate);
+	if (converted === null || converted < 0 || converted > MAX_MONEY) {
 		fail("Converted property amount is unsafe.", "UNSAFE_CONVERSION");
 	}
-	return round2(converted);
+	return converted;
 }
 
 function normalizeAuthenticatedRole(
@@ -746,7 +748,7 @@ function validateRole(role, name, errors) {
 function validateRoleProjection(
 	role,
 	name,
-	{ propertyCurrency, conversion } = {},
+	{ propertyCurrency, conversion, contractVersion = CONTRACT_VERSION } = {},
 	errors
 ) {
 	if (!role?.verified) return;
@@ -760,7 +762,10 @@ function validateRoleProjection(
 		Number.isFinite(conversion.rate) &&
 		conversion.rate > 0
 	) {
-		expectedPropertyAmount = round2(role.sourceAmount * conversion.rate);
+		expectedPropertyAmount =
+			contractVersion === 1
+				? round2(role.sourceAmount * conversion.rate)
+				: roundedMoneyProduct(role.sourceAmount, conversion.rate);
 	}
 	if (expectedPropertyAmount === null) {
 		if (role.propertyAmount !== null || role.propertyCurrency !== null) {
@@ -868,6 +873,7 @@ function validateNightlyEvidence(value, evidence, errors) {
 					{
 						propertyCurrency: evidence.propertyCurrency,
 						conversion: evidence.currencyConversion,
+						contractVersion: evidence.contractVersion,
 					},
 					errors
 				);
@@ -920,6 +926,7 @@ function validateDeductionComponents(value, evidence, errors) {
 			{
 				propertyCurrency: evidence.propertyCurrency,
 				conversion: evidence.currencyConversion,
+				contractVersion: evidence.contractVersion,
 			},
 			errors
 		);
@@ -941,7 +948,9 @@ function validateOtaCommercialEvidence(evidence = {}) {
 	if (!sameKeys(evidence, TOP_LEVEL_KEYS)) {
 		return { ok: false, errors: ["contract_shape"] };
 	}
-	if (evidence.contractVersion !== CONTRACT_VERSION) errors.push("contract_version");
+	if (!SUPPORTED_CONTRACT_VERSIONS.has(evidence.contractVersion)) {
+		errors.push("contract_version");
+	}
 	const provider = normalizeProvider(evidence.provider);
 	if (!provider || provider !== evidence.provider) errors.push("provider");
 	if (!/^[a-z0-9][a-z0-9._:-]{0,95}$/.test(evidence.sourceType || "")) {
@@ -1026,6 +1035,7 @@ function validateOtaCommercialEvidence(evidence = {}) {
 				{
 					propertyCurrency: evidence.propertyCurrency,
 					conversion: evidence.currencyConversion,
+					contractVersion: evidence.contractVersion,
 				},
 				errors
 			);
@@ -1043,7 +1053,11 @@ function validateOtaCommercialEvidence(evidence = {}) {
 		validateRoleProjection(
 			hotelBase,
 			"hotel_base",
-			{ propertyCurrency: evidence.propertyCurrency, conversion: null },
+			{
+				propertyCurrency: evidence.propertyCurrency,
+				conversion: null,
+				contractVersion: evidence.contractVersion,
+			},
 			errors
 		);
 	} else if (evidence.provenance?.hotelBase !== null) {
@@ -1065,6 +1079,7 @@ function validateOtaCommercialEvidence(evidence = {}) {
 			{
 				propertyCurrency: evidence.propertyCurrency,
 				conversion: evidence.currencyConversion,
+				contractVersion: evidence.contractVersion,
 			},
 			errors
 		);

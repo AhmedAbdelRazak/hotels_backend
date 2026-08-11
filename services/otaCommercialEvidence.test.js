@@ -276,6 +276,86 @@ test("trusted explicit conversion is required before property-currency materiali
 	);
 });
 
+test("trusted FX materialization and revalidation share exact decimal-cent products", () => {
+	for (const [sourceAmount, expectedSar] of [
+		[29.06, 108.98],
+		[10.18, 38.18],
+	]) {
+		const evidence = buildAuthenticatedProviderCommercialEvidence(
+			authenticatedInput({
+				guestGross: { verified: true, amount: sourceAmount },
+				currencyConversion: {
+					trusted: true,
+					verified: true,
+					sourceCurrency: "USD",
+					propertyCurrency: "SAR",
+					rate: 3.75,
+					provenance: {
+						provider: "expedia",
+						sourceType: "provider_explicit_exchange",
+						sourceHash: HASH_C,
+						sourceTimestamp: "2026-08-08T12:02:00.000Z",
+						sourceId: `exact-fx-${sourceAmount}`,
+					},
+				},
+			})
+		);
+		assert.equal(evidence.contractVersion, 2);
+		assert.equal(evidence.roles.guestGross.propertyAmount, expectedSar);
+		assert.deepEqual(validateOtaCommercialEvidence(evidence), {
+			ok: true,
+			errors: [],
+		});
+	}
+});
+
+test("legacy v1 FX evidence keeps its original projection semantics", () => {
+	const current = buildAuthenticatedProviderCommercialEvidence(
+		authenticatedInput({
+			guestGross: { verified: true, amount: 10.18 },
+			currencyConversion: {
+				trusted: true,
+				verified: true,
+				sourceCurrency: "USD",
+				propertyCurrency: "SAR",
+				rate: 3.75,
+				provenance: {
+					provider: "expedia",
+					sourceType: "provider_explicit_exchange",
+					sourceHash: HASH_C,
+					sourceTimestamp: "2026-08-08T12:02:00.000Z",
+					sourceId: "legacy-v1-half-cent",
+				},
+			},
+		})
+	);
+	const legacy = JSON.parse(JSON.stringify(current));
+	legacy.contractVersion = 1;
+	legacy.roles.guestGross.propertyAmount = 38.17;
+	legacy.evidenceHash = hashOtaCommercialEvidence(legacy);
+	assert.deepEqual(validateOtaCommercialEvidence(legacy), {
+		ok: true,
+		errors: [],
+	});
+
+	const mislabeledCurrent = JSON.parse(JSON.stringify(legacy));
+	mislabeledCurrent.contractVersion = 2;
+	mislabeledCurrent.evidenceHash = hashOtaCommercialEvidence(mislabeledCurrent);
+	assert.equal(validateOtaCommercialEvidence(mislabeledCurrent).ok, false);
+	assert.ok(
+		validateOtaCommercialEvidence(mislabeledCurrent).errors.includes(
+			"gross_property_projection"
+		)
+	);
+
+	const unsupported = JSON.parse(JSON.stringify(current));
+	unsupported.contractVersion = 3;
+	unsupported.evidenceHash = hashOtaCommercialEvidence(unsupported);
+	assert.ok(
+		validateOtaCommercialEvidence(unsupported).errors.includes("contract_version")
+	);
+});
+
 test("authentication, provider, currency, and explicit-commission gates fail closed", () => {
 	expectCode(
 		() => buildAuthenticatedProviderCommercialEvidence(authenticatedInput({ sourceTrusted: false })),

@@ -1170,7 +1170,10 @@ function directQueuedInbound(overrides = {}) {
 	};
 }
 
-async function storedFxTripQueuedInbound(overrides = {}) {
+async function storedFxTripQueuedInbound(
+	overrides = {},
+	{ conversionRate = 3.8 } = {}
+) {
 	const sourceTimestamp = "2026-08-09T00:00:00.000Z";
 	const base = directQueuedInbound({
 		provider: "trip",
@@ -1211,7 +1214,7 @@ async function storedFxTripQueuedInbound(overrides = {}) {
 					result: "success",
 					base_code: "USD",
 					target_code: "SAR",
-					conversion_rate: 3.8,
+					conversion_rate: conversionRate,
 					time_last_update_unix: Date.parse(sourceTimestamp) / 1000,
 				};
 			},
@@ -3025,6 +3028,96 @@ test("queued Trip stored-FX evidence creates one authority-4 API reservation wit
 	assert.equal(
 		Number(daily.reduce((sum, day) => sum + day.netAfterExpenses, 0).toFixed(2)),
 		69.16
+	);
+});
+
+test("queued Trip half-cent FX conversion cannot quarantine an otherwise valid API reservation", async () => {
+	const system = createInMemoryProjectionSystem();
+	system.config.requireOtaReview = true;
+	const confirmationNumber = "1567954036129867";
+	const room = rawRoom({
+		id: "trip-api-half-cent-room-1",
+		invCode: "INV-DOUBLE",
+		name: "Double Room",
+		prices: ["13.72", "13.72"],
+	});
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-trip-half-cent-fx-queued-create",
+		reservation_id: "hr-trip-half-cent-fx-create",
+		hr_number: "R-TRIP-HALF-CENT-FX",
+		provider_number: confirmationNumber,
+		channel: "tripcom",
+		channel_display: "Trip.com",
+		source_display: "Trip.com",
+		currency: "USD",
+		total_rooms: 1,
+		total_guests: 2,
+		sub_total: "27.44",
+		item_total: "27.44",
+		total: "27.44",
+		paid_amount: "0",
+		rooms: [room],
+	});
+	const inbound = await storedFxTripQueuedInbound(
+		{
+			confirmationNumber,
+			reservationId: confirmationNumber,
+			roomName: system.hotel.roomCountDetails[0].displayName,
+			sourceAmount: 29.06,
+			sourcePayoutAmount: 27.44,
+			paymentSummary: {
+				sourceCurrency: "USD",
+				sourceTotalGuestPaymentAmount: 29.06,
+				sourceTotalPayoutAmount: 27.44,
+				sourceTotalPayoutCurrency: "USD",
+				totalGuestPaymentAmount: null,
+				totalPayoutAmount: null,
+				currency: null,
+				exchangeRateToSar: null,
+			},
+		},
+		{ conversionRate: 3.75 }
+	);
+	assert.equal(inbound.totalAmountSar, 108.98);
+	assert.equal(inbound.paymentSummary.totalGuestPaymentAmount, 108.98);
+	assert.equal(inbound.totalPayoutSar, 102.9);
+
+	const bridge = queuedEmailBridgeFromInbound(inbound, {
+		amountRole: "payout",
+		hotelRunnerAmount: 27.44,
+	});
+	system.dependencies.loadQueuedEmailCommercialBridge = async () => bridge;
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: { _id: "event-trip-half-cent-fx", payload: normalized.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "created", JSON.stringify(result));
+	assert.equal(system.reservations.length, 1);
+	const created = system.reservations[0];
+	assert.equal(created.total_amount, 108.98);
+	assert.equal(created.adminPricing.clientTotal, 108.98);
+	assert.equal(created.adminPricing.netAfterExpensesTotal, 102.9);
+	assert.equal(created.adminPricing.otaExpenseTotal, 6.08);
+	assert.equal(created.adminPricing.commercialVerified, true);
+	assert.equal(created.payment, "paid online");
+	assert.equal(created.financeStatus, "paid online");
+	assert.equal(created.paid_amount, 108.98);
+	assert.equal(
+		created.paid_amount_breakdown.paid_online_other_platforms,
+		108.98
+	);
+	assert.equal(created.supplierData.hotelRunner.transport, "hotelrunner_api");
+	assert.equal(created.supplierData.otaSourceAuthority, 4);
+	assert.equal(
+		created.supplierData.hotelRunnerEmailCommercialEvidence.grossTotalSar,
+		108.98
 	);
 });
 
