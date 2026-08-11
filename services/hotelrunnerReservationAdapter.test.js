@@ -1110,6 +1110,98 @@ function queuedEmailBridgeFromInbound(inbound, {
 	};
 }
 
+function installQueuedArchive(system, {
+	inbound,
+	provider,
+	confirmationNumber,
+	jobId = "64b000000000000000000501",
+} = {}) {
+	system.hotel.activateHotel = true;
+	system.hotel.xHotelProActive = true;
+	system.config = {
+		...system.config,
+		hotelId: String(system.hotel._id),
+		hrIdFingerprint: "f".repeat(64),
+		requireOtaReview: true,
+	};
+	const inboundEmailId = inbound.inboundEmailId;
+	const audit = {
+		_id: inboundEmailId,
+		hotelId: String(system.hotel._id),
+		provider,
+		confirmationNumber,
+		intent: "new_reservation",
+		eventType: "new",
+		emailHash: "1".repeat(64),
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: provider,
+		},
+		reservationMongoId: null,
+		hasReservationConnection: false,
+		processingStatus: "awaiting_hotelrunner",
+		automationAction: "queued",
+		hotelRunnerFirstFallback: {
+			status: "archive_ready",
+			jobId: null,
+			resolvedHotelProof: {
+				version: 1,
+				hotelId: String(system.hotel._id),
+				belongsTo: String(system.hotel.belongsTo),
+				currency: "SAR",
+				activateHotel: true,
+				xHotelProActive: true,
+			},
+		},
+		normalizedReservation: inbound,
+	};
+	const identity = {
+		hotelId: String(system.hotel._id),
+		provider,
+		confirmationNumber,
+	};
+	const archive = createArchiveFingerprint({ identity, audit });
+	const job = {
+		_id: jobId,
+		...identity,
+		lookupConfirmationNumber: confirmationNumber,
+		identityKey: `${provider}:${confirmationNumber}`,
+		hrIdFingerprint: system.config.hrIdFingerprint,
+		...archive,
+		status: "awaiting_hotelrunner",
+		identityConflict: false,
+		leaseOwner: "",
+		leaseToken: "",
+		leaseAcquiredAt: null,
+		leaseUntil: null,
+	};
+	let jobReads = 0;
+	let auditReads = 0;
+	system.dependencies.FallbackJobModel = {
+		find(filter) {
+			jobReads += 1;
+			assert.deepEqual(filter, identity);
+			return queryResult(() => [job]);
+		},
+	};
+	system.dependencies.InboundEmailModel = {
+		findById(value) {
+			auditReads += 1;
+			assert.equal(String(value), inboundEmailId);
+			return queryResult(() => audit);
+		},
+	};
+	system.dependencies.resolveArchivedHotel = async () => system.hotel;
+	system.dependencies.queuedEmailBridgeNow = () =>
+		new Date("2026-08-09T06:01:00.000Z");
+	return {
+		archive,
+		audit,
+		job,
+		reads: () => ({ auditReads, jobReads }),
+	};
+}
+
 function directQueuedInbound(overrides = {}) {
 	return {
 		inboundEmailId: "64b000000000000000000502",
@@ -3118,6 +3210,290 @@ test("queued Trip half-cent FX conversion cannot quarantine an otherwise valid A
 	assert.equal(
 		created.supplierData.hotelRunnerEmailCommercialEvidence.grossTotalSar,
 		108.98
+	);
+});
+
+test("real queued bridge accepts 50-cent derived drift and blocks 51 cents before insert", async (t) => {
+	const cases = [
+		{
+			name: "inclusive 50-cent boundary creates exact evidence money",
+			confirmationNumber: "1567954036129868",
+			grossDrifts: [50, -49, 1],
+			payoutDrifts: [-50, 49, 1],
+			created: true,
+		},
+		{
+			name: "51-cent alias keeps the whole candidate unmodified and blocks creation",
+			confirmationNumber: "1567954036129869",
+			grossDrifts: [51, -49, 1],
+			payoutDrifts: [-50, 49, 1],
+			created: false,
+		},
+	];
+	const propertyMoney = (baseCents, driftCents) =>
+		(baseCents + driftCents) / 100;
+
+	for (const testCase of cases) {
+		await t.test(testCase.name, async () => {
+			const system = createInMemoryProjectionSystem();
+			const room = rawRoom({
+				id: `trip-api-tolerance-room-${testCase.confirmationNumber}`,
+				invCode: "INV-DOUBLE",
+				name: "Double Room",
+				prices: ["13.72", "13.72"],
+			});
+			const normalized = normalizedMultiRoom({
+				message_uid: `adapter-trip-tolerance-${testCase.confirmationNumber}`,
+				reservation_id: `hr-trip-tolerance-${testCase.confirmationNumber}`,
+				hr_number: `R-TRIP-TOLERANCE-${testCase.confirmationNumber}`,
+				provider_number: testCase.confirmationNumber,
+				channel: "tripcom",
+				channel_display: "Trip.com",
+				source_display: "Trip.com",
+				currency: "USD",
+				total_rooms: 1,
+				total_guests: 2,
+				sub_total: "27.44",
+				item_total: "27.44",
+				total: "27.44",
+				paid_amount: "0",
+				rooms: [room],
+			});
+			const exactInbound = await storedFxTripQueuedInbound(
+				{
+					confirmationNumber: testCase.confirmationNumber,
+					reservationId: testCase.confirmationNumber,
+					roomName: system.hotel.roomCountDetails[0].displayName,
+					sourceAmount: 29.06,
+					sourcePayoutAmount: 27.44,
+					paymentSummary: {
+						sourceCurrency: "USD",
+						sourceTotalGuestPaymentAmount: 29.06,
+						sourceTotalPayoutAmount: 27.44,
+						sourceTotalPayoutCurrency: "USD",
+						totalGuestPaymentAmount: null,
+						totalPayoutAmount: null,
+						currency: null,
+						exchangeRateToSar: null,
+					},
+				},
+				{ conversionRate: 3.75 }
+			);
+			const [amountDrift, totalDrift, summaryGrossDrift] =
+				testCase.grossDrifts;
+			const [payoutDrift, netDrift, summaryPayoutDrift] =
+				testCase.payoutDrifts;
+			const archivedInbound = {
+				...exactInbound,
+				amount: propertyMoney(10898, amountDrift),
+				totalAmountSar: propertyMoney(10898, totalDrift),
+				totalPayoutSar: propertyMoney(10290, payoutDrift),
+				netAfterExpensesTotal: propertyMoney(10290, netDrift),
+				paymentSummary: {
+					...exactInbound.paymentSummary,
+					totalGuestPaymentAmount: propertyMoney(
+						10898,
+						summaryGrossDrift
+					),
+					totalPayoutAmount: propertyMoney(
+						10290,
+						summaryPayoutDrift
+					),
+				},
+			};
+			const queued = installQueuedArchive(system, {
+				inbound: archivedInbound,
+				provider: "trip",
+				confirmationNumber: testCase.confirmationNumber,
+			});
+			const auditBefore = JSON.stringify(queued.audit);
+			const jobBefore = JSON.stringify(queued.job);
+
+			const result = await projectHotelRunnerReservation(
+				{
+					normalized,
+					event: {
+						_id: `event-trip-tolerance-${testCase.confirmationNumber}`,
+						payload: normalized.storedPayload,
+					},
+					hotel: system.hotel,
+					config: system.config,
+				},
+				system.dependencies
+			);
+
+			assert.deepEqual(queued.reads(), { auditReads: 1, jobReads: 1 });
+			assert.equal(JSON.stringify(queued.audit), auditBefore);
+			assert.equal(JSON.stringify(queued.job), jobBefore);
+			if (!testCase.created) {
+				assert.equal(result.status, "quarantined", JSON.stringify(result));
+				assert.equal(
+					result.code,
+					"hotelrunner_queued_email_commercial_materialization_failed"
+				);
+				assert.equal(system.reservations.length, 0);
+				assert.equal(system.reservationWrites.length, 0);
+				return;
+			}
+
+			assert.equal(result.status, "created", JSON.stringify(result));
+			assert.equal(system.reservations.length, 1);
+			const created = system.reservations[0];
+			assert.equal(created.total_amount, 108.98);
+			assert.equal(created.adminPricing.clientTotal, 108.98);
+			assert.equal(created.adminPricing.netAfterExpensesTotal, 102.9);
+			assert.equal(created.adminPricing.otaExpenseTotal, 6.08);
+			assert.equal(created.adminPricing.commercialVerified, true);
+			assert.equal(created.paid_amount, 108.98);
+			assert.equal(
+				created.supplierData.hotelRunnerEmailCommercialEvidence.grossTotalSar,
+				108.98
+			);
+		});
+	}
+});
+
+test("API-owned Agoda room mapping accepts exact OTA label with HotelRunner rate suffixes", async () => {
+	const system = createInMemoryProjectionSystem();
+	const confirmationNumber = "2040450395";
+	system.hotel.roomCountDetails[0] = {
+		...system.hotel.roomCountDetails[0],
+		roomType: "quadRooms",
+		displayName: "Quadruple Room – Comfort & Privacy",
+		defaultCost: 75,
+		pricingRate: [{ calendarDate: "2026-08-14", rootPrice: 75 }],
+	};
+	const room = {
+		...rawRoom({
+			id: "agoda-api-suffixed-room",
+			invCode: "INV-DOUBLE",
+			name: "Deluxe Family Room 2",
+			prices: ["53.97"],
+		}),
+		name_presentation:
+			"Deluxe Family Room 2 - Non-Refundable - 2 Occupancy - NR",
+		checkin_date: "2026-08-14",
+		checkout_date: "2026-08-15",
+		nights: 1,
+		daily_prices: [
+			{
+				date: "2026-08-14",
+				price: "53.97",
+				original_price: "53.97",
+				discount: "0",
+				version: "v1",
+			},
+		],
+	};
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-agoda-2040450395-api-create",
+		reservation_id: "hr-agoda-2040450395",
+		hr_number: "R-2040450395",
+		provider_number: confirmationNumber,
+		channel: "agodaycs5",
+		channel_display: "Agoda",
+		source_display: "Agoda",
+		checkin_date: "2026-08-14",
+		checkout_date: "2026-08-15",
+		currency: "SAR",
+		total_rooms: 1,
+		total_guests: 2,
+		sub_total: "53.97",
+		item_total: "53.97",
+		total: "53.97",
+		paid_amount: "0",
+		rooms: [room],
+	});
+	const inbound = directQueuedInbound({
+		provider: "agoda",
+		trustedTransportProvider: "agoda",
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		roomName: "Deluxe Family Room 2",
+		checkinDate: "2026-08-14",
+		checkoutDate: "2026-08-15",
+		amount: 87.22,
+		totalAmountSar: 87.22,
+		sourceAmount: 87.22,
+		sourceCurrency: "SAR",
+		currency: "SAR",
+		propertyCurrency: "SAR",
+		totalPayoutSar: 53.97,
+		netAfterExpensesTotal: 53.97,
+		paymentSummary: {
+			sourceCurrency: "SAR",
+			sourceTotalGuestPaymentAmount: 87.22,
+			sourceTotalPayoutAmount: 53.97,
+			sourceTotalPayoutCurrency: "SAR",
+			totalGuestPaymentAmount: 87.22,
+			totalPayoutAmount: 53.97,
+			currency: "SAR",
+			exchangeRateToSar: 1,
+			exchangeRateSource: "identity",
+		},
+	});
+	const queued = installQueuedArchive(system, {
+		inbound,
+		provider: "agoda",
+		confirmationNumber,
+	});
+	system.dependencies.resolveArchivedRoom = () => null;
+	const auditBefore = JSON.stringify(queued.audit);
+	const jobBefore = JSON.stringify(queued.job);
+
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized,
+			event: {
+				_id: "event-agoda-2040450395",
+				payload: normalized.storedPayload,
+			},
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "created", JSON.stringify(result));
+	assert.deepEqual(queued.reads(), { auditReads: 1, jobReads: 1 });
+	assert.equal(JSON.stringify(queued.audit), auditBefore);
+	assert.equal(JSON.stringify(queued.job), jobBefore);
+	assert.equal(system.reservations.length, 1);
+	const created = system.reservations[0];
+	assert.equal(created.checkin_date, "2026-08-14");
+	assert.equal(created.checkout_date, "2026-08-15");
+	assert.equal(created.sub_total, 75);
+	assert.equal(created.total_amount, 87.22);
+	assert.equal(created.adminPricing.clientTotal, 87.22);
+	assert.equal(created.adminPricing.rootTotal, 75);
+	assert.equal(created.adminPricing.netAfterExpensesTotal, 53.97);
+	assert.equal(created.adminPricing.otaExpenseTotal, 33.25);
+	assert.equal(created.ota_financial_summary.hotelVisibleAmount, 75);
+	assert.equal(created.pickedRoomsPricing[0].pricingByDay.length, 1);
+	assert.deepEqual(
+		created.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+			date: day.date,
+			client: day.clientPrice,
+			root: day.rootPrice,
+			payout: day.netAfterExpenses,
+			source: day.hotelRunnerSourcePrice,
+		})),
+		[
+			{
+				date: "2026-08-14",
+				client: 87.22,
+				root: 75,
+				payout: 53.97,
+				source: 53.97,
+			},
+		]
+	);
+	assert.equal(created.supplierData.hotelRunner.transport, "hotelrunner_api");
+	assert.equal(created.supplierData.hotelRunner.pricing.grandTotal, 53.97);
+	assert.equal(created.supplierData.otaSourceAuthority, 4);
+	assert.equal(
+		created.supplierData.hotelRunnerFirstFallbackCommercialBridge.jobId,
+		String(queued.job._id)
 	);
 });
 

@@ -10651,6 +10651,11 @@ function commercialDailyPricingTotals(reservation = {}) {
 
 const HOTELRUNNER_SAME_EVIDENCE_DAILY_MAX_DRIFT_CENTS = 50;
 const HOTELRUNNER_AMOUNT_ROLE_MATCH_MAX_DRIFT_CENTS = 50;
+const HOTELRUNNER_UNRESOLVED_COMMERCIAL_SOURCE_TYPES = new Set([
+	"hotelrunner_api",
+	"hotelrunner_email_relay",
+	"hotelrunner_webhook",
+]);
 
 function commercialEvidenceWithinCents(actual, expected, maxDriftCents) {
 	const actualCents = decimalMoneyCents(actual);
@@ -10928,9 +10933,19 @@ function verifiedHotelRunnerEmailCommercialEvidence(
 		: null;
 }
 
-function directHotelRunnerAuthoritativeGrossTotal(existing = {}) {
+function directHotelRunnerAuthoritativeReportedTotal(existing = {}) {
 	const pricing = existing.adminPricing || {};
 	const summary = existing.ota_financial_summary || {};
+	const supplier = existing.supplierData || {};
+	const rawStoredEvidence = supplier.otaCommercialEvidence;
+	const hasStoredHotelRunnerApiEvidence = Boolean(
+		rawStoredEvidence &&
+			typeof rawStoredEvidence === "object" &&
+			!Array.isArray(rawStoredEvidence) &&
+			HOTELRUNNER_UNRESOLVED_COMMERCIAL_SOURCE_TYPES.has(
+				String(rawStoredEvidence.sourceType || "").trim().toLowerCase()
+			)
+	);
 	const pricingMode = normalizeComparable(pricing.mode || "");
 	const pricingSource = normalizeComparable(pricing.source || "");
 	const summarySource = normalizeComparable(summary.source || "");
@@ -10942,6 +10957,46 @@ function directHotelRunnerAuthoritativeGrossTotal(existing = {}) {
 	) {
 		return 0;
 	}
+	const provider = normalizeOtaIdentityProvider(
+		supplier.otaProvider || supplier.supplierName || existing.booking_source
+	);
+	const storedApiEvidence = validatedOtaCommercialEvidence(
+		supplier.otaCommercialEvidence,
+		{ provider }
+	);
+	const reported = storedApiEvidence?.hotelRunnerReportedAmount;
+	const apiCandidates = [
+		Number(reported?.amount),
+		Number(supplier.hotelRunner?.pricing?.grandTotal),
+		Number(pricing.sourceAmount),
+		Number(summary.sourceAmount),
+	];
+	if (
+		storedApiEvidence?.verificationState === "unresolved" &&
+		reported?.role === "unknown" &&
+		reported?.roleVerified === false &&
+		String(reported?.currency || "").trim().toUpperCase() === "SAR" &&
+		String(supplier.hotelRunner?.pricing?.currency || "")
+			.trim()
+			.toUpperCase() === "SAR" &&
+		apiCandidates.every((value) => Number.isFinite(value) && value > 0)
+	) {
+		const apiTotal = round2(apiCandidates[0]);
+		if (
+			apiCandidates.every(
+				(value) => Math.abs(round2(value) - apiTotal) <= 0.02
+			)
+		) {
+			return apiTotal;
+		}
+	}
+	// A current HotelRunner evidence contract is the API authority boundary. If
+	// any part of its redundant amount tuple is missing, stale, or tampered, do
+	// not reinterpret older client-facing totals as HotelRunner's amount.
+	if (hasStoredHotelRunnerApiEvidence) return 0;
+	// Compatibility for older HotelRunner-owned rows that predate the immutable
+	// unresolved API evidence contract but already materialized one consistent
+	// client amount across all three commercial surfaces.
 	const candidates = [
 		Number(existing.total_amount),
 		Number(pricing.clientTotal),
@@ -11455,7 +11510,8 @@ function directHotelRunnerEmailCommercialGuard({
 	if (!directHotelRunnerEmailHotelMatches(normalized, existing, hotelDetails)) {
 		return reject("hotel");
 	}
-	const hotelRunnerReportedTotal = directHotelRunnerAuthoritativeGrossTotal(existing);
+	const hotelRunnerReportedTotal =
+		directHotelRunnerAuthoritativeReportedTotal(existing);
 	const evidenceGross = Number(evidence.grossTotalSar || 0);
 	const evidencePayout = Number(evidence.payoutTotalSar || 0);
 	const reportedTotalMatchesGross = Boolean(
@@ -18527,6 +18583,7 @@ module.exports = {
 	multipliedMoneyCents,
 	verifiedHotelRunnerEmailCommercialEvidence,
 	directHotelRunnerEmailCommercialGuard,
+	directEmailRoomLabelMatchesProjectedSource,
 	buildDirectHotelRunnerCommercialPricing,
 	directHotelRunnerCommercialEnrichmentSet,
 	lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi,

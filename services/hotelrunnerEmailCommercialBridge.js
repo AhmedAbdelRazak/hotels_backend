@@ -7,6 +7,7 @@ const {
 	agodaMultiRoomAllocationReviewAllowsCommercialOnly,
 	buildHotelRunnerEmailCommercialEvidence,
 	decimalMoneyCents,
+	directEmailRoomLabelMatchesProjectedSource,
 	resolveHotel,
 	resolveRoomMatch,
 	verifiedHotelRunnerEmailCommercialEvidence,
@@ -19,6 +20,7 @@ const {
 } = require("./hotelrunnerFirstOtaFallback");
 
 const AMOUNT_TOLERANCE = 0.02;
+const HOTELRUNNER_QUEUED_PROPERTY_MONEY_MAX_DRIFT_CENTS = 50;
 const CREATION_ACTIONS = new Set(["created", "created_unmapped_ota_review"]);
 const LEGACY_HOTELRUNNER_EVIDENCE_INVALIDATION =
 	"hotelrunner_commercial_evidence_stale";
@@ -156,7 +158,7 @@ const amountMatches = (left, right) =>
 	right !== null &&
 	Math.abs(round2(left) - round2(right)) <= AMOUNT_TOLERANCE;
 
-function rematerializeLegacyOneCentPropertyMoney(inbound = {}, evidence = {}) {
+function rematerializeBoundedVerifiedPropertyMoney(inbound = {}, evidence = {}) {
 	const paymentSummary = inbound.paymentSummary || {};
 	if (
 		Number(evidence.version) !== 2 ||
@@ -193,7 +195,10 @@ function rematerializeLegacyOneCentPropertyMoney(inbound = {}, evidence = {}) {
 	if (
 		!derivedAmounts.length ||
 		derivedAmounts.some(
-			(drift) => !Number.isSafeInteger(drift) || Math.abs(drift) > 1
+			(drift) =>
+				!Number.isSafeInteger(drift) ||
+				Math.abs(drift) >
+					HOTELRUNNER_QUEUED_PROPERTY_MONEY_MAX_DRIFT_CENTS
 		) ||
 		!derivedAmounts.some((drift) => drift !== 0)
 	) {
@@ -201,10 +206,10 @@ function rematerializeLegacyOneCentPropertyMoney(inbound = {}, evidence = {}) {
 	}
 	const gross = grossCents / 100;
 	const payout = payoutCents / 100;
-	// Older queued audits may contain the pre-fix binary half-cent result. The
+	// Queued audits may contain small derived property-money differences. The
 	// immutable source amounts and trusted conversion evidence were already
-	// validated before this point, so rematerialize only a bounded one-cent
-	// derived drift in memory; the archived audit itself remains untouched.
+	// validated before this point, so rematerialize only a bounded SAR 0.50
+	// drift per derived alias in memory; the archived audit remains untouched.
 	return {
 		...inbound,
 		amount: gross,
@@ -642,7 +647,7 @@ async function loadHotelRunnerQueuedEmailCommercialBridge(
 	) {
 		return reject("queued_commercial_evidence_invalid");
 	}
-	const materializedInbound = rematerializeLegacyOneCentPropertyMoney(
+	const materializedInbound = rematerializeBoundedVerifiedPropertyMoney(
 		inbound,
 		evidence
 	);
@@ -710,6 +715,22 @@ function validateHotelRunnerQueuedEmailCommercialBridgeRooms(
 		// The exact sole Agoda allocation warning proves commercial totals but not
 		// per-room types. HotelRunner's verified inv_code mappings own allocation;
 		// the email may not override or partially select those rooms.
+		return { ...bridge };
+	}
+	const exactProjectedSourceRoomMatch = resolvedRooms.every((resolved) =>
+		[
+			resolved?.sourceRoom?.namePresentation,
+			resolved?.sourceRoom?.name,
+		]
+			.filter(Boolean)
+			.some((label) =>
+				directEmailRoomLabelMatchesProjectedSource(inbound.roomName, label)
+			)
+	);
+	if (exactProjectedSourceRoomMatch) {
+		// HotelRunner's inv_code mapping already owns PMS room allocation. An
+		// exact OTA label plus known commercial suffixes may prove that the email
+		// belongs to those API rooms without letting the email choose a room.
 		return { ...bridge };
 	}
 	let roomMatch;
