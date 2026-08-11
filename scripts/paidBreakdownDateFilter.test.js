@@ -3,10 +3,13 @@ const assert = require("node:assert/strict");
 const moment = require("moment-timezone");
 const Reservations = require("../models/reservations");
 const {
+	MAX_PAID_BREAKDOWN_DATE_RANGES,
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
 	normalizePaidBreakdownDateField,
 	parsePaidBreakdownDateOnly,
+	parsePaidBreakdownDateRanges,
+	serializePaidBreakdownDateRanges,
 } = require("../services/paidBreakdownDateFilter");
 const { paidBreakdownReportAdmin } = require("../controllers/adminreports");
 
@@ -47,7 +50,22 @@ const hasSearchClause = (filter) =>
 		),
 	);
 
-const withReservationReadMocks = async (callback) => {
+const dateRangeClausesFor = (filter, field) =>
+	clausesFor(filter).flatMap((clause) =>
+		Array.isArray(clause?.$or)
+			? clause.$or.filter((condition) => condition?.[field])
+			: [],
+	);
+
+const withReservationReadMocks = async (
+	callback,
+	{
+		rowReservations = [],
+		financialReservations = [],
+		aggregateResult = [],
+		count = rowReservations.length,
+	} = {},
+) => {
 	const originals = {
 		countDocuments: Reservations.countDocuments,
 		find: Reservations.find,
@@ -55,17 +73,19 @@ const withReservationReadMocks = async (callback) => {
 	};
 	const observed = {
 		countFilter: null,
-		findFilter: null,
+		findCalls: [],
 		aggregateMatch: null,
+		aggregatePipeline: null,
 	};
 
 	Reservations.countDocuments = async (filter) => {
 		observed.countFilter = filter;
-		return 0;
+		return count;
 	};
 	Reservations.find = (filter) => {
-		observed.findFilter = filter;
-		return {
+		const call = { filter, projection: null };
+		observed.findCalls.push(call);
+		const chain = {
 			sort() {
 				return this;
 			},
@@ -78,12 +98,19 @@ const withReservationReadMocks = async (callback) => {
 			populate() {
 				return this;
 			},
-			lean: async () => [],
+			select(projection) {
+				call.projection = projection;
+				return this;
+			},
+			lean: async () =>
+				call.projection ? financialReservations : rowReservations,
 		};
+		return chain;
 	};
 	Reservations.aggregate = async (pipeline) => {
+		observed.aggregatePipeline = pipeline;
 		observed.aggregateMatch = pipeline?.[0]?.$match || null;
-		return [];
+		return aggregateResult;
 	};
 
 	try {
@@ -144,6 +171,133 @@ test("Riyadh date boundaries are half-open and inclusive of the selected days", 
 		filter.checkin_date.$lt.toISOString(),
 		"2026-07-15T21:00:00.000Z",
 	);
+});
+
+test("serialized noncontiguous ranges preserve their gap as one sorted Mongo $or", () => {
+	const filter = buildPaidBreakdownDateFilter({
+		dateBy: "checkout_date",
+		dateRanges:
+			"2026-03-01..2026-03-31,2026-01-01..2026-01-31",
+	});
+
+	assert.deepEqual(Object.keys(filter), ["$or"]);
+	assert.equal(filter.$or.length, 2);
+	assert.deepEqual(
+		filter.$or.map((clause) => ({
+			gte: clause.checkout_date.$gte.toISOString(),
+			lt: clause.checkout_date.$lt.toISOString(),
+		})),
+		[
+			{
+				gte: "2025-12-31T21:00:00.000Z",
+				lt: "2026-01-31T21:00:00.000Z",
+			},
+			{
+				gte: "2026-02-28T21:00:00.000Z",
+				lt: "2026-03-31T21:00:00.000Z",
+			},
+		],
+	);
+
+	const includedByFilter = (isoTimestamp) => {
+		const timestamp = new Date(isoTimestamp).getTime();
+		return filter.$or.some((clause) => {
+			const range = clause.checkout_date;
+			return timestamp >= range.$gte.getTime() && timestamp < range.$lt.getTime();
+		});
+	};
+	assert.equal(includedByFilter("2026-01-15T12:00:00.000Z"), true);
+	assert.equal(includedByFilter("2026-02-15T12:00:00.000Z"), false);
+	assert.equal(includedByFilter("2026-03-15T12:00:00.000Z"), true);
+});
+
+test("date range parsing and serialization sort and dedupe deterministically", () => {
+	const serialized = serializePaidBreakdownDateRanges([
+		{ dateFrom: "2026-07-01", dateTo: "2026-07-31" },
+		{ dateFrom: "2026-01-01", dateTo: "2026-01-31" },
+		{ dateFrom: "2026-07-01", dateTo: "2026-07-31" },
+		{ dateFrom: "2026-01-01", dateTo: "2026-01-15" },
+	]);
+	assert.equal(
+		serialized,
+		"2026-01-01..2026-01-15,2026-01-01..2026-01-31,2026-07-01..2026-07-31",
+	);
+
+	const parsed = parsePaidBreakdownDateRanges(
+		"2026-07-01..2026-07-31,2026-01-01..2026-01-31,2026-07-01..2026-07-31",
+	);
+	assert.deepEqual(
+		parsed.map(({ dateFrom, dateTo }) => ({ dateFrom, dateTo })),
+		[
+			{ dateFrom: "2026-01-01", dateTo: "2026-01-31" },
+			{ dateFrom: "2026-07-01", dateTo: "2026-07-31" },
+		],
+	);
+	assert.equal(serializePaidBreakdownDateRanges([]), "");
+});
+
+test("dateRanges accepts at most twelve input ranges before deduplication", () => {
+	const rangeForMonth = (month) => {
+		const padded = String(month).padStart(2, "0");
+		return `2026-${padded}-01..2026-${padded}-01`;
+	};
+	const twelve = Array.from(
+		{ length: MAX_PAID_BREAKDOWN_DATE_RANGES },
+		(_, index) => rangeForMonth(index + 1),
+	).join(",");
+	assert.equal(
+		buildPaidBreakdownDateFilter({ dateRanges: twelve }).$or.length,
+		MAX_PAID_BREAKDOWN_DATE_RANGES,
+	);
+
+	const thirteenDuplicates = Array.from(
+		{ length: MAX_PAID_BREAKDOWN_DATE_RANGES + 1 },
+		() => "2026-01-01..2026-01-01",
+	).join(",");
+	expectDateFilterError(
+		() => buildPaidBreakdownDateFilter({ dateRanges: thirteenDuplicates }),
+		/cannot contain more than 12 ranges/,
+	);
+});
+
+test("dateRanges rejects malformed, one-sided, reversed, injected, and mixed inputs", () => {
+	const invalidSerializedValues = [
+		"2026-01-01..",
+		"..2026-01-31",
+		"2026-01-31..2026-01-01",
+		"2026-02-30..2026-03-01",
+		"2026-01-01...2026-01-31",
+		"2026-01-01/2026-01-31",
+		" 2026-01-01..2026-01-31",
+		"2026-01-01..2026-01-31 ",
+		"2026-01-01..2026-01-31,",
+		"2026-01-01..2026-01-31,$where..2026-02-01",
+		'{"$gte":"2026-01-01"}',
+		["2026-01-01..2026-01-31"],
+		{ range: "2026-01-01..2026-01-31" },
+	];
+
+	invalidSerializedValues.forEach((dateRanges) => {
+		expectDateFilterError(
+			() => buildPaidBreakdownDateFilter({ dateRanges }),
+			/dateRanges/,
+		);
+	});
+
+	for (const scalarBoundary of [
+		{ dateFrom: "2026-01-01" },
+		{ dateTo: "2026-01-31" },
+		{ dateFrom: "2026-01-01", dateTo: "2026-01-31" },
+	]) {
+		expectDateFilterError(
+			() =>
+				buildPaidBreakdownDateFilter({
+					dateRanges: "2026-03-01..2026-03-31",
+					...scalarBoundary,
+				}),
+			/cannot be combined/,
+		);
+	}
 });
 
 test("one-sided paid report ranges retain only the requested boundary", () => {
@@ -221,7 +375,7 @@ test("reversed ranges are rejected while a single-day range is valid", () => {
 	);
 });
 
-test("admin rows, count, and scorecards receive the same selected date range", async () => {
+test("admin rows/count and scorecards share date scope while search stays row-only", async () => {
 	await withReservationReadMocks(async (observed) => {
 		const req = {
 			query: {
@@ -239,7 +393,17 @@ test("admin rows, count, and scorecards receive the same selected date range", a
 
 		assert.equal(res.statusCode, 200);
 		assert.deepEqual(res.payload?.data, []);
-		assert.equal(observed.findFilter, observed.countFilter);
+		assert.equal(res.payload?.totalMode, "gross");
+		assert.equal(res.payload?.scorecards?.totalMode, "gross");
+		assert.equal(observed.findCalls.length, 2);
+		const [rowFind, financialScorecardFind] = observed.findCalls;
+		assert.equal(rowFind.projection, null);
+		assert.equal(rowFind.filter, observed.countFilter);
+		assert.equal(financialScorecardFind.filter, observed.aggregateMatch);
+		assert.match(
+			financialScorecardFind.projection,
+			/\badminPricing\b/,
+		);
 
 		const rowDateClause = dateClauseFor(observed.countFilter, "checkout_date");
 		const scorecardDateClause = dateClauseFor(
@@ -254,12 +418,51 @@ test("admin rows, count, and scorecards receive the same selected date range", a
 	});
 });
 
+test("admin multi-date ranges reach rows/count and both net scorecard reads", async () => {
+	await withReservationReadMocks(async (observed) => {
+		const res = makeResponse();
+		await paidBreakdownReportAdmin(
+			{
+				query: {
+					hotelId: HOTEL_ID,
+					dateBy: "checkin_date",
+					dateRanges:
+						"2026-01-01..2026-01-31,2026-03-01..2026-03-31",
+					totalMode: "NET",
+				},
+				profile: { role: 8000 },
+			},
+			res,
+		);
+
+		assert.equal(res.statusCode, 200);
+		assert.equal(res.payload?.totalMode, "net");
+		assert.equal(res.payload?.scorecards?.totalMode, "net");
+		assert.equal(observed.findCalls.length, 2);
+		const [rowFind, financialScorecardFind] = observed.findCalls;
+		assert.equal(rowFind.filter, observed.countFilter);
+		assert.equal(financialScorecardFind.filter, observed.aggregateMatch);
+
+		const rowRanges = dateRangeClausesFor(
+			observed.countFilter,
+			"checkin_date",
+		);
+		const scorecardRanges = dateRangeClausesFor(
+			observed.aggregateMatch,
+			"checkin_date",
+		);
+		assert.equal(rowRanges.length, 2);
+		assert.deepEqual(rowRanges, scorecardRanges);
+	});
+});
+
 test("admin paid report preserves the unfiltered default when dates are omitted", async () => {
 	await withReservationReadMocks(async (observed) => {
 		for (const query of [
 			{ hotelId: HOTEL_ID },
 			{ hotelId: HOTEL_ID, dateBy: "checkin_date" },
 		]) {
+			const findCallStart = observed.findCalls.length;
 			const res = makeResponse();
 			await paidBreakdownReportAdmin(
 				{ query, profile: { role: 8000 } },
@@ -267,6 +470,10 @@ test("admin paid report preserves the unfiltered default when dates are omitted"
 			);
 
 			assert.equal(res.statusCode, 200);
+			const currentFindCalls = observed.findCalls.slice(findCallStart);
+			assert.equal(currentFindCalls.length, 2);
+			assert.equal(currentFindCalls[0].filter, observed.countFilter);
+			assert.equal(currentFindCalls[1].filter, observed.aggregateMatch);
 			for (const field of ["createdAt", "checkin_date", "checkout_date"]) {
 				assert.equal(dateClauseFor(observed.countFilter, field), undefined);
 				assert.equal(dateClauseFor(observed.aggregateMatch, field), undefined);

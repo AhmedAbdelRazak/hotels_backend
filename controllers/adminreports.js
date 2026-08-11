@@ -48,6 +48,12 @@ const {
 const {
 	resolveAdminReservationFinancialTotals,
 } = require("../services/adminReservationFinancialTotals");
+const {
+	ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION,
+	aggregateAdminReportFinancialAmounts,
+	normalizeAdminReportFinancialMode,
+	resolveAdminReportFinancialAmount,
+} = require("../services/adminReportFinancialAmount");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -3136,7 +3142,7 @@ function matchesBookingSourceFilter(bookingSource = "", bookingSourceFilter = []
  * ✅ Payment logic aligned with EnhancedContentTable:
  * Captured / Paid Offline / Not Paid / Not Captured
  */
-function paymentMeta(reservation = {}) {
+function paymentMeta(reservation = {}, requestedTotalMode = "gross") {
 	const pd = reservation?.paypal_details || {};
 	const pmt = String(reservation?.payment || "")
 		.toLowerCase()
@@ -3196,10 +3202,25 @@ function paymentMeta(reservation = {}) {
 	if (pendingUsd > 0) pieces.push(`pending $${pendingUsd.toFixed(2)}`);
 	if (pieces.length) hint = `PayPal: ${pieces.join(" / ")}`;
 
-	const totalAmount = safeNumber(reservation?.total_amount);
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
+	const preResolvedFinancialAmount = reservation?.__reportFinancialAmount;
+	const selectedFinancialAmount =
+		preResolvedFinancialAmount?.mode === totalMode
+			? preResolvedFinancialAmount
+			: resolveAdminReportFinancialAmount(reservation, totalMode);
+	const reportAmountAvailable =
+		selectedFinancialAmount.available === true &&
+		selectedFinancialAmount.currency === "SAR";
+	const totalAmountCents = reportAmountAvailable
+		? selectedFinancialAmount.amountCents
+		: 0;
+	const totalAmount = totalAmountCents / 100;
+	// Payment receipts are cash facts, independent from the commercial gross/net
+	// basis selected for booking values in this report.
+	const capturedPaymentAmount = safeNumber(reservation?.total_amount);
 	const paidAmount =
 		status === "Captured"
-			? totalAmount
+			? capturedPaymentAmount
 			: status === "Paid Offline"
 			? onsitePaidAmount
 			: 0;
@@ -3209,6 +3230,16 @@ function paymentMeta(reservation = {}) {
 		normalizedStatus: normalizePaymentStatus(status),
 		label: status,
 		totalAmount,
+		totalAmountCents,
+		totalMode,
+		reportAmountAvailable,
+		reportAmountCurrency: selectedFinancialAmount.currency || "",
+		reportAmountReason: reportAmountAvailable
+			? ""
+			: selectedFinancialAmount.available
+			? "foreign_currency"
+			: selectedFinancialAmount.reason,
+		netFallback: selectedFinancialAmount.netFallback === true,
 		paidAmount,
 		onsitePaidAmount,
 		hint,
@@ -3239,46 +3270,82 @@ const PAYMENT_STATUS_ORDER = [
 	"Not Paid",
 ];
 
+const createReportFinancialMetadata = () => ({
+	netFallback: 0,
+	unavailable: 0,
+	foreignCurrency: 0,
+});
+
+const trackReportFinancialMetadata = (metadata, payment = {}) => {
+	if (payment.netFallback) metadata.netFallback += 1;
+	if (payment.reportAmountAvailable) return;
+	if (payment.reportAmountReason === "foreign_currency") {
+		metadata.foreignCurrency += 1;
+	} else {
+		metadata.unavailable += 1;
+	}
+};
+
+// Resolve commercial roles before viewer sanitization can remove privileged
+// evidence. Only the selected role-safe scalar survives into report math.
+const resolveReportFinancialAmountsBeforeSanitizing = (
+	reservations = [],
+	requestedTotalMode = "gross"
+) => {
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
+	return (Array.isArray(reservations) ? reservations : []).map((reservation) => ({
+		...reservation,
+		__reportFinancialAmount: resolveAdminReportFinancialAmount(
+			reservation,
+			totalMode
+		),
+	}));
+};
+
 function buildBookingSourcePaymentSummary(
 	reservations = [],
-	paymentStatusFilter = new Set()
+	paymentStatusFilter = new Set(),
+	requestedTotalMode = "gross"
 ) {
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
+	const financialMetadata = createReportFinancialMetadata();
 	const rowsMap = new Map();
-	const columnTotals = {};
+	const columnTotalCents = {};
 	const statusSet = new Set(PAYMENT_STATUS_ORDER);
-	let overallTotal = 0;
+	let overallTotalCents = 0;
 
 	for (const status of PAYMENT_STATUS_ORDER) {
-		columnTotals[status] = 0;
+		columnTotalCents[status] = 0;
 	}
 
 	for (const reservation of reservations) {
 		if (!reservation) continue;
 
-		const pay = paymentMeta(reservation);
+		const pay = paymentMeta(reservation, totalMode);
 		if (paymentStatusFilter.size && !paymentStatusFilter.has(pay.normalizedStatus))
 			continue;
+		trackReportFinancialMetadata(financialMetadata, pay);
 
 		const bookingSource =
 			String(reservation?.booking_source || "").trim() || "Unknown";
-		const amount = safeNumber(pay.totalAmount);
+		const amountCents = pay.totalAmountCents;
 
 		if (!rowsMap.has(bookingSource)) {
 			rowsMap.set(bookingSource, {
 				booking_source: bookingSource,
-				totalsByStatus: {},
-				rowTotal: 0,
+				totalCentsByStatus: {},
+				rowTotalCents: 0,
 			});
 		}
 
 		const row = rowsMap.get(bookingSource);
-		row.totalsByStatus[pay.status] =
-			safeNumber(row.totalsByStatus[pay.status]) + amount;
-		row.rowTotal = safeNumber(row.rowTotal) + amount;
+		row.totalCentsByStatus[pay.status] =
+			safeNumber(row.totalCentsByStatus[pay.status]) + amountCents;
+		row.rowTotalCents += amountCents;
 
-		if (columnTotals[pay.status] == null) columnTotals[pay.status] = 0;
-		columnTotals[pay.status] += amount;
-		overallTotal += amount;
+		if (columnTotalCents[pay.status] == null) columnTotalCents[pay.status] = 0;
+		columnTotalCents[pay.status] += amountCents;
+		overallTotalCents += amountCents;
 		statusSet.add(pay.status);
 	}
 
@@ -3291,12 +3358,16 @@ function buildBookingSourcePaymentSummary(
 
 	const rows = Array.from(rowsMap.values())
 		.map((row) => {
+			const totalsByStatus = {};
 			statuses.forEach((status) => {
-				if (row.totalsByStatus[status] == null) {
-					row.totalsByStatus[status] = 0;
-				}
+				totalsByStatus[status] =
+					safeNumber(row.totalCentsByStatus[status]) / 100;
 			});
-			return row;
+			return {
+				booking_source: row.booking_source,
+				totalsByStatus,
+				rowTotal: row.rowTotalCents / 100,
+			};
 		})
 		.sort((a, b) => {
 			const diff = safeNumber(b.rowTotal) - safeNumber(a.rowTotal);
@@ -3308,16 +3379,19 @@ function buildBookingSourcePaymentSummary(
 			);
 		});
 
+	const columnTotals = {};
 	statuses.forEach((status) => {
-		if (columnTotals[status] == null) columnTotals[status] = 0;
+		columnTotals[status] = safeNumber(columnTotalCents[status]) / 100;
 	});
 
 	return {
 		statuses,
 		rows,
 		columnTotals,
-		overallTotal,
+		overallTotal: overallTotalCents / 100,
 		currency: "SAR",
+		totalMode,
+		financialMetadata,
 	};
 }
 
@@ -3331,49 +3405,56 @@ function toUtcDateKey(value) {
 function buildCheckoutDatePaymentSummary(
 	reservations = [],
 	paymentStatusFilter = new Set(),
-	{ dateField = "checkout_date", rowKey = "checkout_date" } = {}
+	{
+		dateField = "checkout_date",
+		rowKey = "checkout_date",
+		totalMode: requestedTotalMode = "gross",
+	} = {}
 ) {
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
+	const financialMetadata = createReportFinancialMetadata();
 	const rowsMap = new Map();
-	const columnTotals = {};
+	const columnTotalCents = {};
 	const statusSet = new Set(PAYMENT_STATUS_ORDER);
-	let overallTotal = 0;
+	let overallTotalCents = 0;
 	let overallReservationsCount = 0;
 
 	for (const status of PAYMENT_STATUS_ORDER) {
-		columnTotals[status] = 0;
+		columnTotalCents[status] = 0;
 	}
 
 	for (const reservation of reservations) {
 		if (!reservation) continue;
 
-		const pay = paymentMeta(reservation);
+		const pay = paymentMeta(reservation, totalMode);
 		if (paymentStatusFilter.size && !paymentStatusFilter.has(pay.normalizedStatus))
 			continue;
 
 		const rowDate = toUtcDateKey(reservation?.[dateField]);
 		if (!rowDate) continue;
+		trackReportFinancialMetadata(financialMetadata, pay);
 
-		const amount = safeNumber(pay.totalAmount);
+		const amountCents = pay.totalAmountCents;
 
 		if (!rowsMap.has(rowDate)) {
 			rowsMap.set(rowDate, {
 				date: rowDate,
 				[rowKey]: rowDate,
-				totalsByStatus: {},
-				rowTotal: 0,
+				totalCentsByStatus: {},
+				rowTotalCents: 0,
 				reservationsCount: 0,
 			});
 		}
 
 		const row = rowsMap.get(rowDate);
-		row.totalsByStatus[pay.status] =
-			safeNumber(row.totalsByStatus[pay.status]) + amount;
-		row.rowTotal = safeNumber(row.rowTotal) + amount;
+		row.totalCentsByStatus[pay.status] =
+			safeNumber(row.totalCentsByStatus[pay.status]) + amountCents;
+		row.rowTotalCents += amountCents;
 		row.reservationsCount = safeNumber(row.reservationsCount) + 1;
 
-		if (columnTotals[pay.status] == null) columnTotals[pay.status] = 0;
-		columnTotals[pay.status] += amount;
-		overallTotal += amount;
+		if (columnTotalCents[pay.status] == null) columnTotalCents[pay.status] = 0;
+		columnTotalCents[pay.status] += amountCents;
+		overallTotalCents += amountCents;
 		overallReservationsCount += 1;
 		statusSet.add(pay.status);
 	}
@@ -3387,12 +3468,18 @@ function buildCheckoutDatePaymentSummary(
 
 	const rows = Array.from(rowsMap.values())
 		.map((row) => {
+			const totalsByStatus = {};
 			statuses.forEach((status) => {
-				if (row.totalsByStatus[status] == null) {
-					row.totalsByStatus[status] = 0;
-				}
+				totalsByStatus[status] =
+					safeNumber(row.totalCentsByStatus[status]) / 100;
 			});
-			return row;
+			return {
+				date: row.date,
+				[rowKey]: row[rowKey],
+				totalsByStatus,
+				rowTotal: row.rowTotalCents / 100,
+				reservationsCount: row.reservationsCount,
+			};
 		})
 		.sort((a, b) =>
 			String(a.date || "").localeCompare(
@@ -3404,18 +3491,21 @@ function buildCheckoutDatePaymentSummary(
 			)
 		);
 
+	const columnTotals = {};
 	statuses.forEach((status) => {
-		if (columnTotals[status] == null) columnTotals[status] = 0;
+		columnTotals[status] = safeNumber(columnTotalCents[status]) / 100;
 	});
 
 	return {
 		statuses,
 		rows,
 		columnTotals,
-		overallTotal,
+		overallTotal: overallTotalCents / 100,
 		overallReservationsCount,
 		currency: "SAR",
 		rowType: rowKey,
+		totalMode,
+		financialMetadata,
 	};
 }
 
@@ -3448,7 +3538,9 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			dateBasis,
 			bookingSources,
 			bookingSource,
+			totalMode,
 		} = req.query || {};
+		const normalizedTotalMode = normalizeAdminReportFinancialMode(totalMode);
 
 		let resolvedHotelId = null;
 		if (hotelId && hotelId !== "all") {
@@ -3467,7 +3559,11 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			if (!hotelIds.length) {
 				return res.json({
 					success: true,
-					data: buildBookingSourcePaymentSummary([], new Set()),
+					data: buildBookingSourcePaymentSummary(
+						[],
+						new Set(),
+						normalizedTotalMode
+					),
 				});
 			}
 		}
@@ -3522,16 +3618,23 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 
 		const reservations = await Reservations.find(scopedQuery)
 			.select(
-				"booking_source total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
+				`booking_source sub_total pickedRoomsType payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status ${ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION}`
 			)
 			.lean();
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
+			sanitizeReservationAuditLogsCollectionForViewer(
+				resolveReportFinancialAmountsBeforeSanitizing(
+					reservations,
+					normalizedTotalMode
+				),
+				actor
+			);
 		const summary = buildBookingSourcePaymentSummary(
 			hotelVisibleReservations,
-			paymentStatusFilter
+			paymentStatusFilter,
+			normalizedTotalMode
 		);
 
 		return res.json({
@@ -3539,6 +3642,7 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			data: summary,
 			range: range?.label || null,
 			dateBasis: normalizedDateBasis,
+			totalMode: normalizedTotalMode,
 		});
 	} catch (err) {
 		console.error("Error in bookingSourcePaymentSummary:", err);
@@ -3563,7 +3667,9 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 			bookingSources,
 			bookingSource,
 			dateBasis,
+			totalMode,
 		} = req.query || {};
+		const normalizedTotalMode = normalizeAdminReportFinancialMode(totalMode);
 
 		let resolvedHotelId = null;
 		if (hotelId && hotelId !== "all") {
@@ -3582,7 +3688,9 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 			if (!hotelIds.length) {
 				return res.json({
 					success: true,
-					data: buildCheckoutDatePaymentSummary([], new Set()),
+					data: buildCheckoutDatePaymentSummary([], new Set(), {
+						totalMode: normalizedTotalMode,
+					}),
 				});
 			}
 		}
@@ -3634,17 +3742,23 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 
 		const reservations = await Reservations.find(scopedQuery)
 			.select(
-				"checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
+				`checkin_date checkout_date sub_total pickedRoomsType payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status ${ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION}`
 			)
 			.lean();
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
+			sanitizeReservationAuditLogsCollectionForViewer(
+				resolveReportFinancialAmountsBeforeSanitizing(
+					reservations,
+					normalizedTotalMode
+				),
+				actor
+			);
 		const summary = buildCheckoutDatePaymentSummary(
 			hotelVisibleReservations,
 			paymentStatusFilter,
-			{ dateField, rowKey }
+			{ dateField, rowKey, totalMode: normalizedTotalMode }
 		);
 
 		return res.json({
@@ -3652,6 +3766,7 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 			data: summary,
 			range: range?.label || null,
 			dateBasis: rowKey === "checkin_date" ? "checkin" : "checkout",
+			totalMode: normalizedTotalMode,
 		});
 	} catch (err) {
 		console.error("Error in checkoutDatePaymentSummary:", err);
@@ -3836,7 +3951,9 @@ async function computeOccupancy({
 	paymentStatusFilter,
 	bookingSourceFilter = [],
 	reservationVisibilityActor = null,
+	totalMode: requestedTotalMode = "gross",
 }) {
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
 	const hotel = await HotelDetails.findById(hotelId)
 		.select("hotelName roomCountDetails")
 		.lean();
@@ -4054,21 +4171,25 @@ async function computeOccupancy({
 
 	const reservations = await Reservations.find(baseQuery)
 		.select(
-			"confirmation_number checkin_date checkout_date pickedRoomsType pickedRoomsPricing reservation_status state pendingConfirmation agentDecisionSnapshot total_amount sub_total adminPricing adminPricingVisibility payment payment_details paypal_details paid_amount_breakdown booking_source"
+			`confirmation_number checkin_date checkout_date pickedRoomsType reservation_status state pendingConfirmation agentDecisionSnapshot sub_total payment payment_details paypal_details paid_amount_breakdown ${ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION}`
 		)
 		.lean();
 	const hotelVisibleReservations =
 		sanitizeReservationAuditLogsCollectionForViewer(
-			reservations,
+			resolveReportFinancialAmountsBeforeSanitizing(
+				reservations,
+				totalMode
+			),
 			reservationVisibilityActor
 		);
 
-	let totalAmount = 0;
-	let checkoutGrossTotal = 0;
+	let totalAmountCents = 0;
+	let checkoutTotalCents = 0;
 	let checkoutReservationsCount = 0;
-	let checkinGrossTotal = 0;
+	let checkinTotalCents = 0;
 	let checkinReservationsCount = 0;
 	const paymentBreakdown = {};
+	const financialMetadata = createReportFinancialMetadata();
 
 	// 1) Count bookings into day.rooms[key].booked
 	for (const reservation of hotelVisibleReservations) {
@@ -4087,7 +4208,7 @@ async function computeOccupancy({
 		)
 			continue;
 
-		const pay = paymentMeta(reservation);
+		const pay = paymentMeta(reservation, totalMode);
 		if (
 			paymentStatusFilter.size &&
 			!paymentStatusFilter.has(pay.normalizedStatus)
@@ -4101,21 +4222,22 @@ async function computeOccupancy({
 			)
 		)
 			continue;
+		trackReportFinancialMetadata(financialMetadata, pay);
 
-		totalAmount += pay.totalAmount;
+		totalAmountCents += pay.totalAmountCents;
 
 		if (!paymentBreakdown[pay.status]) {
 			paymentBreakdown[pay.status] = {
 				status: pay.status,
 				label: pay.label,
 				count: 0,
-				totalAmount: 0,
+				totalAmountCents: 0,
 				paidAmount: 0,
 				onsitePaidAmount: 0,
 			};
 		}
 		paymentBreakdown[pay.status].count += 1;
-		paymentBreakdown[pay.status].totalAmount += pay.totalAmount;
+		paymentBreakdown[pay.status].totalAmountCents += pay.totalAmountCents;
 		paymentBreakdown[pay.status].paidAmount += pay.paidAmount;
 		paymentBreakdown[pay.status].onsitePaidAmount += pay.onsitePaidAmount;
 
@@ -4127,12 +4249,12 @@ async function computeOccupancy({
 		const coTs = co.getTime();
 
 		if (coTs >= start.getTime() && coTs < endExclusive.getTime()) {
-			checkoutGrossTotal += pay.totalAmount;
+			checkoutTotalCents += pay.totalAmountCents;
 			checkoutReservationsCount += 1;
 		}
 
 		if (ciTs >= start.getTime() && ciTs < endExclusive.getTime()) {
-			checkinGrossTotal += pay.totalAmount;
+			checkinTotalCents += pay.totalAmountCents;
 			checkinReservationsCount += 1;
 		}
 
@@ -4287,9 +4409,15 @@ async function computeOccupancy({
 		0
 	);
 
-	const paymentBreakdownArr = Object.values(paymentBreakdown).sort(
-		(a, b) => (b.count || 0) - (a.count || 0)
-	);
+	const paymentBreakdownArr = Object.values(paymentBreakdown)
+		.map(({ totalAmountCents: statusTotalCents, ...payment }) => ({
+			...payment,
+			totalAmount: statusTotalCents / 100,
+		}))
+		.sort((a, b) => (b.count || 0) - (a.count || 0));
+	const totalAmount = totalAmountCents / 100;
+	const checkoutTotal = checkoutTotalCents / 100;
+	const checkinTotal = checkinTotalCents / 100;
 
 	return {
 		success: true,
@@ -4324,11 +4452,15 @@ async function computeOccupancy({
 				occupancyByType: occupancyByTypeArr,
 				warnings,
 				totalAmount,
-				checkoutGrossTotal,
+				checkoutTotal,
+				checkoutGrossTotal: checkoutTotal,
 				checkoutReservationsCount,
-				checkinGrossTotal,
+				checkinTotal,
+				checkinGrossTotal: checkinTotal,
 				checkinReservationsCount,
 				paymentBreakdown: paymentBreakdownArr,
+				totalMode,
+				financialMetadata,
 			},
 			displayMode,
 		};
@@ -4373,6 +4505,9 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 			const bookingSourceFilter = parseBookingSourceFilter(
 				req.query.bookingSources || req.query.bookingSource
 			);
+			const totalMode = normalizeAdminReportFinancialMode(
+				req.query.totalMode
+			);
 
 			const result = await computeOccupancy({
 				hotelId,
@@ -4387,6 +4522,7 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 				paymentStatusFilter,
 				bookingSourceFilter,
 				reservationVisibilityActor: req.profile,
+				totalMode,
 			});
 
 		if (result?.error) {
@@ -4846,6 +4982,7 @@ const buildPaidBreakdownFilter = ({
 	dateBy,
 	dateFrom,
 	dateTo,
+	dateRanges,
 }) => {
 	const filters = [];
 	if (hotelId) {
@@ -4853,7 +4990,12 @@ const buildPaidBreakdownFilter = ({
 	}
 	filters.push(buildExcludePendingOtaReviewFilter());
 	filters.push(buildPaidBreakdownNonZeroFilter());
-	const dateFilter = buildPaidBreakdownDateFilter({ dateBy, dateFrom, dateTo });
+	const dateFilter = buildPaidBreakdownDateFilter({
+		dateBy,
+		dateFrom,
+		dateTo,
+		dateRanges,
+	});
 	if (dateFilter) filters.push(dateFilter);
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
@@ -4864,8 +5006,9 @@ const buildPaidBreakdownFilter = ({
 
 const buildPaidBreakdownScorecards = async (
 	filter,
-	{ hotelVisible = false } = {}
+	{ hotelVisible = false, totalMode: requestedTotalMode = "gross" } = {}
 ) => {
+	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
 	const breakdownSum = paidBreakdownTotalExpression();
 	const breakdownTotalsGroup = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
 		acc[key] = {
@@ -4875,37 +5018,52 @@ const buildPaidBreakdownScorecards = async (
 		};
 		return acc;
 	}, {});
-	const result = await Reservations.aggregate([
-		{ $match: filter },
-		{
-			$addFields: {
-				paid_breakdown_total: breakdownSum,
-				paid_amount_safe: hotelVisible
-					? hotelVisiblePaidAmountExpression()
-					: breakdownSum,
-				total_amount_safe: hotelVisible
-					? hotelVisibleAmountExpression()
-					: { $ifNull: ["$total_amount", 0] },
+	const [result, financialReservations] = await Promise.all([
+		Reservations.aggregate([
+			{ $match: filter },
+			{
+				$addFields: {
+					paid_breakdown_total: breakdownSum,
+					paid_amount_safe: hotelVisible
+						? hotelVisiblePaidAmountExpression()
+						: breakdownSum,
+					total_amount_safe: hotelVisible
+						? hotelVisibleAmountExpression()
+						: { $ifNull: ["$total_amount", 0] },
+				},
 			},
-		},
-		{
-			$group: {
-				_id: null,
-				totalAmount: { $sum: "$total_amount_safe" },
-				paidAmount: { $sum: "$paid_amount_safe" },
-				...breakdownTotalsGroup,
+			{
+				$group: {
+					_id: null,
+					totalAmount: { $sum: "$total_amount_safe" },
+					paidAmount: { $sum: "$paid_amount_safe" },
+					...breakdownTotalsGroup,
+				},
 			},
-		},
+		]),
+		hotelVisible
+			? Promise.resolve([])
+			: Reservations.find(filter)
+					.select(ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION)
+					.lean(),
 	]);
 	const summary = result[0] || {};
+	const financialSummary = hotelVisible
+		? null
+		: aggregateAdminReportFinancialAmounts(financialReservations, totalMode);
 	const breakdownTotals = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
 		acc[key] = safeNumber(summary[key]);
 		return acc;
 	}, {});
 	return {
-		totalAmount: safeNumber(summary.totalAmount),
+		totalAmount: financialSummary
+			? financialSummary.totalAmount
+			: safeNumber(summary.totalAmount),
 		paidAmount: safeNumber(summary.paidAmount),
 		breakdownTotals,
+		totalMode,
+		financialMetadata: financialSummary?.metadata || null,
+		financialIncludedCount: financialSummary?.includedCount ?? null,
 	};
 };
 
@@ -4925,7 +5083,13 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			dateBy: req.query.dateBy,
 			dateFrom: req.query.dateFrom,
 			dateTo: req.query.dateTo,
+			dateRanges: req.query.dateRanges,
 		};
+		const totalMode = normalizeAdminReportFinancialMode(req.query.totalMode);
+		const includeScorecards =
+			String(req.query.includeScorecards || "")
+				.trim()
+				.toLowerCase() !== "false";
 		const baseFilter = buildPaidBreakdownFilter({
 			hotelId,
 			actor: req.profile,
@@ -4940,7 +5104,7 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 
 		const totalDocuments = await Reservations.countDocuments(finalFilter);
 		const reservations = await Reservations.find(finalFilter)
-			.sort({ checkin_date: -1, createdAt: -1 })
+			.sort({ checkin_date: -1, createdAt: -1, _id: -1 })
 			.skip(skip)
 			.limit(limit)
 			.populate("hotelId", "hotelName belongsTo")
@@ -4950,21 +5114,54 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			"ADMIN PAID BREAKDOWN",
 		);
 
-		const scorecards = await buildPaidBreakdownScorecards(baseFilter);
+		const scorecards = includeScorecards
+			? await buildPaidBreakdownScorecards(baseFilter, { totalMode })
+			: null;
 		const data = reservationsWithRoomDetails.map((reservation) => {
 			const breakdown = reservation.paid_amount_breakdown || {};
 			const paidTotal = computePaidBreakdownTotal(breakdown);
+			const paidTotalCents = Math.round(paidTotal * 100);
+			const financialTotals = resolveAdminReservationFinancialTotals(reservation);
+			const selectedFinancialAmount = resolveAdminReportFinancialAmount(
+				reservation,
+				totalMode
+			);
+			const reportTotalAvailable =
+				selectedFinancialAmount.available === true &&
+				selectedFinancialAmount.currency === "SAR";
+			const reportTotalAmount = reportTotalAvailable
+				? selectedFinancialAmount.amount
+				: null;
 			return {
 				...reservation,
 				paid_breakdown_total: paidTotal,
-				paid_breakdown_remaining: Math.max(
-					safeNumber(reservation.total_amount) - paidTotal,
-					0,
-				),
+				gross_total_amount: financialTotals.grossTotalAmount,
+				net_total_amount: financialTotals.netTotalAmount,
+				financial_totals_currency: financialTotals.currency || null,
+				gross_total_available: financialTotals.grossAvailable === true,
+				net_total_available: financialTotals.netAvailable === true,
+				report_total_mode: totalMode,
+				report_total_amount: reportTotalAmount,
+				report_total_available: reportTotalAvailable,
+				report_total_net_fallback:
+					selectedFinancialAmount.netFallback === true,
+				paid_breakdown_remaining: reportTotalAvailable
+					? Math.max(
+							selectedFinancialAmount.amountCents - paidTotalCents,
+							0
+					  ) / 100
+					: null,
 			};
 		});
 
-		return res.json({ data, totalDocuments, page, limit, scorecards });
+		return res.json({
+			data,
+			totalDocuments,
+			page,
+			limit,
+			totalMode,
+			scorecards,
+		});
 	} catch (err) {
 		if (err instanceof PaidBreakdownDateFilterError) {
 			return res.status(err.statusCode).json({ error: err.message });

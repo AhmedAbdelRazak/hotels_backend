@@ -8,6 +8,15 @@ const PAID_BREAKDOWN_DATE_FIELDS = new Set([
 	"checkout_date",
 ]);
 const ASCII_DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_PAID_BREAKDOWN_DATE_RANGES = 12;
+
+// One URL parameter, with no whitespace or locale-dependent characters:
+// YYYY-MM-DD..YYYY-MM-DD,YYYY-MM-DD..YYYY-MM-DD
+//
+// The parser sorts ranges by start/end date and removes exact duplicates so the
+// same selection always produces the same Mongo filter and serialized value.
+const PAID_BREAKDOWN_DATE_RANGE_ITEM_PATTERN =
+	/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/;
 
 class PaidBreakdownDateFilterError extends Error {
 	constructor(message) {
@@ -53,12 +62,134 @@ const parsePaidBreakdownDateOnly = (value, parameterName) => {
 	return parsed.startOf("day");
 };
 
+const normalizePaidBreakdownDateRanges = (
+	ranges,
+	parameterName = "dateRanges"
+) => {
+	if (!Array.isArray(ranges)) {
+		throw new PaidBreakdownDateFilterError(
+			`${parameterName} must be an array of date ranges`
+		);
+	}
+	if (ranges.length > MAX_PAID_BREAKDOWN_DATE_RANGES) {
+		throw new PaidBreakdownDateFilterError(
+			`${parameterName} cannot contain more than ${MAX_PAID_BREAKDOWN_DATE_RANGES} ranges`
+		);
+	}
+
+	const normalized = ranges.map((range, index) => {
+		if (!range || typeof range !== "object" || Array.isArray(range)) {
+			throw new PaidBreakdownDateFilterError(
+				`${parameterName}[${index}] must contain both dateFrom and dateTo`
+			);
+		}
+
+		const dateFrom = range.dateFrom;
+		const dateTo = range.dateTo;
+		if (!hasQueryValue(dateFrom) || !hasQueryValue(dateTo)) {
+			throw new PaidBreakdownDateFilterError(
+				`${parameterName}[${index}] must contain both dateFrom and dateTo`
+			);
+		}
+
+		const start = parsePaidBreakdownDateOnly(
+			dateFrom,
+			`${parameterName}[${index}].dateFrom`
+		);
+		const endDay = parsePaidBreakdownDateOnly(
+			dateTo,
+			`${parameterName}[${index}].dateTo`
+		);
+		if (start.valueOf() > endDay.valueOf()) {
+			throw new PaidBreakdownDateFilterError(
+				`${parameterName}[${index}].dateFrom must be on or before dateTo`
+			);
+		}
+
+		return {
+			dateFrom,
+			dateTo,
+			start,
+			endExclusive: endDay.clone().add(1, "day").startOf("day"),
+		};
+	});
+
+	normalized.sort(
+		(left, right) =>
+			left.dateFrom.localeCompare(right.dateFrom) ||
+			left.dateTo.localeCompare(right.dateTo)
+	);
+
+	return normalized.filter(
+		(range, index) =>
+			index === 0 ||
+			range.dateFrom !== normalized[index - 1].dateFrom ||
+			range.dateTo !== normalized[index - 1].dateTo
+	);
+};
+
+const parsePaidBreakdownDateRanges = (value) => {
+	if (!hasQueryValue(value)) return [];
+	if (typeof value !== "string") {
+		throw new PaidBreakdownDateFilterError(
+			"dateRanges must use the YYYY-MM-DD..YYYY-MM-DD format"
+		);
+	}
+
+	const serializedRanges = value.split(",");
+	if (serializedRanges.length > MAX_PAID_BREAKDOWN_DATE_RANGES) {
+		throw new PaidBreakdownDateFilterError(
+			`dateRanges cannot contain more than ${MAX_PAID_BREAKDOWN_DATE_RANGES} ranges`
+		);
+	}
+
+	const ranges = serializedRanges.map((serializedRange, index) => {
+		const match = PAID_BREAKDOWN_DATE_RANGE_ITEM_PATTERN.exec(serializedRange);
+		if (!match) {
+			throw new PaidBreakdownDateFilterError(
+				`dateRanges[${index}] must use the YYYY-MM-DD..YYYY-MM-DD format`
+			);
+		}
+		return { dateFrom: match[1], dateTo: match[2] };
+	});
+
+	return normalizePaidBreakdownDateRanges(ranges);
+};
+
+const serializePaidBreakdownDateRanges = (ranges = []) =>
+	normalizePaidBreakdownDateRanges(ranges)
+		.map((range) => `${range.dateFrom}..${range.dateTo}`)
+		.join(",");
+
 const buildPaidBreakdownDateFilter = ({
 	dateBy,
 	dateFrom,
 	dateTo,
+	dateRanges,
 } = {}) => {
 	const dateField = normalizePaidBreakdownDateField(dateBy);
+	const hasSerializedRanges = hasQueryValue(dateRanges);
+	if (
+		hasSerializedRanges &&
+		(hasQueryValue(dateFrom) || hasQueryValue(dateTo))
+	) {
+		throw new PaidBreakdownDateFilterError(
+			"dateRanges cannot be combined with dateFrom or dateTo"
+		);
+	}
+
+	if (hasSerializedRanges) {
+		const ranges = parsePaidBreakdownDateRanges(dateRanges);
+		return {
+			$or: ranges.map((range) => ({
+				[dateField]: {
+					$gte: range.start.toDate(),
+					$lt: range.endExclusive.toDate(),
+				},
+			})),
+		};
+	}
+
 	const start = parsePaidBreakdownDateOnly(dateFrom, "dateFrom");
 	const endDay = parsePaidBreakdownDateOnly(dateTo, "dateTo");
 
@@ -80,8 +211,11 @@ const buildPaidBreakdownDateFilter = ({
 module.exports = {
 	PAID_BREAKDOWN_REPORT_TIMEZONE,
 	DEFAULT_PAID_BREAKDOWN_DATE_FIELD,
+	MAX_PAID_BREAKDOWN_DATE_RANGES,
 	PaidBreakdownDateFilterError,
 	normalizePaidBreakdownDateField,
 	parsePaidBreakdownDateOnly,
+	parsePaidBreakdownDateRanges,
+	serializePaidBreakdownDateRanges,
 	buildPaidBreakdownDateFilter,
 };
