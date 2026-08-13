@@ -32,6 +32,27 @@ The HotelRunner API subscription was cancelled on **2026-08-13** because its cur
 
 Required post-deployment verification must be write-safe and make **zero HotelRunner vendor calls**: confirm the five flags above and blank cutoff without printing secrets; confirm whether the worker service reached the desired disabled/stopped state; if administrator access is still needed, record the residual supervisor state and prove any residual process is in the master-disabled inert wait with no database connection/model/client/vendor initialization; confirm callback and backend admin routes return generic not-found responses; confirm the removed frontend route/menu/modules are absent from the production build; and confirm representative OTA inbound email create/update/cancel behavior continues through the normal inline path. Before shutdown, count `awaiting_hotelrunner`/`recovery_pending` inbound archives, nonterminal fallback jobs, actionable HotelRunner events, direct API-projected reservations, and pending/retry fallback notifications. Any nonzero result requires evidence-bound local-only review or recovery; never run the dormant fallback worker or call the vendor to resolve it. Record the results separately with the deployed revisions once those checks are complete; this document does not pre-claim them.
 
+### Production verification — 2026-08-13 04:18 PDT
+
+The email-only cutover was deployed and verified without making a HotelRunner vendor request:
+
+- Backend PR #74 was deployed at functional merge `98bc0efe210ee8e8ebdcbb8f33fd4c1bdf22531e`; frontend PR #49 was deployed at merge `ea049e92972fb8ce5883d8bd383c26348208ddb8`. Both production checkouts were clean and exactly matched those reviewed revisions before this verification record was added.
+- The atomic environment gate created a protected backup, set `HOTELRUNNER_INTEGRATION_ENABLED=false`, set all four legacy API/projection gates false, and cleared the activation cutoff. The main backend PM2 process had zero inherited `HOTELRUNNER_*` overrides and was restarted successfully.
+- The backend root and OTA inbound-email health endpoint returned `200` on loopback; OTA inbound-email health also returned `200` through the public xHotelPro edge. Backend startup confirmed the MongoDB connection and inbound-email dedupe index were ready.
+- HotelRunner callback `GET` returned `404` on loopback and through the public edge. A JSON callback `POST` returned `404` before parsing, and the former backend admin status route returned `404`.
+- The frontend production build compiled successfully and the public page served the same new `main.7309c6e7.js` asset. Source and production-bundle scans found zero `/admin/hotelrunner` route references and zero `/hotelrunner/admin` API references; the dedicated frontend module directory was absent.
+- Read-only database verification found zero `awaiting_hotelrunner`/`parsed_awaiting_hotelrunner` inbound archives, zero `recovery_pending` archives, zero nonterminal fallback jobs, zero actionable HotelRunner events, and zero pending/processing/retry fallback notification rows. No recovery or data mutation was required.
+- Eighty historical direct-API reservations were retained as provenance. Every one had a valid OTA lifecycle watermark, so authenticated newer OTA email can be ordered safely without deleting or fabricating historical fields.
+- The aggregate local HotelRunner quota ledger was unchanged across deployment: five live buckets, 19 total reserved calls, and the same most recent update at `2026-08-13T09:10:38.469Z`. This is supporting evidence that shutdown verification itself made no vendor request.
+
+One administrator-only cleanup remains: the system `xhotelpro-hotelrunner-sync.service` unit is still enabled because both an unprivileged disable and noninteractive `sudo` were rejected. Its stable process is in the verified master-disabled inert guard, reports zero TCP and zero UDP connections, and initializes no database connection/model, HotelRunner client, quota claim, event lease, or reservation work. This residual supervisor state cannot call HotelRunner, but it must not be described as disabled. An administrator should run:
+
+```bash
+sudo systemctl disable --now xhotelpro-hotelrunner-sync.service
+```
+
+Afterward, verify `systemctl is-enabled` reports `disabled`, `systemctl is-active` reports `inactive`, and no HotelRunner worker process remains. Do not test the shutdown by calling HotelRunner.
+
 ## Historical decision summary — inactive
 
 The earlier architectural decision was **local-first, background-only synchronization**. It is retained as design provenance and is inactive under the 2026-08-13 email-only contract:
