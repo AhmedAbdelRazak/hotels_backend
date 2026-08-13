@@ -46,7 +46,10 @@ const dateOnlyKey = (value) => {
 	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
 		return value.slice(0, 10);
 	}
-	const parsed = moment(value);
+	// Stay dates are persisted as UTC-midnight calendar dates. Read them on the
+	// same basis so the server's local timezone cannot move a hotel stay back a
+	// day.
+	const parsed = moment.utc(value);
 	return parsed.isValid() ? parsed.format("YYYY-MM-DD") : "";
 };
 
@@ -81,8 +84,8 @@ const isBedBasedRoom = ({ roomType, label, individualBeds } = {}) => {
 };
 
 const getDateRange = (startStr, endStr) => {
-	const start = moment(startStr, "YYYY-MM-DD", true).startOf("day");
-	const end = moment(endStr, "YYYY-MM-DD", true).startOf("day");
+	const start = moment.utc(startStr, "YYYY-MM-DD", true).startOf("day");
+	const end = moment.utc(endStr, "YYYY-MM-DD", true).startOf("day");
 	if (!start.isValid() || !end.isValid()) {
 		return null;
 	}
@@ -287,8 +290,8 @@ const paymentMeta = (reservation = {}) => {
 };
 
 const reservationCoversDay = (reservation, day) => {
-	const checkin = moment(reservation?.checkin_date).startOf("day");
-	const checkout = moment(reservation?.checkout_date).startOf("day");
+	const checkin = moment.utc(reservation?.checkin_date).startOf("day");
+	const checkout = moment.utc(reservation?.checkout_date).startOf("day");
 	if (!checkin.isValid() || !checkout.isValid()) return false;
 	return day.isSameOrAfter(checkin, "day") && day.isBefore(checkout, "day");
 };
@@ -429,8 +432,8 @@ const buildPricingByDayFromDetail = (
 	agentId = ""
 ) => {
 	if (!detail) return [];
-	const start = moment(startStr, "YYYY-MM-DD", true).startOf("day");
-	const end = moment(endStr, "YYYY-MM-DD", true).startOf("day");
+	const start = moment.utc(startStr, "YYYY-MM-DD", true).startOf("day");
+	const end = moment.utc(endStr, "YYYY-MM-DD", true).startOf("day");
 	if (!start.isValid() || !end.isValid()) return [];
 	const pricingRate = Array.isArray(detail.pricingRate) ? detail.pricingRate : [];
 	const basePrice = resolveDetailBasePrice(detail);
@@ -835,7 +838,7 @@ const buildHotelInventoryDayPayload = async (
 		throw inventoryHttpError(400, "date is required (YYYY-MM-DD)");
 	}
 
-	const day = moment(date, "YYYY-MM-DD", true).startOf("day");
+	const day = moment.utc(date, "YYYY-MM-DD", true).startOf("day");
 	if (!day.isValid()) {
 		throw inventoryHttpError(400, "Invalid date format");
 	}
@@ -1194,7 +1197,7 @@ exports.getHotelInventoryDay = async (req, res) => {
 		return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
 	}
 
-	const day = moment(date, "YYYY-MM-DD", true).startOf("day");
+	const day = moment.utc(date, "YYYY-MM-DD", true).startOf("day");
 	if (!day.isValid()) {
 		return res.status(400).json({ error: "Invalid date format" });
 	}

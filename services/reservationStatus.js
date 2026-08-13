@@ -1,6 +1,7 @@
 const PENDING_CONFIRMATION_STATUS_REGEX =
 	/(?:pending[\s_-]?confirmation|pending[\s_-]?finance[\s_-]?review|pending[\s_-]?agent[\s_-]?commission[\s_-]?approval|^pending$)/i;
 const PENDING_DECISION_STATUS_REGEX = /^pending$/i;
+const FINANCE_REJECTED_INVENTORY_STATUS_REGEX = /^finance[\s_-]?rejected$/i;
 const INVENTORY_EXCLUDED_STATUS_REGEX = /cancel|reject|void|no[_\s-]?show/i;
 const INVENTORY_COMPLETED_STATUS_REGEX = /checked[_\s-]?out|checkedout/i;
 const INVENTORY_NON_BLOCKING_STATUS_REGEX =
@@ -49,6 +50,10 @@ const shouldCountReservationForInventory = (
 		includeCompleted = false,
 	} = {}
 ) => {
+	const status = normalizeStatus(
+		reservation.reservation_status || reservation.state || ""
+	);
+
 	if (
 		!includePendingConfirmation &&
 		isPendingConfirmationReservation(reservation)
@@ -56,11 +61,18 @@ const shouldCountReservationForInventory = (
 		return reservation?.pendingConfirmation?.inventoryBlocks === true;
 	}
 
-	if (includeCancelled) return true;
+	// A finance rejection requests an internal amount/commission correction; it
+	// is not a hotel rejection or cancellation. Keep it marker-controlled like
+	// the surrounding finance-review lifecycle without broadening the shared
+	// pending-queue regex used by unrelated operational queries.
+	if (FINANCE_REJECTED_INVENTORY_STATUS_REGEX.test(status)) {
+		return (
+			includePendingConfirmation ||
+			reservation?.pendingConfirmation?.inventoryBlocks === true
+		);
+	}
 
-	const status = normalizeStatus(
-		reservation.reservation_status || reservation.state || ""
-	);
+	if (includeCancelled) return true;
 	if (!status) return true;
 
 	if (includeCompleted && INVENTORY_COMPLETED_STATUS_REGEX.test(status)) {

@@ -3102,3 +3102,49 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Production flags, callback behavior, frontend build removal, OTA-email
     regression behavior, and final supervisor state require post-deployment
     verification; source changes alone are not deployment evidence.
+
+2026-08-13 OTA Financial Display And Inventory Date/Lifecycle Correction
+- Files:
+  - services/adminReservationFinancialTotals.js
+  - services/otaReservationMapper.js
+  - services/reservationStatus.js
+  - controllers/hotel_inventory.js
+  - controllers/janat.js
+  - controllers/reservations.js
+  - controllers/reservation_excel_import.js
+  - scripts/reconcileReleasedOtaInventoryBlocks20260813.js
+  - docs/ops/ota-financial-inventory-correction-20260813.md
+- Financial display contract:
+  - A server-stamped OTA pricing-review override may supersede older immutable
+    source evidence for admin display only when its actor/time/source markers,
+    canonical provider evidence, independently hashed email marker, original
+    gross, current gross/net/expense/root/margin, SAR currency, and all nightly
+    rows reconcile exactly.
+  - Ordinary non-authoritative OTA updates stage proposed commercial evidence
+    without overwriting the canonical evidence generation. A complete
+    authoritative rebuild still persists its validated document evidence.
+  - Paid-breakdown cards are payment-ledger facts. They remain separate from
+    the selected gross/net booking subtotal and are never forced to match it.
+- Inventory contract:
+  - Dedicated OTA release sets `pendingConfirmation.inventoryBlocks=true`;
+    reverting to OTA Platform Review explicitly sets it false.
+  - Hotel confirmation, financial workflow transitions, admin/agent correction
+    resubmission, generic admin status changes, Excel import, and authenticated
+    OTA lifecycle updates stamp the inventory decision explicitly.
+  - Admin lifecycle reversion to Pending Confirmation sets the flag true;
+    cancellation/no-show/hotel rejection explicitly clears it, preventing stale
+    future holds.
+  - Exact `Finance Rejected` is an internal correction state after hotel
+    confirmation and remains marker-controlled/inventory-blocking. Exact hotel
+    `Rejected` remains terminal and nonblocking; the finance exception is not
+    added to shared pending-queue visibility filters.
+  - Hotel inventory range/day/availability/rate matching uses UTC date-only
+    math and checkout-exclusive overlap, independent of the host timezone.
+  - Historical missing release flags are reconciled only by a dry-run-first,
+    proof-bound, release-audit-backed, lifecycle-validated, per-row CAS
+    utility. Hotel-confirmed finance rows additionally require a same-actor
+    immutable status/pending/decision audit triple. Explicit false, expired,
+    terminal, reverted, or contradictory rows remain unchanged and require
+    separate review.
+- Operational details, audited example totals, expected report coverage, test
+  gates, and post-deploy verification are documented in the dated runbook.
