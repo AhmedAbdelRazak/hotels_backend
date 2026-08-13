@@ -964,9 +964,50 @@ function uniqueReservations(reservations = []) {
 	return Array.from(new Map(reservations.map((reservation) => [id(reservation._id), reservation])).values());
 }
 
+// This projection is also the evidence used by lost-ack adoption and the
+// post-insert assertion. Keep every field inspected by
+// assertExpectedReservationShape: omitting one can make a correct persisted
+// value look absent (or, for a zero-like assertion, hide an unsafe value).
+const RECOVERY_RESERVATION_EVIDENCE_SELECT = [
+	"_id",
+	"hotelId",
+	"belongsTo",
+	"reservation_id",
+	"confirmation_number",
+	"pms_number",
+	"hr_number",
+	"otaIdentityKey",
+	"otaCrossTransportIdentityKey",
+	"reservation_status",
+	"state",
+	"currency",
+	"checkin_date",
+	"checkout_date",
+	"total_rooms",
+	"total_guests",
+	"total_amount",
+	"sub_total",
+	"paid_amount",
+	"paid_amount_breakdown",
+	"commission",
+	"commission_ota",
+	"roomId",
+	"bedNumber",
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"adminPricing",
+	"ota_financial_summary",
+	"availabilitySnapshot",
+	"customer_details.name",
+	"customer_details.confirmation_number2",
+	"supplierData",
+	"otaPlatformReview",
+	"reservationAuditLog",
+].join(" ");
+
 async function loadReservationEvidence(target, dependencies = {}) {
 	const ReservationModel = dependencies.Reservations || Reservations;
-	const select = "_id hotelId belongsTo reservation_id confirmation_number pms_number hr_number otaIdentityKey otaCrossTransportIdentityKey reservation_status state checkin_date checkout_date total_rooms total_guests total_amount sub_total pickedRoomsType pickedRoomsPricing adminPricing availabilitySnapshot customer_details.name customer_details.confirmation_number2 supplierData otaPlatformReview reservationAuditLog";
+	const select = RECOVERY_RESERVATION_EVIDENCE_SELECT;
 	const providerLookup = buildOtaConfirmationLookup(target.confirmationNumber, target.provider);
 	const [providerMatches, broadMatches, stayMatches] = await Promise.all([
 		ReservationModel.find(providerLookup).select(select).lean().exec(),
@@ -1761,6 +1802,7 @@ module.exports = {
 	PROOF_MAX_AGE_MS,
 	REPAIR_ID,
 	RecoverySafetyError,
+	RECOVERY_RESERVATION_EVIDENCE_SELECT,
 	TARGETS,
 	applyTarget,
 	assertAppliedAuditState,

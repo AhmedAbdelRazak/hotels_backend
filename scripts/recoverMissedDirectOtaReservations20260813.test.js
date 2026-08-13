@@ -11,6 +11,7 @@ const {
 	PROOF_MAX_AGE_MS,
 	POLICY_DATE,
 	REPAIR_ID,
+	RECOVERY_RESERVATION_EVIDENCE_SELECT,
 	TARGETS,
 	RecoverySafetyError,
 	assertAppliedAuditState,
@@ -43,6 +44,29 @@ const {
 } = require("../services/otaReservationMapper");
 
 const PLAN_AT = new Date("2026-08-13T22:00:00.000Z");
+
+test("lost-ack and post-insert evidence projection includes every persisted financial and housing invariant", () => {
+	const selected = new Set(RECOVERY_RESERVATION_EVIDENCE_SELECT.split(/\s+/));
+	for (const field of [
+		"currency",
+		"paid_amount",
+		"paid_amount_breakdown",
+		"commission",
+		"commission_ota",
+		"roomId",
+		"bedNumber",
+		"pickedRoomsType",
+		"pickedRoomsPricing",
+		"adminPricing",
+		"ota_financial_summary",
+		"availabilitySnapshot",
+		"supplierData",
+		"otaPlatformReview",
+		"reservationAuditLog",
+	]) {
+		assert.equal(selected.has(field), true, `${field} must be loaded for persisted-shape verification`);
+	}
+});
 
 test("recovery scope is immutable, exact, and contains no guest PII", () => {
 	assert.deepEqual(
