@@ -1,6 +1,8 @@
 /** @format */
 
 process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
+process.env.HOTELRUNNER_INTEGRATION_ENABLED =
+	process.env.HOTELRUNNER_INTEGRATION_ENABLED || "true";
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -8008,6 +8010,187 @@ test("lower-authority relay lifecycle events cannot overwrite a direct HotelRunn
 		Reservations.updateOne = originalReservationUpdateOne;
 	}
 	assert.equal(mutationCalls, 0);
+});
+
+test("email-only mode restores trusted OTA lifecycle authority without erasing HotelRunner provenance", () => {
+	const previous = process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+	process.env.HOTELRUNNER_INTEGRATION_ENABLED = "false";
+	try {
+		const existing = makeCancellationOverrideExisting("confirmed", {
+			supplierData: {
+				otaAutomationPipeline: "hotelrunner-background-worker",
+				otaProvider: "booking",
+				otaSourceAuthority: 4,
+				otaLastSourceReceivedAt: "2026-08-06T12:00:00.000Z",
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-historical-provenance-1",
+				},
+			},
+		});
+		const normalized = makeTrustedInboundCancellation({
+			source: {
+				from: '"Booking.com" <noreply@booking.com>',
+				subject: "Reservation cancelled",
+				receivedAt: "2026-08-06T12:05:00.000Z",
+				timestampMethod: "rfc2822_date_header",
+			},
+		});
+		assert.equal(
+			lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
+				normalized,
+				existing
+			),
+			false
+		);
+		const update = buildExistingReservationUpdateSet({
+			normalized,
+			existing,
+			statusToApply: "cancelled",
+		});
+		assert.equal(update.state, "cancelled");
+		assert.equal(update.reservation_status, "cancelled");
+		assert.equal(update["supplierData.hotelRunner.transport"], undefined);
+		assert.equal(update["supplierData.hotelRunner.reservationId"], undefined);
+		assert.equal(
+			existing.supplierData.hotelRunner.reservationId,
+			"hr-historical-provenance-1"
+		);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+		} else {
+			process.env.HOTELRUNNER_INTEGRATION_ENABLED = previous;
+		}
+	}
+});
+
+test("email-only mode applies a trusted cancellation to a historical HotelRunner row exactly once", async () => {
+	const previous = process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+	const originalReservationFind = Reservations.find;
+	const originalReservationUpdateOne = Reservations.updateOne;
+	const existing = makeCancellationOverrideExisting("confirmed", {
+		supplierData: {
+			otaAutomationPipeline: "hotelrunner-background-worker",
+			otaProvider: "booking",
+			otaSourceAuthority: 4,
+			otaLastSourceReceivedAt: "2026-08-06T12:00:00.000Z",
+			hotelRunner: {
+				transport: "hotelrunner_api",
+				reservationId: "hr-historical-cas-1",
+			},
+		},
+	});
+	const writes = [];
+	process.env.HOTELRUNNER_INTEGRATION_ENABLED = "false";
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		async exec() {
+			return [existing];
+		},
+	});
+	Reservations.updateOne = async (filter, update) => {
+		writes.push({ filter, update });
+		return { matchedCount: 1 };
+	};
+
+	try {
+		const result = await reconcileOtaReservation(
+			makeTrustedInboundCancellation({
+				source: {
+					from: '"Booking.com" <noreply@booking.com>',
+					subject: "Reservation cancelled",
+					receivedAt: "2026-08-06T12:05:00.000Z",
+					timestampMethod: "rfc2822_date_header",
+				},
+			})
+		);
+		assert.equal(result.status, "cancelled");
+		assert.equal(writes.length, 1);
+		assert.equal(writes[0].update.$set.state, "cancelled");
+		assert.equal(writes[0].update.$set.reservation_status, "cancelled");
+		assert.equal(
+			writes[0].update.$set["supplierData.hotelRunner.transport"],
+			undefined
+		);
+		assert.equal(
+			writes[0].update.$set["supplierData.hotelRunner.reservationId"],
+			undefined
+		);
+		assert.equal(
+			existing.supplierData.hotelRunner.reservationId,
+			"hr-historical-cas-1"
+		);
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.updateOne = originalReservationUpdateOne;
+		if (previous === undefined) {
+			delete process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+		} else {
+			process.env.HOTELRUNNER_INTEGRATION_ENABLED = previous;
+		}
+	}
+});
+
+test("email-only mode stages trusted modifications for historical HotelRunner rows", () => {
+	const previous = process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+	process.env.HOTELRUNNER_INTEGRATION_ENABLED = "false";
+	try {
+		const existing = makeCancellationOverrideExisting("confirmed", {
+			customer_details: { name: "Canonical Guest" },
+			checkin_date: "2026-09-01",
+			checkout_date: "2026-09-02",
+			total_amount: 300,
+			supplierData: {
+				otaLastSourceReceivedAt: "2026-08-06T12:00:00.000Z",
+				hotelRunner: {
+					transport: "hotelrunner_api",
+					reservationId: "hr-historical-modification-1",
+				},
+			},
+		});
+		const normalized = makeTrustedInboundCancellation({
+			intent: "reservation_update",
+			eventType: "modified",
+			statusToApply: "",
+			guestName: "Proposed Guest",
+			checkinDate: "2026-09-03",
+			checkoutDate: "2026-09-05",
+			amount: 900,
+			totalAmountSar: 900,
+			sourcePresence: {
+				guestName: true,
+				checkinDate: true,
+				checkoutDate: true,
+				amount: true,
+			},
+			source: {
+				receivedAt: "2026-08-06T12:05:00.000Z",
+				timestampMethod: "rfc2822_date_header",
+			},
+		});
+		const update = buildExistingReservationUpdateSet({ normalized, existing });
+		assert.equal(update["customer_details.name"], undefined);
+		assert.equal(update.checkin_date, undefined);
+		assert.equal(update.checkout_date, undefined);
+		assert.equal(update.total_amount, undefined);
+		assert.equal(
+			update["otaPlatformReview.proposedInbound"].guest.name,
+			"Proposed Guest"
+		);
+		assert.equal(
+			update["supplierData.hotelRunner.reservationId"],
+			undefined
+		);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.HOTELRUNNER_INTEGRATION_ENABLED;
+		} else {
+			process.env.HOTELRUNNER_INTEGRATION_ENABLED = previous;
+		}
+	}
 });
 
 test("HotelRunner-managed properties retain OTA email fallback until a reservation has direct API ownership", async () => {

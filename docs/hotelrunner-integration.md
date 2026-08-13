@@ -1,8 +1,8 @@
-# HotelRunner integration: architecture, security, deployment, and roadmap
+# HotelRunner integration: dormant architecture and OTA-email-only operating contract
 
 ## Document purpose
 
-This is the authoritative engineering and operations document for the xHotelPro HotelRunner integration. It records:
+This is the authoritative engineering and operations document for the dormant xHotelPro HotelRunner integration. It records:
 
 - what is implemented;
 - what is deployed but deliberately inactive;
@@ -10,13 +10,31 @@ This is the authoritative engineering and operations document for the xHotelPro 
 - how duplicates, stale events, room mappings, credentials, and API quotas are handled;
 - how HotelRunner and the existing OTA-email pipeline coexist without duplicate reservation authority;
 - the controlled activation, validation, rollback, and incident procedures; and
-- the planned HotelRunner administration pages under `/admin/*` and the later outbound inventory/rate phase.
+- the 2026-08-13 retirement of the HotelRunner administration UI and the historical, deferred integration design.
 
 This document must never contain API tokens, HR IDs, guest names, email addresses, phone numbers, reservation numbers, MongoDB IDs, raw callback URLs containing query strings, or environment-file contents. Live identifiers belong only in access-controlled operational records.
 
-## Decision summary
+## Current operating mode — 2026-08-13: OTA inbound email only
 
-The architectural decision is **local-first, background-only synchronization**:
+**This section is authoritative and supersedes every earlier “current,” rollout-gate, callback, worker, admin-page, lifecycle-authority, and activation statement retained later in this document.** The later sections preserve engineering history and safeguards for a possible future, separately reviewed reactivation; they are not instructions to activate HotelRunner now.
+
+The HotelRunner API subscription was cancelled on **2026-08-13** because its current cost is not justified. Until the owner purchases a new subscription and explicitly approves a new reviewed activation, xHotelPro operates under this contract:
+
+- Authenticated OTA inbound email is the sole active inbound reservation lifecycle transport. Direct OTA create, update, and cancellation emails follow the existing inline OTA reconciliation path; they are not held for, queued behind, or reconciled through HotelRunner.
+- `HOTELRUNNER_INTEGRATION_ENABLED=false` is the master runtime boundary. The four legacy gates must also remain explicitly false: `HOTELRUNNER_PROJECTION_ENABLED=false`, `HOTELRUNNER_PULL_ENABLED=false`, `HOTELRUNNER_ROOM_LIST_SYNC_ENABLED=false`, and `HOTELRUNNER_CONFIRM_DELIVERY_ENABLED=false`. The activation cutoff must remain blank.
+- The HotelRunner callback is disabled. Both callback health and callback delivery requests must receive a generic `404` before credential authentication, body parsing, event persistence, or any HotelRunner authority decision.
+- The independent HotelRunner worker's desired production state is disabled and stopped. Because the previously installed systemd unit may still have `Restart=always` and noninteractive sudo may be unavailable during deployment, a residual launch while the master boundary is false must enter an inert signal-only wait before any database connection/model, client, or vendor initialization. This prevents restart churn while guaranteeing zero leases, quota claims, database work, vendor requests, or reservation projection. Record the exact supervisor/process state only after live verification; source changes alone do not prove the unit is disabled or stopped.
+- HotelRunner client construction must fail closed before quota reservation or network access while the master boundary is false. Release, health, and regression checks must use local inspection, mocks, and fixtures only. Do not make a HotelRunner authentication, room-list, reservation-history, delivery-confirmation, or other vendor request merely to test the shutdown.
+- Existing HotelRunner event, mirror, mapping, source, pricing, and audit fields may remain as historical provenance. They do not have current reservation lifecycle authority, and a historical direct-projection marker must not prevent a trusted OTA email from updating or cancelling the corresponding local reservation.
+- The `/admin/hotelrunner` frontend route, its English and Arabic side-menu links, its route-permission mapping, and its dedicated page/API-view-model modules are retired. No active browser UI should expose or invoke the dormant integration. Existing HotelRunner-labelled historical pricing/provenance shown inside ordinary reservation or report screens does not reactivate the integration.
+- The protected backend token, HR ID, and property binding may be retained dormant for a future reviewed reactivation. Retention is not configuration readiness or permission to call the vendor. These values remain backend-only and must never be copied into React, logs, documentation, shell history, or ordinary application data.
+- Reactivation requires a new paid subscription, explicit owner approval, a dated code/security/operations review, a fresh deployment plan, and deliberate reconfiguration of the master and legacy gates. Do not infer reactivation from retained credentials, historical records, old mappings, old service files, or the historical runbook below.
+
+Required post-deployment verification must be write-safe and make **zero HotelRunner vendor calls**: confirm the five flags above and blank cutoff without printing secrets; confirm whether the worker service reached the desired disabled/stopped state; if administrator access is still needed, record the residual supervisor state and prove any residual process is in the master-disabled inert wait with no database connection/model/client/vendor initialization; confirm callback and backend admin routes return generic not-found responses; confirm the removed frontend route/menu/modules are absent from the production build; and confirm representative OTA inbound email create/update/cancel behavior continues through the normal inline path. Before shutdown, count `awaiting_hotelrunner`/`recovery_pending` inbound archives, nonterminal fallback jobs, actionable HotelRunner events, direct API-projected reservations, and pending/retry fallback notifications. Any nonzero result requires evidence-bound local-only review or recovery; never run the dormant fallback worker or call the vendor to resolve it. Record the results separately with the deployed revisions once those checks are complete; this document does not pre-claim them.
+
+## Historical decision summary — inactive
+
+The earlier architectural decision was **local-first, background-only synchronization**. It is retained as design provenance and is inactive under the 2026-08-13 email-only contract:
 
 ```text
 OTA
@@ -28,16 +46,18 @@ OTA
   -> all existing PMS screens, reports, and local APIs
 ```
 
-The browser and ordinary PMS APIs never retrieve a reservation directly from HotelRunner. HotelRunner is a background transport. MongoDB remains the operational source of truth for xHotelPro.
+The browser and ordinary PMS APIs never retrieve a reservation directly from HotelRunner. In the historical design HotelRunner was a background transport; in the current mode it is not a transport at all. MongoDB remains the operational source of truth for xHotelPro.
 
-The inbound reservation phase is intentionally separate from the future outbound availability/rate phase. During inbound rollout:
+The former inbound rollout was intentionally separate from the proposed outbound availability/rate phase. The following bullets are historical safeguards, not permission to resume rollout:
 
-- `HOTELRUNNER_PROJECTION_ENABLED=false` remains the safety gate;
-- **Can update room calendar** remains disabled in HotelRunner;
-- the independent worker remains stopped until credential rotation is complete;
-- the explicit room-list-only command can discover mappings while pull and projection remain off;
-- the existing OTA-email pipeline remains active for reservations not directly projected by HotelRunner, including OTA accounts/listings outside HotelRunner coverage; and
-- no real guest reservation is used as a destructive test.
+- `HOTELRUNNER_PROJECTION_ENABLED=false` was the original safety gate;
+- **Can update room calendar** was kept disabled in HotelRunner;
+- the independent worker was held until credential rotation and mapping approval;
+- an explicit room-list-only command was designed to discover mappings while pull and projection remained off;
+- the existing OTA-email pipeline remained active for reservations not directly projected by HotelRunner; and
+- no real guest reservation was to be used as a destructive test.
+
+The current contract is stricter: the master boundary and all four legacy gates are false, no HotelRunner discovery or test call is allowed, and OTA inbound email owns lifecycle handling for every supported OTA reservation.
 
 ## Important interpretation of the live fallback incident
 
@@ -49,11 +69,13 @@ That is valuable evidence, but its meaning must be stated precisely:
 - **Proven:** the failed push was an unavailable production callback route at that time, not a HotelRunner API quota failure or a projection error.
 - **Not yet proven:** a real HotelRunner API payload links to that already-existing local reservation without creating a second record.
 
-The not-yet-proven linking claim must be demonstrated with an archived HotelRunner payload while projection is still off. The real canceled booking must not be edited, reopened, or canceled again for testing.
+That linking claim remains unproven historical context and must not be pursued while the subscription is cancelled. Do not request a payload, call HotelRunner, or edit, reopen, or cancel the real booking for testing.
 
 ## Production status snapshot
 
 Snapshot date: **2026-08-07**. This is operational evidence, not a substitute for checking the current runtime before an operation.
+
+**Superseded on 2026-08-13:** this table records the pre-cancellation deployment only. It must not be read as the current operating mode or as authority to call HotelRunner. The email-only contract above now controls; the production shutdown facts require the post-deployment verification described there.
 
 | Area | Snapshot state |
 | --- | --- |
@@ -157,10 +179,12 @@ No row below is active yet. The proposed pairing is based on the exact HotelRunn
 
 Each non-master code exposes its standard and non-refundable rate-code variants and reports SAR plus availability/restriction/price-update capability. Those capabilities do not authorize outbound updates: **Can update room calendar remains disabled**, and outbound availability/rates remain a later phase.
 
-## Non-negotiable invariants
+## Dormant integration safeguards
+
+These safeguards remain relevant to preserved historical data and any future reactivation, but the 2026-08-13 email-only operating contract takes precedence. In particular, no safeguard below authorizes a vendor call, callback, worker, projection, or admin UI while the master boundary is false.
 
 1. Every PMS view and report reads local MongoDB data.
-2. HotelRunner credentials are never stored in React, source control, documentation, or ordinary application data. They exist at HotelRunner and transit the HTTPS callback/proxy query path, while xHotelPro stores them only in the protected backend environment.
+2. HotelRunner credentials are never stored in React, source control, documentation, or ordinary application data. Dormant values may remain only in the protected backend environment and must not transit a callback or vendor request while the master boundary is false.
 3. Callback receipt and reservation projection are separate operations.
 4. A callback is acknowledged only after every item in the received batch has been durably attempted. A partial persistence failure returns `503`; a retry is safe because event inserts are idempotent.
 5. Projection defaults to off.
@@ -171,11 +195,11 @@ Each non-master code exposes its standard and non-refundable rate-code variants 
 10. HotelRunner's `is_master=true` fallback can never be mapped automatically or manually to a PMS room category.
 11. HotelRunner-reported payment data is informational. It never marks local money as captured, paid, transferred, settled, or reconciled.
 12. Active room/stay rewrites are blocked when local housing, finance, processor, or ownership guards show local control. Cancellation has a narrower rule: it is blocked for in-house, checked-out, and no-show stays, but may cancel a future room-assigned booking while leaving all finance/processor data untouched.
-13. OTA-email handling is never disabled property-wide. Authority is decided per exact reservation: direct HotelRunner lifecycle wins only after that reservation has a verified direct projection marker.
+13. OTA-email handling is never disabled property-wide. While `HOTELRUNNER_INTEGRATION_ENABLED=false`, trusted OTA email is the active lifecycle authority even when a reservation retains a historical direct HotelRunner projection marker. Any future per-reservation HotelRunner authority rule requires explicit reviewed reactivation.
 14. Authenticated, source-backed OTA email remains able to create/update/cancel reservations that HotelRunner did not deliver, including uncovered Airbnb accounts/listings. Other hotel IDs retain their existing behavior.
-15. A verified OTA email may enrich a direct HotelRunner reservation with explicit payout/expense evidence only through a commercial-only guarded update; it cannot change lifecycle, guest, stay, rooms, gross total, local root price, or payment/settlement state.
+15. Historical HotelRunner provenance remains protected from fabrication, but it does not block the normal guarded OTA-email lifecycle mapper while the master boundary is false. Existing finance, payment, ownership, deduplication, and source-backed-email validation rules still apply.
 16. HotelRunner's documented gross pricing is preserved separately. OTA commission or hotel net payout is never inferred from `paid_amount`, taxes, fees, discounts, promotions, or adjustments.
-17. Projection is serialized by a database-backed property lease even if a duplicate process is accidentally started. Production has exactly one supported supervisor path: the dedicated reboot-persistent systemd service. There is no HotelRunner PM2 definition.
+17. The desired current production state is no enabled/running HotelRunner supervisor or worker. If a residual `Restart=always` unit cannot yet be stopped, its process must remain in the master-disabled inert wait before any database connection/model/client/vendor initialization, and the residual state must be recorded until an administrator closes it. A future reviewed reactivation must use exactly one approved supervisor and retain database-backed property serialization; it must never add an accidental PM2 duplicate.
 18. Outbound availability, prices, restrictions, reservation responses, delivery confirmations, and guest messaging are outside the active inbound phase.
 19. A reused message UID with different content can never revoke another worker's active lease. Non-owned or expired work is quarantined; active first-payload-wins processing records the conflict durably and finishes as operator-visible `attention`.
 20. HotelRunner financial reports never derive OTA expense, hotel net, platform margin, or chargeable commission from gross minus local room/base pricing. Missing verified commercial evidence is counted and displayed as unavailable.
@@ -187,15 +211,17 @@ Each non-master code exposes its standard and non-refundable rate-code variants 
 26. Generic reservation writes use an optimistic `_id`/`__v`/`updatedAt`/hotel/owner snapshot. Direct HotelRunner records also require the same source markers and watermark at commit time. A concurrent worker/editor change returns `409`; stale UI data can never overwrite a newer projection.
 27. HotelRunner owns the projected stay, room-category/rate mapping, gross monetary fields, transport identity, and commercial-evidence snapshots. The PMS `roomId` array remains a local physical-room assignment and can still be changed by authorized hotel operations.
 28. Direct HotelRunner commission review through the generic editor is limited to the configured super administrator. Derived `commissionData`, finance-assignment evidence, OTA net, expense, margin, and verification markers are server-owned and cannot be fabricated by a client payload.
-29. Nginx must be the only public application edge. Production now binds both Node origins to `127.0.0.1`, and listener/public-health checks passed. The exact callback currently disables access logging; the reviewed hardener must add `error_log off` and pass reload/log-isolation checks before a replacement credential is used.
+29. Nginx must remain the only public application edge. While the integration is dormant, the callback must fail with a generic `404` before authentication or persistence, and its request query must remain absent from application and proxy logs. A future callback restoration requires a fresh logging and credential review.
 30. Guest payment and platform-commission settlement remain separate facts. Existing-reservation PayPal authorization/capture paths preserve payment, `paid_amount`, processor ledger, and finance-status updates but cannot mark an unreviewed, invalid, or conflicting direct-HotelRunner platform commission paid. The canonical finance resolver must first prove an explicit consistent staff assignment; an explicitly reviewed zero remains valid.
 
-## Current repository surface
+## Dormant backend repository surface
+
+The backend files below are retained dormant so historical provenance remains readable and a future reactivation can be reviewed rather than improvised. Their presence is not an active runtime surface: `HOTELRUNNER_INTEGRATION_ENABLED=false` must dominate callback, client, worker, OTA-authority, and projection behavior.
 
 ### Dedicated backend files
 
-- `controllers/hotelrunner.js` - callback health/authentication/parsing/persistence and current admin status/mapping handlers.
-- `routes/hotelrunner.js` - isolated HotelRunner callback and authenticated admin routes.
+- `controllers/hotelrunner.js` - master-disabled callback boundary plus dormant historical authentication/parsing/persistence and admin status/mapping handlers.
+- `routes/hotelrunner.js` - isolated dormant HotelRunner callback and authenticated admin routes; there is no frontend admin route.
 - `models/hotelrunner_event.js` - durable event inbox, integrity state, retry/lease state, and processing result.
 - `models/hotelrunner_reservation.js` - immutable HotelRunner-to-PMS reservation mirror and source watermarks.
 - `models/hotelrunner_room_mapping.js` - verified HotelRunner inventory-code to local room-category mapping.
@@ -226,54 +252,40 @@ Each non-master code exposes its standard and non-refundable rate-code variants 
 
 ### Deliberately small changes to existing backend code
 
-- `server.js` mounts an authentication preflight on the exact callback path before the legacy large JSON parser, sanitizes logged request URLs, and loads the isolated HotelRunner router.
+- `server.js` always sanitizes logged request URLs. It mounts the callback authentication preflight and loads the isolated HotelRunner router only when the master boundary is true; otherwise the exact callback is tombstoned before body parsing and all HotelRunner routes remain absent.
 - `controllers/reservations.js`, `routes/reservations.js`, and the related regression tests keep single-reservation reads, hotel financial-report reads, and generic reservation mutations local, authenticated, and property-scoped. The generic mutation path also strips server-managed OTA/HotelRunner markers, applies source-pricing preservation, and logs bounded request metadata rather than the update body.
 - `controllers/adminreports.js`, `services/adminReservationOverview.js`, and `controllers/overall_dashboard.js` preserve legacy non-HotelRunner reporting while making HotelRunner net/expense/profit unavailable unless commercial evidence is explicit and verified.
 - `controllers/paypal_reservation.js` keeps four existing-reservation authorization/capture paths intact while preventing guest payment from settling an unreviewed direct-HotelRunner commission. `controllers/paypal_owner.js` and `controllers/admin_payouts.js` use the same canonical finance availability boundary before HotelRunner commission payout/reconciliation.
 - `controllers/rooms.js` no longer acts as an on-demand HotelRunner retrieval path.
-- `services/otaReservationMapper.js` keeps uncovered email reservations active, makes lower-authority lifecycle email audit-only after an exact direct projection, and applies narrowly guarded verified commercial enrichment.
+- `services/otaReservationMapper.js` keeps source-backed email reservations active; while the master boundary is false it does not let a historical direct projection marker suppress normal guarded OTA-email lifecycle reconciliation.
 - `package.json` adds isolated HotelRunner test and worker commands.
 
-### Dedicated frontend files
+### Retired frontend surface — 2026-08-13
 
-The current frontend repository is `hotels_frontend`. The files and behavior in this subsection are deployed from reviewed frontend PR #26 at the exact revision recorded above.
+The dedicated HotelRunner administration frontend is removed, not merely hidden:
 
-- `src/AdminModule/HotelRunner/HotelRunnerMain.js` - isolated overview and room-mapping screen.
-- `src/AdminModule/HotelRunner/hotelRunnerApi.js` - authenticated calls only to xHotelPro's local HotelRunner admin API.
-- `src/AdminModule/HotelRunner/hotelRunnerViewModel.js` - display/status aggregation.
-- `src/AdminModule/AllReservation/HotelRunnerPricingBreakdown.js` and `hotelRunnerPricingDisplay.js` - bilingual, local-data-only gross pricing detail and fail-closed verified-payout presentation.
-- `src/AdminModule/AllReservation/hotelRunnerPricingEditPolicy.js` and `receiptPricingDisplay.js` - shared mutation/display boundaries that preserve HotelRunner source pricing, emit receipt supplier leaf updates only, and label the canonical guest amount as gross rather than net.
-- `scripts/check-client-env.js` - fail-closed Create React App credential-name boundary used by `prestart` and `prebuild`; it reports names only and never values.
-- the existing admin, hotel, finance, receipt, Excel, and profit-report components consume that local pricing policy: canonical gross remains visible, local base is labeled separately, and unavailable HotelRunner net/expense/profit or unreviewed platform commission remains `null`/unavailable instead of becoming zero or inferred revenue.
-- colocated tests cover the API wrapper and view model; the complete frontend suite and optimized build cover compilation and route/component wiring.
+- `App.js` no longer registers `/admin/hotelrunner`;
+- the route-permission map no longer recognizes that path;
+- the English and Arabic admin side-navigation links and selection mappings are removed; and
+- the dedicated HotelRunner page, local admin-API wrapper, view model, and their dedicated tests are removed.
 
-Existing frontend wiring is limited to the route guard and admin navigation:
+The production build and route/menu/module scans still require post-deployment verification. No frontend should navigate to or invoke a HotelRunner administration endpoint. The existing `/admin/ota-reservations` workflow remains the operator surface for OTA inbound-email review.
 
-- `App.js` registers `/admin/hotelrunner`.
-- `AdminRoute.js` guards the route.
-- the English and Arabic admin side-navigation surfaces link to it when access allows.
-- the HotelRunner item is deliberately absent from the admin top navbar; removing that shortcut does not remove the page or integration.
-
-No HotelRunner token, HR ID, vendor endpoint, or direct vendor fetch exists in React.
+Local-data-only pricing/provenance helpers elsewhere in reservation and reporting screens may remain because historical HotelRunner rows must still be represented accurately. They do not make network calls and must not confer current HotelRunner lifecycle authority. The client-environment preflight remains required: no HotelRunner token, HR ID, vendor endpoint, or direct vendor fetch may exist in React.
 
 ## Processes and authority boundaries
 
 ### Main API process
 
-The normal backend process:
+The normal backend process continues to serve the PMS and OTA inbound-email routes. With `HOTELRUNNER_INTEGRATION_ENABLED=false`, the HotelRunner boundary returns a generic `404` before callback authentication, parsing, or persistence. The removed frontend makes no HotelRunner admin request, and the normal backend process never runs the long-running HotelRunner projection loop.
 
-- serves the health endpoint;
-- authenticates HotelRunner callback POSTs;
-- parses only bounded form bodies;
-- writes normalized event records;
-- serves authenticated, property-scoped admin status/mapping data; and
-- never performs the long-running projection loop.
+### Dormant `hotelrunner-sync` process
 
-### Independent `hotelrunner-sync` process
+The worker is not part of the current operating mode. Its desired production state is supervisor-disabled/stopped with zero HotelRunner worker processes. If the residual `Restart=always` systemd unit launches before an administrator can disable it, the master-disabled entry point must remain in an inert signal-only wait before any database connection/model, client, or vendor initialization. That temporary inert process performs no database lease, quota claim, vendor request, or reservation projection and avoids a restart loop. The exact operational state must be verified after deployment rather than inferred from source.
 
-The worker:
+The following capabilities describe the historical implementation only. If a future reviewed reactivation restores the worker, it:
 
-- when Gate 4 is explicitly approved, runs as exactly one dedicated systemd service; at the current Gate-3 mapping-review stop, no HotelRunner unit or worker process is installed or running;
+- runs as exactly one approved dedicated supervisor, never as an additional PM2 duplicate;
 - obtains a separate database-backed projection lease before claiming any event, guaranteeing one projection at a time for the property even if a second process is accidentally started;
 - renews that property lease during work and fails closed if ownership is lost;
 - checks for a due pull no more often than every 30 seconds;
@@ -284,57 +296,36 @@ The worker:
 - projects local events only when projection is enabled; and
 - uses five-minute event/projection leases with recoverable retries.
 
-Stopping this process stops all outbound HotelRunner API traffic and all event projection without stopping the normal PMS or callback storage.
+Stopping this process was one historical safety boundary. The current shutdown additionally requires the master flag and all four legacy flags to be false so an accidental process launch still cannot access HotelRunner.
 
 ### Projection-off behavior
 
-This distinction is important:
+The master boundary now dominates every legacy switch combination:
 
-| Worker | Room-list sync | History pull | Projection | Result |
-| --- | --- | --- | --- | --- |
-| OFF | Irrelevant | Irrelevant | OFF | Callback may archive; no vendor calls; no projection |
-| ON | OFF | OFF | OFF | No vendor calls and no projection |
-| ON | ON | OFF | OFF | One room-list GET when due; no reservation-history GET and no PMS mutation |
-| ON | OFF | ON | OFF | Due reservation-history GETs and archival; no PMS mutation |
-| ON | ON | ON | OFF | Due room-list/history GETs and archival; no PMS mutation |
-| ON | ON | OFF | ON | Due room-list refresh plus sequential projection of cutoff-eligible push events; no history GETs |
-| ON | Any | ON | ON | Invalid configuration; the worker refuses startup during the push-only activation phase |
+| Master integration | Callback | Client/worker | OTA inbound email |
+| --- | --- | --- | --- |
+| `false` | Generic `404` before authentication or persistence | Client rejects; any residual worker waits inertly before DB connection/model/client/vendor initialization | Normal inline create/update/cancel authority |
+| `true` | Not currently approved | Not currently approved | Requires a new reviewed authority design |
 
-`HOTELRUNNER_PROJECTION_ENABLED=false` does not prevent GET requests when either the room-list or history-pull switch is enabled. Both switches default off. Therefore the worker stays off until the rotated credential is installed and the operator is ready to spend the minimum discovery quota.
+Projection false by itself was never sufficient to prevent room-list or reservation-history GETs. That is why the current contract requires the master boundary plus projection, history pull, recurring room-list sync, and delivery confirmation all to be explicitly false, with the worker stopped.
 
 ## HTTP endpoints
 
 ### Public callback
 
-`GET /api/hotelrunner/callback`
+`GET /api/hotelrunner/callback` and `POST /api/hotelrunner/callback` are disabled while `HOTELRUNNER_INTEGRATION_ENABLED=false`. Both must return a generic `404` before credential comparison, request-body parsing, event persistence, or any other integration work. Verification must not include a real token or ask HotelRunner to deliver a test callback.
 
-- returns a generic health response;
-- does not authenticate a credential;
-- does not generate a token; and
-- does not prove that a POST can be durably stored.
+The old authenticated form-processing behavior remains dormant code provenance only. Restoring it requires the future reactivation review defined at the top of this document.
 
-`POST /api/hotelrunner/callback?token=...&hr_id=...`
-
-- compares both credentials using fixed-size SHA-256 digests and a timing-safe comparison;
-- evaluates callback readiness from the credential plus exact local-property binding only, so a malformed worker-only flag stops the worker without unnecessarily rejecting an otherwise authentic callback;
-- accepts `application/x-www-form-urlencoded` and `multipart/form-data` only;
-- expects one form field named `data` containing JSON;
-- applies declared and actual body-size bounds;
-- requires an object with a non-empty, bounded `reservations` array;
-- stores each normalized reservation delivery; and
-- returns `200 {"status":"ok"}` only after persistence succeeds.
-
-The callback supports both documented form behavior and HotelRunner's multipart example. JSON request bodies are intentionally rejected.
-
-### Current authenticated admin API
+### Dormant authenticated admin API — no frontend route
 
 - `GET /api/hotelrunner/admin/status/:userId`
 - `GET /api/hotelrunner/admin/room-mappings/:userId`
 - `PUT /api/hotelrunner/admin/room-mappings/:mappingId/:userId`
 
-All three require sign-in, self/auth checks, platform-admin permission checks, and scope to the configured local hotel. Status and mapping reads allow the configured super administrator or a scoped role-1000 platform admin with an accepted permission key. Mapping mutation has an additional backend check and is currently restricted to the configured super administrator. Hotel ownership by itself does not bypass `requireAdminAccess`.
+These route shapes are retained only with the dormant implementation and historical collections. While the master boundary is false, they must return the same generic `404` before authentication, collection reads, or mutation. They have no current frontend route, side-menu entry, or supported operator workflow and must not be invoked as a substitute for the removed UI. If they are ever restored, they must retain sign-in, self/auth, platform-admin, property-scope, optimistic-concurrency, payload-redaction, and superadministrator-only mutation safeguards.
 
-The status endpoint exposes booleans, counts, timestamps, worker state, property name/ID, and the latest event's scalar integrity-conflict flag/count. It never returns credentials, raw integrity evidence, or event payloads. The mapping list returns only mapping metadata and active local room choices. Mapping writes use the document version as optimistic concurrency control and reject stale saves with `409`.
+No dormant admin read may authenticate against or fetch from HotelRunner. No mapping write is part of the current email-only operating mode.
 
 ### Existing generic reservation mutation boundary
 
@@ -348,46 +339,13 @@ The status endpoint exposes booleans, counts, timestamps, worker state, property
 
 The deployed PR #26 frontend applies the same boundary before transport: ordinary editors protect HotelRunner source fields, early-checkout handlers do not derive a new gross from `chosenPrice`, and receipt editors send only `supplierData.supplierName` or `supplierData.suppliedBookingNo` when that leaf is edited. Non-HotelRunner status and receipt behavior retains its legacy calculations and editable fields.
 
-## Deployed `/admin/hotelrunner` page (projection remains off)
+## Retired `/admin/hotelrunner` page — 2026-08-13
 
-The existing page is local-read-only except for explicit room mapping saves/disables. It displays:
+There is no current HotelRunner administration page. The `/admin/hotelrunner` route, route-permission entry, English and Arabic side-menu links, dedicated page, frontend admin-API wrapper, and frontend view model were removed when the subscription was cancelled. The old page behavior and permission roadmap are retired; future contributors must not restore them from history without the explicit reactivation process defined above.
 
-- configuration readiness without revealing credential values;
-- the configured property;
-- pull/projection flags;
-- worker timestamps and metrics;
-- queue totals for waiting, mapping-needed, attention, processed, and projected work; and
-- HotelRunner room/rate identifiers alongside eligible local room categories.
+The files named `HotelRunnerReservationList` elsewhere in older Reception/New Reservation modules are legacy local reservation/import screens. They are not a direct integration console and must not be repurposed to call HotelRunner.
 
-Refreshing the page reads MongoDB-backed xHotelPro endpoints only and consumes no HotelRunner quota. Disabling a mapping does not undo or alter an existing PMS reservation.
-
-Two labels must not be over-interpreted:
-
-- **Backend configuration ready** proves that required values and one local binding pass local configuration validation. It does not prove that HotelRunner accepted the credential.
-- the backend field currently named `latestCallback` is actually the latest stored event and may come from push or pull. Treat it as **latest stored HotelRunner delivery**, not proof of a recent callback.
-
-Persisted sync state now includes a release-attested worker registration and a 15-second heartbeat. Admin health requires a fresh heartbeat plus exact worker/backend/live-checkout commit-and-tree parity; a mismatch returns unhealthy and makes the worker stop. Systemd process inspection remains useful operational evidence, but a running PID alone is not considered healthy.
-
-The current page has no individual event/quarantine view, manual pull, projection preview, credential-validation proof, or `requires_response` display. If configuration is incomplete, the current status handler returns `503`, so the UI normally shows a load failure rather than a useful configuration-incomplete card. These are documented current limitations, not implemented features.
-
-In frontend PR #26, admin reservation details show the stored HotelRunner gross summary, room/night pricing, extras, discounts/promotions, taxes/fees, cancellation amounts, and vendor payment rows. Reservation tables, hotel reports, admin overview charts, finance reports, Excel exports, payment options, and the overall profit report never substitute gross, paid, room subtotal, or local contracted amounts for unavailable OTA net/expense/profit. They show commercial amounts only when the stored source is explicitly verified and expose an unavailable count/message otherwise. Staff-reviewed PMS commission remains separate from HotelRunner's undocumented OTA commission.
-
-Mapping activation is blocked unless the inventory code has a current room-list generation, a fresh verification timestamp, no structural conflict, is not a master fallback, and the selected local room category is active. Proof remains valid for no more than the greater of 48 hours or three configured room-list intervals (72 hours at the 24-hour default); timestamps more than five minutes in the future also fail closed. The versioned database write repeats the exact generation, verification state, conflict state, and time window so a concurrent refresh cannot activate stale proof. Enabling a valid mapping requeues every local `needs_mapping` event for the configured hotel; the worker then revalidates every required inventory code, so still-unresolved events return to `needs_mapping`. The save itself makes no HotelRunner API request.
-
-### Least-privilege roadmap
-
-The route and backend currently accept either `HotelRunnerIntegration` or the broad `AdminDashboard` key. However, `HotelRunnerIntegration` is not yet present in the backend admin-account allowlist or the admin-account editor's selectable permissions. This means the dedicated key is not currently assignable to a normal platform admin.
-
-Before delegating this screen to non-superadmins:
-
-1. add `HotelRunnerIntegration` to the backend admin-account permission allowlist;
-2. add the same selectable permission to the frontend admin-account editor;
-3. add authorization regression tests for allowed, denied, and wrong-property users; and
-4. remove the broad `AdminDashboard` fallback from HotelRunner routes only after existing intended administrators have the dedicated key.
-
-Until that change is deployed, mapping writes are backend-enforced as configured-superadministrator-only. Scoped administrators can review status/mapping data, but cannot change mappings. The dedicated permission remains a required improvement before broader staff delegation; it is not a current mapping-mutation blocker.
-
-The files named `HotelRunnerReservationList` elsewhere in older Reception/New Reservation modules are legacy local reservation/import screens. They are not the direct integration console and must remain separate from `src/AdminModule/HotelRunner`.
+Ordinary reservation/report screens may continue to display stored HotelRunner gross-pricing and provenance from historical local records. That display is local-data-only, cannot establish lifecycle authority, and must never trigger a vendor request. OTA email review continues through `/admin/ota-reservations`.
 
 ## Environment configuration
 
@@ -395,15 +353,16 @@ All values belong in the backend `.env` only. The repository ignores `.env`, `.e
 
 | Variable | Default / bound | Purpose |
 | --- | --- | --- |
-| `HOTELRUNNER_API_TOKEN` | required | Secret token; never print, log, commit, or place in React |
-| `HOTELRUNNER_API_HR_ID` | required | Secret-equivalent HotelRunner property/application identifier |
-| `HOTELRUNNER_SUPPORTED_HOTELIDS` | exactly one valid Mongo ObjectId | Local `HotelDetails._id` bound to this credential pair |
-| `HOTELRUNNER_PROJECTION_ENABLED` | `false` | Allows guarded event-to-PMS mutation for cutoff-eligible events; does not disable email property-wide |
-| `HOTELRUNNER_PROJECTION_NOT_BEFORE` | required when projection is true | Timezone-qualified ISO activation cutoff; events archived before it are audit-only and cannot be claimed |
+| `HOTELRUNNER_INTEGRATION_ENABLED` | `false` | Master runtime boundary; false disables callback authority, client access, worker work, and HotelRunner-first OTA routing regardless of legacy flags |
+| `HOTELRUNNER_API_TOKEN` | dormant; required only for reviewed reactivation | Secret token; retention does not authorize use; never print, log, commit, or place in React |
+| `HOTELRUNNER_API_HR_ID` | dormant; required only for reviewed reactivation | Secret-equivalent HotelRunner property/application identifier |
+| `HOTELRUNNER_SUPPORTED_HOTELIDS` | dormant one-property binding | Local `HotelDetails._id` retained only for provenance and possible reviewed reactivation |
+| `HOTELRUNNER_PROJECTION_ENABLED` | `false` | Legacy guarded event-to-PMS mutation gate; must remain false in email-only mode |
+| `HOTELRUNNER_PROJECTION_NOT_BEFORE` | blank | Historical activation cutoff; must remain blank in email-only mode |
 | `HOTELRUNNER_PULL_ENABLED` | `false` | Explicitly enables reservation reconciliation GETs; malformed/blank explicit booleans invalidate configuration |
 | `HOTELRUNNER_ROOM_LIST_SYNC_ENABLED` | `false` | Independently enables due room-list refreshes; malformed/blank explicit booleans invalidate configuration |
 | `HOTELRUNNER_CONFIRM_DELIVERY_ENABLED` | `false` | Separate outbound PUT gate; also requires projection plus bounded PMS/message identifiers |
-| `HOTELRUNNER_REQUIRE_OTA_REVIEW` | `false` | When true, a new confirmed HotelRunner reservation enters the existing canonical `OTA Platform Review` workflow; malformed values stop worker projection while callback archival remains available |
+| `HOTELRUNNER_REQUIRE_OTA_REVIEW` | inactive while master is false | Historical projection-review preference; it must not affect ordinary OTA inbound email processing in email-only mode |
 | `HOTELRUNNER_PULL_INTERVAL_MINUTES` | 30; bounded 15-360 | Due interval with +/-10% jitter and at least five minutes |
 | `HOTELRUNNER_ROOM_LIST_INTERVAL_HOURS` | 24; bounded 6-168 | Room-list refresh interval |
 | `HOTELRUNNER_REQUEST_TIMEOUT_MS` | 12000; bounded 3000-30000 | Vendor request timeout |
@@ -419,17 +378,21 @@ All values belong in the backend `.env` only. The repository ignores `.env`, `.e
 | `HOTELRUNNER_API_BASE_URL` | official v2 Apps URL | Test seam only; do not override in production |
 | `BIND_HOST` | `127.0.0.1` | Node origin bind address; production must remain loopback because Nginx is the public edge |
 
+The required current production values are the master boundary and all four legacy gates explicitly false, with the cutoff blank. Protected credentials may remain populated and dormant. Verify this state after deployment without printing secret values and without making a vendor request.
+
 The vendor's documented ceilings are 250 calls/day/property, 5 calls/minute/property, and 75 calls/minute/application. The lower xHotelPro defaults are deliberate safety headroom, not HotelRunner's published limits. Quota buckets are conservative call reservations: the three scopes are claimed sequentially, so an earlier bucket may remain incremented if a later bucket rejects before network I/O. Treat the counters as an upper bound on attempted calls, not an exact network-call ledger.
 
 The production client rejects any base URL that is not exactly HTTPS `app.hotelrunner.com` at `/api/v2/apps`, rejects URL user info/query/hash, rejects redirects, caps responses at 2 MiB, and requires JSON.
 
 ### Versioned environment gate
 
+Under the 2026-08-13 email-only contract, the only approved HotelRunner gate operations are read-only `status` and, when needed to close the boundary, `deactivate`. `deactivate` must set the master boundary and all four legacy gates false and clear the cutoff. The bootstrap, discovery, token-rotation, activation, and review-mode material below is retained for historical implementation context only and must not be executed without a future dated reactivation approval. None of these local commands is permission to make a HotelRunner vendor call.
+
 Never use an unversioned home-directory helper to change HotelRunner production settings. Use the script from the exact deployed backend revision. It accepts one explicit regular `.env` path, refuses symlinks/duplicates/inherited conflicts, creates a unique atomic mode-`600` backup before every accepted mutation, and reports names/state only—never values.
 
 Run this environment tool as the application service account (`ahmedadmin` in the current deployment), never through `sudo`. Atomic replacement makes the invoking account the new file owner; a root-owned mode-`600` file would make PM2 unable to read it. Before and after every mutation, verify the `.env` and backup owner/group are the service account and their modes are `600`, while the backup directory is `700`, without printing file contents.
 
-Safe status/bootstrap/discovery checks:
+Historical status/bootstrap/discovery commands — only `status` is currently approved:
 
 ```sh
 npm run hotelrunner:env-gate -- status --env-file /home/ahmedadmin/Hotels/hotels_backend/.env
@@ -445,7 +408,7 @@ printf '%s' "$hotelrunner_replacement_token" | npm run hotelrunner:env-gate -- r
 unset hotelrunner_replacement_token
 ```
 
-`rotate-token` is allowed only while all four gates are explicitly false and the activation cutoff is blank. It also requires the existing HR ID and exactly one valid local hotel binding. `activate` atomically sets push projection and bounded recurring room-list verification true, keeps history pull and delivery confirmation false, and requires a reviewed timezone-qualified cutoff. `deactivate` closes all four gates and clears the cutoff.
+Historically, `rotate-token` was allowed only while the master boundary and all four legacy gates were explicitly false and the activation cutoff was blank. It also required the existing HR ID and exactly one valid local hotel binding. `activate` atomically set the master boundary, push projection, and bounded recurring room-list verification true, kept history pull and delivery confirmation false, and required a reviewed timezone-qualified cutoff. The current `deactivate` operation closes the master boundary and all four legacy gates and clears the cutoff.
 
 Review mode is changed independently so activation/deactivation and token rotation do not silently alter the business workflow:
 
@@ -560,11 +523,13 @@ Canonical provider fields and recognized legacy provider labels must also reach 
 
 Trip.com has an explicit cross-transport identity bridge so its existing email-created record can be linked to the direct HotelRunner event. This bridge still requires exact validated provider identity and rejects contradictory providers.
 
-### HotelRunner-first direct-OTA email ingress
+### Historical HotelRunner-first direct-OTA email ingress — inactive
+
+This entire subsection describes the former activated design. It is inactive while `HOTELRUNNER_INTEGRATION_ENABLED=false`: eligible direct OTA email bypasses HotelRunner-first queuing and vendor lookup and proceeds through the existing inline OTA mapper. The preserved description below is not current behavior and must not be used to hold or delay an OTA email.
 
 When projection is active, an authenticated direct-OTA `new_reservation` email that resolves from source-backed hotel evidence to the one configured active HotelRunner property is not reconciled inline by the SendGrid process. The controller first persists the complete normalized `InboundEmail` audit with `processingStatus=awaiting_hotelrunner`, then inserts a durable identity job and returns HTTP 200. Important-email forwarding may still run after acceptance. Reservation refresh and Airbnb creation WhatsApp notifications are materialized only from the durable terminal result and delivered once through the backend notification outbox.
 
-If that configured property's projection/configuration gate is unavailable, the same direct email is archived as `recovery_pending` and answered retryably; it never falls through to the legacy inline creator. Authenticated HotelRunner relay emails are audit-only corroboration and never own an email fallback job, lifecycle creation, or commercial pricing.
+Historically, if that configured property's projection/configuration gate was unavailable, the same direct email was archived as `recovery_pending` and answered retryably; it did not fall through to the inline creator. Authenticated HotelRunner relay emails were audit-only corroboration and did not own an email fallback job, lifecycle creation, or commercial pricing. Neither rule applies while the master boundary is false; current email-only behavior is defined above.
 
 The HotelRunner worker always drains due callback/API event work before these fallback jobs. After the grace period it checks durable local HotelRunner state, performs one exact reservation-number GET only when no callback evidence exists, and permits email creation only from a current identity-bound confirmed-empty proof. An exact HotelRunner result is persisted to the normal event queue and projected there; an uncertain, ambiguous, conflicting, or unavailable response retries or enters review and never authorizes email fallback.
 
@@ -578,7 +543,7 @@ The creation boundary has one explicit cross-process linearization contract:
 
 The archive-before-enqueue boundary is crash recoverable. An enqueue failure returns retryable HTTP 503 while retaining the audit and dedupe claim, and the worker recovers stale `awaiting_hotelrunner` archives that do not yet have a job. Duplicate deliveries cannot re-enter inline reservation creation.
 
-### Existing OTA platform-review workflow
+### Historical OTA platform-review workflow
 
 `HOTELRUNNER_REQUIRE_OTA_REVIEW=true` reuses the PMS workflow; it does not introduce a second lifecycle status:
 
@@ -641,7 +606,7 @@ The mirror is the durable identity/watermark record. The PMS reservation remains
 
 ### Stored data and privacy
 
-The event stores a bounded normalized operational snapshot, not the unbounded original request object. It may still contain guest name, address, phone, email, stay, notes, price, and non-card payment metadata. The payload and mirror snapshots are excluded from normal Mongoose selection, and current admin endpoints do not expose them.
+The event stores a bounded normalized operational snapshot, not the unbounded original request object. It may still contain guest name, address, phone, email, stay, notes, price, and non-card payment metadata. The payload and mirror snapshots are excluded from normal Mongoose selection; dormant admin handlers must not expose them if a future review restores those routes.
 
 This is still personal data. Future event-detail pages must default to redacted metadata, require a more specific permission for any sensitive reveal, record an audit event, and define a retention policy. Never render full event JSON into `/admin/hotelrunner` by default.
 
@@ -677,7 +642,7 @@ Before approval, compare for every non-master inventory code:
 - HotelRunner availability/restriction/price update capability flags; and
 - exact local room category, display name, active state, and physical count.
 
-The current admin response/UI does not expose the `sales_currency` saved in mapping notes. Until a sanitized currency field is added, currency verification requires a controlled read-only operational check. Do not state that the current page proves currency.
+The retired admin response/UI did not expose the `sales_currency` saved in mapping notes. This is historical mapping-review context; there is no current page and no current mapping approval workflow.
 
 The mapping reviewer must sign off before projection is enabled.
 
@@ -857,24 +822,22 @@ only the already-proven financial aliases and stale commercial-attention
 cleanup. Re-running the command is idempotent and must not repeat a completed
 target.
 
-## OTA-email authority boundary
+## Current OTA-email authority boundary
 
-The existing OTA-email pipeline remains a permanent coverage safety net; it is not switched off for the whole hotel. This matters when an OTA account or Airbnb listing is not connected through HotelRunner.
+While `HOTELRUNNER_INTEGRATION_ENABLED=false`, authenticated, source-backed OTA inbound email is the sole active reservation lifecycle transport for supported OTA reservations:
 
-Authority is resolved per exact reservation:
+1. direct OTA new-reservation email follows the normal inline mapper instead of the HotelRunner-first queue;
+2. direct OTA modification and cancellation email may update the matching local reservation through the existing guarded mapper even when that row retains historical HotelRunner source or projection markers;
+3. no callback event, vendor lookup, negative lookup proof, fallback grace period, or HotelRunner worker job may delay or outrank the email; and
+4. existing email authentication, provider identity, hotel scoping, deduplication, optimistic concurrency, local housing/finance/payment ownership, and audit safeguards remain mandatory.
 
-1. an authenticated, source-backed direct-OTA new-reservation email for the configured HotelRunner property is archived into the durable HotelRunner-first queue and cannot create inline;
-2. callback events and an exact bounded HotelRunner reservation-number lookup have creation priority; email fallback requires a fresh identity/configuration/hotel-bound confirmed-empty proof;
-3. after that exact reservation carries a direct HotelRunner projection marker, lower-authority email lifecycle/create facts are audit-only and cannot overwrite lifecycle, guest, dates, rooms, gross, or payment state; and
-4. the only permitted email mutation of a direct-owned reservation is the guarded commercial-only enrichment described above.
+Authenticated HotelRunner-branded relay email is treated only as inbound-email transport in this mode and may reach the ordinary guarded email mapper; it never becomes API authority or permission to call the vendor. Its sender authentication, embedded OTA identity, ambiguity, ordering, deduplication, hotel, housing, finance, and payment safeguards still apply. Historical HotelRunner event, mirror, mapping, pricing, and source fields remain intact for audit/report correctness, but they do not suppress trusted inbound-email lifecycle changes in this mode.
 
-Authenticated HotelRunner email relays require zero-or-one-provider consensus from source-backed commercial labels and are persisted audit-only. They never create a fallback identity or supply canonical commercial money. Conflicting recognized OTA labels do not select a convenient winner, and incidental provider names in guest prose are not identity evidence.
+Turning the master boundary off does not erase or rewrite past reservations. Turning it on in the future is not sufficient by itself to restore the former HotelRunner-first authority rules; that requires the new paid subscription and explicit dated reactivation review described at the top of this document.
 
-This behavior is independent of property-wide projection configuration for unrelated reservations. An uncovered reservation continues to use email even when another reservation at the same hotel is HotelRunner-owned. Other hotels are unchanged.
+## Historical reconciliation and API quota design — inactive
 
-Turning projection off stops new direct projection but does not erase reservation-level source/audit markers. Existing direct-owned records continue to retain their provenance; rollback does not globally toggle email authority or rewrite past reservations.
-
-## Reconciliation and API quota design
+This design is dormant. No reconciliation, room-list, delivery-confirmation, or other HotelRunner vendor request is permitted under the 2026-08-13 email-only contract.
 
 Push is the fast path; limited history retrieval is the repair path.
 
@@ -952,7 +915,9 @@ Historical static assets must nevertheless be treated as compromised until all o
 
 OAuth client IDs, payment publishable keys, PayPal client IDs, and properly provider-restricted browser Maps keys are public identifiers by design and are not rejected merely for being browser-readable. Their provider-side origin/referrer restrictions still need normal review. The guard explicitly rejects HotelRunner API-key aliases such as the separated and compact `HOTEL_RUNNER`/`HOTELRUNNER` forms plus `HR_API_KEY`/`HR_KEY`; it also rejects current and future names containing server-only markers such as client/private/signing/encryption secrets, access/API/auth/bearer/refresh tokens, database URIs, service-account keys, and webhook/session/JWT secrets. It does not ban every generic browser API-key name, because some restricted browser keys are intentionally public.
 
-## Controlled deployment and activation runbook
+## Historical controlled deployment and activation runbook — do not execute
+
+This runbook records the pre-cancellation rollout design. It was superseded on 2026-08-13 and must not be executed while the subscription is cancelled. In particular, do not rotate/test HotelRunner credentials, run room discovery or history pulls, enable callbacks, start projection, or make any vendor request. The only current gate actions are read-only status inspection and fail-closed deactivation as described above.
 
 ### Git and shared-server deployment discipline
 
@@ -1087,7 +1052,9 @@ For every case verify:
 
 If the main backend and worker do not use the same projection/cutoff setting, or any invariant fails, stop the worker, set projection false, and investigate without stopping the normal PMS.
 
-## Verification commands
+## Historical verification commands — local/mock use only
+
+These commands document earlier release evidence. Do not run any command that can reach HotelRunner. Current shutdown verification must be limited to local source/configuration inspection, mocks/fixtures, internal endpoints that fail before credential handling, and OTA inbound-email regression checks.
 
 Local/synthetic tests do not consume HotelRunner quota:
 
@@ -1132,7 +1099,7 @@ These checks used mocks/fixtures or read-only local database inspection and made
 
 ## Monitoring and status interpretation
 
-The current admin page aggregates:
+There is no current HotelRunner admin page. The retired page formerly aggregated:
 
 - **Waiting:** pending, processing, and retry events.
 - **Needs mapping:** events held for exact room mapping.
@@ -1140,7 +1107,9 @@ The current admin page aggregates:
 - **Processed:** completed and ignored events.
 - **Projected:** created, updated, and canceled mirror results.
 
-Operational checks should include:
+While the integration is dormant, operational monitoring focuses on the OTA inbound-email endpoint, email audit/deduplication health, inline create/update/cancel results, the five false HotelRunner flags, the disabled callback, and the desired disabled/stopped worker state. It must not call HotelRunner.
+
+The following HotelRunner-specific checks are historical reactivation guidance only:
 
 - callback route and persistence probe (never containing a real token in saved command output);
 - last callback/event receipt;
@@ -1157,7 +1126,7 @@ Operational checks should include:
 - active database projection lease/owner and pre-activation audit-only count; and
 - absence of callback queries in every logging layer.
 
-Suggested alert conditions for the future monitoring page:
+Historical alert ideas for a future, newly approved monitoring design:
 
 - callback/pull silence outside an agreed operational window;
 - after activation, worker missing or more than one worker;
@@ -1173,13 +1142,15 @@ Suggested alert conditions for the future monitoring page:
 
 ## Failure handling and rollback
 
-### Immediate safe stop
+### Current email-only safe state
 
-1. Disable/stop only `xhotelpro-hotelrunner-sync.service` (`sudo systemctl disable --now xhotelpro-hotelrunner-sync.service`) to stop vendor calls and projection. If an unintended PM2 `hotelrunner-sync` also exists, stop/delete only that duplicate.
-2. Run the versioned env-gate `deactivate` command so projection, pull, recurring room-list sync, and delivery confirmation all become false and the cutoff is cleared atomically.
-3. Restart both backend and worker environments consistently (or keep the worker stopped).
-4. Verify uncovered OTA-email create/update/cancel remains active. Do not assume rollback removes direct-source markers from already-linked reservations.
-5. Keep callback storage available if safe so events are not lost.
+1. Run the versioned env-gate `deactivate` command so the master boundary, projection, pull, recurring room-list sync, and delivery confirmation all become false and the cutoff is cleared atomically.
+2. Restart the normal backend with the closed environment. Do not start a HotelRunner worker for testing.
+3. The desired supervisor state is `xhotelpro-hotelrunner-sync.service` disabled/stopped with no PM2 duplicate. If the deployer cannot run the required administrator command, do not claim completion: record the residual `Restart=always` unit/process state and verify the master-disabled worker remains in its inert signal-only wait before database connection/model/client/vendor initialization until an administrator disables/stops it.
+4. Verify the callback returns a generic `404` before authentication or persistence and verify normal OTA-email create/update/cancel remains inline, including for rows with historical HotelRunner markers. Do not use real HotelRunner credentials or a vendor call for these checks.
+5. Preserve historical event/mirror/mapping/audit data and protected dormant credentials; preservation does not grant lifecycle authority.
+
+The mapping, duplicate, credential, and recovery notes below are historical incident guidance. They do not authorize reactivation.
 
 ### Mapping problem
 
@@ -1210,23 +1181,23 @@ Suggested alert conditions for the future monitoring page:
 - exact event/mirror keys make callbacks and pulls idempotent;
 - persisted leases recover from process death;
 - overlapping pull windows tolerate duplicate delivery;
-- projection off stops future direct mutation; direct new-reservation email for the configured HotelRunner property is held fail-closed instead of reverting to inline creation, while existing source markers remain auditable;
+- the master-disabled mode stops future HotelRunner mutation and restores trusted direct OTA new/update/cancel email to the normal inline path, while existing source markers remain auditable provenance only;
 - no rollback requires deleting local reservations; and
 - code rollback uses exact Git revisions and retained deployment backups. Preserve the now-deployed network-boundary revisions when rolling back HotelRunner feature code so raw origin ports do not reopen.
 
-## Frontend and backend roadmap
+## Retired frontend and deferred backend roadmap — no current HotelRunner route
 
-All future HotelRunner screens stay under `/admin/hotelrunner/*`, use the same isolated frontend module, call only authenticated local backend APIs, and are property-scoped server-side. Credentials never become browser-readable.
+As of **2026-08-13**, there is no current `/admin/hotelrunner` route and no committed plan to add HotelRunner screens. The route, side-menu links, permission mapping, isolated page, API wrapper, and view model are removed. Every phase and route described below is a retired or deferred historical proposal, not a current route, deployment instruction, or promise. A future paid reactivation must produce a new dated roadmap instead of silently resuming this one. Credentials must never become browser-readable.
 
-Inbound reservations that require staff review intentionally use the existing `/admin/ota-reservations` component and release API. It displays **OTA Platform Review HotelRunner** only as a presentation label while the stored lifecycle remains `OTA Platform Review`. The HotelRunner operational console remains separate, and its top-navbar shortcut is intentionally absent; any future admin navigation must be explicitly approved and must not expose credentials or make vendor calls during ordinary page navigation.
+Inbound reservations that require staff review continue to use the existing `/admin/ota-reservations` component and release API. Historical HotelRunner presentation labels may remain on historical rows, but there is no HotelRunner operational console. Any future admin navigation requires explicit owner approval and a new security/operations review.
 
-### Phase 1A - deployed at Gate 3 mapping review; projection not active
+### Retired Phase 1A — page removed
 
-Current route:
+Retired route (not registered):
 
-- `/admin/hotelrunner` - configuration, property, queue/projection summaries, worker timestamps, and embedded mapping table.
+- `/admin/hotelrunner` — removed on 2026-08-13; it is not a current route.
 
-Required near-term additions before broader staff use:
+The following were historical ideas before cancellation. They are deferred and must not be treated as required near-term work:
 
 - make `HotelRunnerIntegration` a real assignable least-privilege permission;
 - add a write-free identity/projection preview that reuses the production matching rules;
@@ -1237,9 +1208,9 @@ Required near-term additions before broader staff use:
 - add a redacted export of mapping/status for owner approval; and
 - add explicit read-only wording while projection is off.
 
-### Phase 1B - split operational pages
+### Deferred historical Phase 1B — no routes registered
 
-Planned routes:
+Retired/deferred route proposals (none are registered or approved):
 
 - `/admin/hotelrunner/room-mappings` - full mapping workflow, filters, version conflicts, verification evidence, and audit actor/time.
 - `/admin/hotelrunner/events` - initially read-only redacted event queue, source, state, timestamps, retry/quarantine codes, and mirror/local link.
@@ -1265,7 +1236,7 @@ The first event/quarantine UI is read-only and cursor-paginated. Its server allo
 
 A later single-event retry requires a separate operations permission, expected version, operator reason, immutable audit record, and all existing idempotency/mapping/currency/identity/finance safeguards. It cannot edit/delete raw events or bypass projection controls.
 
-### Phase 1C - delivery/state workflows (still inbound)
+### Deferred historical Phase 1C — not active
 
 Only after create/modify/cancel is flawless:
 
@@ -1275,7 +1246,7 @@ Only after create/modify/cancel is flawless:
 - never automatically cancel/accept based only on transport receipt; and
 - add full audit, idempotency, quota, retry, and rollback tests.
 
-### Phase 2 - outbound availability, restrictions, and rates
+### Deferred historical Phase 2 — no outbound project is active
 
 This is a separate project. Proposed routes:
 
@@ -1312,7 +1283,7 @@ Phase 2 requirements:
 - roll out one room/rate/date/channel at a time before full automation; and
 - never infer successful OTA propagation merely from a successful xHotelPro-to-HotelRunner request.
 
-### Phase 3 - multi-property support
+### Deferred historical Phase 3 — not active
 
 - replace the singular environment binding with explicit per-property credential secret references;
 - independent flags, room mappings, cursors, budgets, and worker leases per property;
@@ -1332,9 +1303,9 @@ Do not place these on the committed roadmap without private HotelRunner document
 
 HotelRunner reservation comments and payment metadata are not substitutes for messaging or a virtual-card terminal.
 
-## Definition of done for inbound go-live (acceptance criteria, not current status)
+## Historical reactivation acceptance checklist — not a current plan
 
-This checklist is not evidence of completion. Current production has passed the one-call discovery but has not passed token rotation, mapping approval, worker activation, projection, or controlled lifecycle validation.
+This checklist is retained only as historical safety context. The subscription is cancelled, HotelRunner is disabled, OTA inbound email is the sole current lifecycle transport, and no inbound HotelRunner go-live is planned. Nothing in this checklist authorizes a vendor call or activation. A future paid reactivation requires a new dated acceptance plan and may reuse only the safeguards that are re-reviewed then.
 
 Inbound HotelRunner authority is not done until all are true:
 
@@ -1380,6 +1351,7 @@ Vendor documentation does not publish a guaranteed REST retry count or email-fal
 
 ## Change log
 
+- **2026-08-13:** Recorded the owner-requested cancellation of the HotelRunner API subscription and made OTA inbound email the sole active reservation lifecycle transport. Added the fail-closed `HOTELRUNNER_INTEGRATION_ENABLED=false` master contract alongside all four legacy gates false and a blank cutoff; disabled callback authority; required the client to reject and any residual `Restart=always` worker to wait inertly before database connection/model/client/vendor initialization; restored trusted direct OTA email to inline lifecycle handling even for historical HotelRunner-marked rows; retained credentials and stored HotelRunner data as dormant provenance only; retired `/admin/hotelrunner`, its English/Arabic side-menu and permission wiring, and its dedicated frontend modules; prohibited live vendor test calls; and explicitly deferred all old activation/UI roadmap material. Production flag, callback, build, OTA-email, and supervisor facts remain subject to post-deployment verification and must not be inferred from this source update.
 - **2026-08-07:** Audited the eight current Zad Ajyad HotelRunner pushes with zero vendor calls and zero writes: every identity had exactly one PMS reservation, four were already API-owned, and four foreign-currency events were safely held against existing email-created rows. Added the authenticated email-commercial bridge, direct-source `commission=0`, nullable evidence-only `commission_ota`, and the immutable one-time reconciliation runbook. The production dry-run proved four Trip handoffs plus four Agoda evidence backfills without reservation creation or lifecycle/stay/room/payment mutation.
 - **2026-08-07:** Installed and verified the versioned Nginx callback log hardener, proved configured callback authentication with a write-free `422` probe, completed exactly one six-code room-list discovery with zero reservation-history calls, preserved PMS/OTA invariants, and stopped with five verified mappings pending owner approval plus the master fallback permanently unmapped.
 - **2026-08-06:** Added a fail-closed frontend environment preflight, removed unused server credential names from local and production frontend environments with protected rollback copies, tightened the production frontend environment to mode `600`, and recorded clean-build/cache/provider-rotation requirements for the historical public-bundle incident.

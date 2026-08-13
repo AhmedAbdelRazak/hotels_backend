@@ -25,6 +25,7 @@ const {
 } = require("./otaReviewConcurrency");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 const {
+	hasActiveHotelRunnerLifecycleAuthority,
 	hasDirectHotelRunnerProjection,
 	normalizeMarker,
 } = require("./hotelrunnerOtaEmailBoundary");
@@ -9133,7 +9134,7 @@ function lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(
 	// Source authority is role-specific. An authenticated provider portal may be
 	// stronger commercial evidence, but it must never outrank HotelRunner for
 	// lifecycle once the reservation is owned by a direct HotelRunner projection.
-	return hasDirectHotelRunnerProjection(existing);
+	return hasActiveHotelRunnerLifecycleAuthority(existing);
 }
 
 const MAX_DIRECT_AFTER_RELAY_SOURCE_SKEW_MS = 15 * 60 * 1000;
@@ -12195,6 +12196,7 @@ async function reconcileDirectHotelRunnerOwnedEmail({
 		normalizeComparable(normalized.intent || "") === "new reservation" &&
 		normalizeComparable(normalized.eventType || "") === "new";
 	if (!isNewReservation) {
+		if (!hasActiveHotelRunnerLifecycleAuthority(existing)) return null;
 		return {
 			status: "ignored",
 			actionTaken: "skipped",
@@ -12854,7 +12856,7 @@ function buildExistingReservationUpdateSet({
 	}
 	if (
 		(isOtaInboundEmail(normalized) &&
-			hasDirectHotelRunnerProjection(existing)) ||
+			hasActiveHotelRunnerLifecycleAuthority(existing)) ||
 		lowerAuthorityOtaLifecycleMustYieldToHotelRunnerApi(normalized, existing)
 	) {
 		return set;

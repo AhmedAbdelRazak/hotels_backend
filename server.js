@@ -35,6 +35,7 @@ const {
 const {
 	startHotelRunnerFallbackNotificationOutbox,
 } = require("./services/hotelrunnerFallbackNotificationOutbox");
+const { getHotelRunnerConfig } = require("./services/hotelrunnerConfig");
 
 const app = express();
 const server = http.createServer(app);
@@ -132,9 +133,11 @@ mongoose
 		// This PM2 process owns Socket.IO and therefore leases/delivers the durable
 		// post-terminal notification intents without coupling delivery failures to
 		// reservation correctness.
-		startHotelRunnerFallbackNotificationOutbox({
-			dependencies: { getIo: () => app.get("io") },
-		});
+		if (getHotelRunnerConfig().integrationEnabled === true) {
+			startHotelRunnerFallbackNotificationOutbox({
+				dependencies: { getIo: () => app.get("io") },
+			});
+		}
 	})
 	.catch((err) => console.log("DB Connection Error: ", err));
 
@@ -156,9 +159,16 @@ app.use(
 	guestCardJsonParser
 );
 // HotelRunner authenticates with callback query credentials and sends a small
-// form field. Reject unauthenticated or non-form bodies before the legacy
-// 50 MB JSON parser used by unrelated PMS upload endpoints.
-app.use("/api/hotelrunner/callback", hotelRunnerCallbackPreflight);
+// form field. While the master integration boundary is off, terminate the exact
+// retired callback path before any body parser, authentication, or persistence.
+// A future reviewed reactivation restores its small pre-parser guard.
+if (getHotelRunnerConfig().integrationEnabled === true) {
+	app.use("/api/hotelrunner/callback", hotelRunnerCallbackPreflight);
+} else {
+	app.all("/api/hotelrunner/callback", (_req, res) =>
+		res.status(404).json({ error: "Not found" })
+	);
+}
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (_req, res) => res.send("Hello From PMS API"));
@@ -193,7 +203,13 @@ if (String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true") {
 }
 
 // API routes
-readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));
+readdirSync("./routes")
+	.filter(
+		(routeFile) =>
+			routeFile !== "hotelrunner.js" ||
+			getHotelRunnerConfig().integrationEnabled === true
+	)
+	.forEach((routeFile) => app.use("/api", require(`./routes/${routeFile}`)));
 
 app.use((err, _req, res, next) => {
 	if (!err || err.name !== "UnauthorizedError") return next(err);

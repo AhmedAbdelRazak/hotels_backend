@@ -3071,3 +3071,34 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Reservation creation remains deterministic and requires the explicit final
     confirmation quick reply.
   - Optional email is supported through a localized skip quick reply.
+
+2026-08-13 HotelRunner Disabled; OTA Inbound Email Is Sole Authority
+- Reason and active contract:
+  - The HotelRunner API subscription was cancelled for cost reasons. Until a
+    new paid subscription and separately reviewed activation are approved,
+    authenticated OTA inbound email is the sole active reservation lifecycle
+    transport and direct OTA create/update/cancel processing stays inline.
+  - `HOTELRUNNER_INTEGRATION_ENABLED=false` is the master boundary. Keep
+    projection, history pull, recurring room-list sync, and delivery
+    confirmation explicitly false, and keep the activation cutoff blank.
+- Fail-closed runtime boundaries:
+  - Callback GET/POST returns a generic 404 before authentication, parsing, or
+    persistence. The HotelRunner client rejects before quota/network access.
+  - The desired worker state is disabled/stopped. A residual systemd
+    `Restart=always` launch must wait inertly before database connection/model,
+    client, or vendor initialization
+    until an administrator disables/stops it; record live supervisor state only
+    after deployment verification.
+  - Do not make HotelRunner authentication, discovery, history, delivery, or
+    other vendor test calls during shutdown verification.
+- Preserved and removed surfaces:
+  - Historical HotelRunner records/markers remain provenance only and have no
+    lifecycle authority; trusted OTA email can update/cancel those rows through
+    the normal guarded mapper. Protected credentials remain dormant for a
+    possible future reviewed reactivation.
+  - `/admin/hotelrunner`, its English/Arabic side-menu and permission wiring,
+    and its dedicated frontend page/API/view-model modules are retired.
+- Verification status:
+  - Production flags, callback behavior, frontend build removal, OTA-email
+    regression behavior, and final supervisor state require post-deployment
+    verification; source changes alone are not deployment evidence.

@@ -3,9 +3,37 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+	hasActiveHotelRunnerLifecycleAuthority,
 	hasDirectHotelRunnerProjection,
 	normalizeMarker,
 } = require("./hotelrunnerOtaEmailBoundary");
+
+const projectedReservation = {
+	supplierData: {
+		hotelRunner: {
+			transport: "hotelrunner_api",
+			reservationId: "hr-reservation-1",
+		},
+		otaAutomationPipeline: "hotelrunner_background_worker",
+		otaSourceAuthority: 4,
+	},
+};
+
+test("historical projection provenance loses lifecycle authority in email-only mode", () => {
+	assert.equal(hasDirectHotelRunnerProjection(projectedReservation), true);
+	assert.equal(
+		hasActiveHotelRunnerLifecycleAuthority(projectedReservation, {
+			integrationEnabled: false,
+		}),
+		false
+	);
+	assert.equal(
+		hasActiveHotelRunnerLifecycleAuthority(projectedReservation, {
+			integrationEnabled: true,
+		}),
+		true
+	);
+});
 
 test("direct HotelRunner ownership requires a reservation-level projection marker", () => {
 	assert.equal(hasDirectHotelRunnerProjection(), false);

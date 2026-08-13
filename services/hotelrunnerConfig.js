@@ -79,6 +79,13 @@ const parseIsoTimestamp = (value = "") => {
 };
 
 function getHotelRunnerConfig(env = process.env) {
+	const errors = [];
+	const integrationEnabled = parseBooleanSetting(
+		env,
+		"HOTELRUNNER_INTEGRATION_ENABLED",
+		false,
+		errors
+	);
 	const token = clean(env.HOTELRUNNER_API_TOKEN);
 	const hrId = clean(env.HOTELRUNNER_API_HR_ID);
 	const supportedHotelIds = parseSupportedHotelIds(
@@ -98,7 +105,7 @@ function getHotelRunnerConfig(env = process.env) {
 	) {
 		callbackErrors.push("The configured HotelRunner PMS hotel identifier is invalid.");
 	}
-	const errors = [...callbackErrors];
+	errors.push(...callbackErrors);
 	const pullEnabled = parseBooleanSetting(
 		env,
 		"HOTELRUNNER_PULL_ENABLED",
@@ -149,11 +156,17 @@ function getHotelRunnerConfig(env = process.env) {
 	}
 
 	return {
+		// Master runtime boundary. It defaults off, and every vendor-facing or
+		// HotelRunner-authoritative path must require it explicitly. Retaining the
+		// dormant property/credential values makes a future, reviewed reactivation
+		// reversible without allowing them to influence OTA-email processing now.
+		integrationEnabled,
 		// Callback availability depends only on the credential/property boundary.
 		// Worker-only safety errors must stop the worker without making HotelRunner
 		// retry a callback that this process can still authenticate and archive.
-		callbackConfigured: callbackErrors.length === 0,
-		configured: errors.length === 0,
+		callbackConfigured:
+			integrationEnabled && callbackErrors.length === 0,
+		configured: integrationEnabled && errors.length === 0,
 		errors,
 		token,
 		hrId,

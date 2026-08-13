@@ -7,10 +7,46 @@ const assert = require("node:assert/strict");
 const { getHotelRunnerConfig } = require("./hotelrunnerConfig");
 
 const baseEnvironment = {
+	HOTELRUNNER_INTEGRATION_ENABLED: "true",
 	HOTELRUNNER_API_TOKEN: "synthetic-token",
 	HOTELRUNNER_API_HR_ID: "synthetic-hr-id",
 	HOTELRUNNER_SUPPORTED_HOTELIDS: "64b000000000000000000001",
 };
+
+test("HotelRunner integration master switch defaults off and disables every runtime boundary", () => {
+	const disabled = getHotelRunnerConfig({
+		...baseEnvironment,
+		HOTELRUNNER_INTEGRATION_ENABLED: "false",
+		HOTELRUNNER_PROJECTION_ENABLED: "true",
+		HOTELRUNNER_ROOM_LIST_SYNC_ENABLED: "true",
+		HOTELRUNNER_PROJECTION_NOT_BEFORE: "2026-08-06T12:34:56.000Z",
+	});
+	assert.equal(disabled.integrationEnabled, false);
+	assert.equal(disabled.configured, false);
+	assert.equal(disabled.callbackConfigured, false);
+
+	const defaultOff = getHotelRunnerConfig({
+		HOTELRUNNER_API_TOKEN: "synthetic-token",
+		HOTELRUNNER_API_HR_ID: "synthetic-hr-id",
+		HOTELRUNNER_SUPPORTED_HOTELIDS: "64b000000000000000000001",
+	});
+	assert.equal(defaultOff.integrationEnabled, false);
+	assert.equal(defaultOff.configured, false);
+	assert.equal(defaultOff.callbackConfigured, false);
+
+	const malformed = getHotelRunnerConfig({
+		...baseEnvironment,
+		HOTELRUNNER_INTEGRATION_ENABLED: "tru",
+	});
+	assert.equal(malformed.integrationEnabled, false);
+	assert.equal(malformed.configured, false);
+	assert.equal(
+		malformed.errors.some((error) =>
+			error.startsWith("HOTELRUNNER_INTEGRATION_ENABLED")
+		),
+		true
+	);
+});
 
 test("local projection is fail-closed until explicitly activated", () => {
 	assert.equal(getHotelRunnerConfig(baseEnvironment).projectionEnabled, false);

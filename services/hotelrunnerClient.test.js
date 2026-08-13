@@ -30,6 +30,7 @@ function quotaModel() {
 
 function syntheticConfig(overrides = {}) {
 	return {
+		integrationEnabled: true,
 		configured: true,
 		apiBaseUrl: "https://app.hotelrunner.com/api/v2/apps",
 		token: "synthetic-token",
@@ -44,6 +45,25 @@ function syntheticConfig(overrides = {}) {
 		...overrides,
 	};
 }
+
+test("master-disabled integration fails before quota reservation or network access", async () => {
+	let fetchCalls = 0;
+	const BudgetModel = quotaModel();
+	assert.throws(
+		() =>
+			createHotelRunnerClient({
+				config: syntheticConfig({ integrationEnabled: false }),
+				hotelId: "64b000000000000000000001",
+				fetchImpl: async () => {
+					fetchCalls += 1;
+				},
+				quotaDependencies: { BudgetModel },
+			}),
+		(error) => error?.code === "HOTELRUNNER_INTEGRATION_DISABLED"
+	);
+	assert.equal(fetchCalls, 0);
+	assert.equal(BudgetModel.calls, 0);
+});
 
 test("response reader rejects a declared body above the configured maximum before consuming it", async () => {
 	let iterations = 0;
