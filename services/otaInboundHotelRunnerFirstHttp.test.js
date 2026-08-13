@@ -6,6 +6,9 @@ const Module = require("module");
 const crypto = require("crypto");
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const {
+	isReclaimableInboundClaim: actualIsReclaimableInboundClaim,
+} = require("./otaInboundDedupe");
 
 const HOTEL_ID = "64b000000000000000000201";
 const OWNER_ID = "64b000000000000000000202";
@@ -90,13 +93,30 @@ function loadControllerWithStubs(state) {
 	const inboundModel = {
 		findOne(query) {
 			state.duplicateQueries.push(query);
-			return queryResult(state.processedDuplicate || null);
+			if (query?.dedupeKey) {
+				return queryResult(
+					state.claimedDuplicate || state.processedDuplicate || null
+				);
+			}
+			const candidate = state.processedDuplicate || null;
+			const blockingStatuses = query?.processingStatus?.$in || [];
+			return queryResult(
+				candidate && blockingStatuses.includes(candidate.processingStatus)
+					? candidate
+					: null
+			);
 		},
 		async create(document) {
+			if (document?.dedupeKey && state.createDedupeCollisions > 0) {
+				state.createDedupeCollisions -= 1;
+				const collision = new Error("synthetic duplicate dedupe claim");
+				collision.code = 11000;
+				throw collision;
+			}
 			state.createdAudits.push(document);
 			return {
 				...document,
-				_id: state.processedDuplicate ? DUPLICATE_ID : INBOUND_ID,
+				_id: document.duplicateOf ? DUPLICATE_ID : INBOUND_ID,
 			};
 		},
 		findByIdAndUpdate(id, update) {
@@ -114,13 +134,25 @@ function loadControllerWithStubs(state) {
 			) {
 				state.events.push("mark_enqueued");
 			}
-			const current = state.processedDuplicate
-				? { ...state.createdAudits.at(-1), _id: DUPLICATE_ID }
-				: { ...state.createdAudits[0], _id: INBOUND_ID };
+			const latestCreated = state.createdAudits.at(-1) || {};
+			const current = {
+				...latestCreated,
+				_id: latestCreated.duplicateOf ? DUPLICATE_ID : INBOUND_ID,
+			};
 			return queryResult({ ...current, ...(update.$set || {}) });
 		},
-		async updateOne() {
-			return { matchedCount: 1 };
+		async updateOne(query, update) {
+			state.claimUpdates.push({ query, update });
+			const matchedCount = Number(state.claimUpdateMatched ?? 1);
+			if (
+				matchedCount > 0 &&
+				update?.$unset?.dedupeKey !== undefined &&
+				(state.claimedDuplicate || state.processedDuplicate)
+			) {
+				const claimed = state.claimedDuplicate || state.processedDuplicate;
+				delete claimed.dedupeKey;
+			}
+			return { matchedCount };
 		},
 	};
 	const stubs = new Map([
@@ -135,6 +167,28 @@ function loadControllerWithStubs(state) {
 				normalizeWhitespace: (value) =>
 					String(value || "").replace(/\s+/g, " ").trim(),
 				evaluateTrustedSenderAuthentication: () => state.senderAuthentication,
+				extractNormalizedReservation: (email) => {
+					state.extractNormalizedCalls += 1;
+					return {
+						provider: state.senderAuthentication.trustedProvider || "unknown",
+						providerLabel: "Agoda",
+						intent: "new_reservation",
+						eventType: "new",
+						confirmationNumber: "",
+						hotelName: "",
+						roomName: "",
+						amount: 0,
+						currency: "",
+						totalAmountSar: 0,
+						exchangeRateToSar: 0,
+						paymentCollectionModel: "unknown",
+						warnings: [],
+						errors: [],
+						manualReviewReasons: ["bounded parser input budget"],
+						otaInboundParserResourceLimitExceeded:
+							email.otaInboundParserResourceLimitExceeded === true,
+					};
+				},
 				resolveHotel: async () => {
 					state.events.push("resolve_hotel");
 					return {
@@ -215,7 +269,8 @@ function loadControllerWithStubs(state) {
 			{
 				INBOUND_CLAIM_LEASE_MS: 30 * 60 * 1000,
 				buildInboundDedupeKey: () => "mid:synthetic",
-				isReclaimableInboundClaim: () => false,
+				isReclaimableInboundClaim:
+					state.isReclaimableInboundClaim || (() => false),
 				shouldRetryInboundCollision: () => false,
 			},
 		],
@@ -299,16 +354,22 @@ const makeState = (overrides = {}) => ({
 	events: [],
 	createdAudits: [],
 	auditUpdates: [],
+	claimUpdates: [],
 	duplicateQueries: [],
 	enqueueCalls: [],
 	inlineReconcileCalls: 0,
 	inlineReconciliation: null,
 	orchestratorCalls: 0,
+	extractNormalizedCalls: 0,
 	coordinatorCreations: 0,
 	forwardCalls: 0,
 	reservationNotificationCalls: 0,
 	whatsappCalls: 0,
 	processedDuplicate: null,
+	claimedDuplicate: null,
+	createDedupeCollisions: 0,
+	claimUpdateMatched: 1,
+	isReclaimableInboundClaim: null,
 	senderAuthentication: authenticatedSender,
 	orchestrationNormalized: null,
 	hotelRunnerConfig: null,
@@ -385,6 +446,69 @@ test("eligible HTTP ingress ACKs before optional forwarding and bypasses every i
 		state.events.indexOf("persist_audit") < state.events.indexOf("enqueue"),
 		true
 	);
+});
+
+test("oversized raw MIME is archived as parser-resource review without any automation path", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const state = makeState({ forwardMustFollowResponse: false });
+	const controller = loadControllerWithStubs(state);
+	const rawMime = [
+		"From: Agoda <no-reply@agoda.com>",
+		"To: ota@example.com",
+		"Subject: Agoda Booking ID 777888999 - CONFIRMED",
+		"Message-ID: <oversized-http-agoda@example.com>",
+		"",
+		"BODY MUST NOT BE PARSED",
+		"A".repeat(controller.RAW_MIME_PREPARSER_MAX_BYTES + 1),
+	].join("\r\n");
+	try {
+		await controller.handleSendGridInbound(
+			requestMock({
+				email: rawMime,
+				text: undefined,
+				SPF: "pass",
+				envelope: JSON.stringify({
+					from: "bounce@mailer.agoda.com",
+					to: ["ota@example.com"],
+				}),
+			}),
+			state.response
+		);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.response.body, "OK");
+	assert.equal(state.createdAudits.length, 1);
+	assert.equal(state.createdAudits[0].bodyText.includes("BODY MUST NOT"), false);
+	assert.equal(state.auditUpdates.length, 1);
+	const finalized = state.auditUpdates[0].update.$set;
+	assert.equal(finalized.processingStatus, "needs_review");
+	assert.equal(finalized.skipReason, "ota_inbound_parser_resource_limit");
+	assert.equal(
+		finalized.normalizedReservation.otaInboundParserResourceLimitExceeded,
+		true
+	);
+	assert.equal(finalized.orchestratorDecision.usedAI, false);
+	assert.equal(
+		finalized.orchestratorDecision.skipReason,
+		"ota_inbound_parser_resource_limit"
+	);
+	assert.equal(finalized.reservationMongoId, null);
+	assert.equal(finalized.hotelId, null);
+	assert.equal(state.extractNormalizedCalls, 1);
+	assert.equal(state.orchestratorCalls, 0);
+	assert.equal(state.inlineReconcileCalls, 0);
+	assert.equal(state.coordinatorCreations, 0);
+	assert.equal(state.enqueueCalls.length, 0);
+	assert.equal(state.forwardCalls, 0);
+	assert.equal(state.reservationNotificationCalls, 0);
+	assert.equal(state.whatsappCalls, 0);
+	assert.deepEqual(state.events, []);
+	assert.deepEqual(state.duplicateQueries, []);
 });
 
 test("master-disabled mode processes direct OTA email inline despite legacy HotelRunner settings", async () => {
@@ -656,4 +780,161 @@ test("duplicate redelivery of an awaiting audit returns OK without orchestration
 		),
 		true
 	);
+});
+
+test("an unlinked needs-review dedupe claim is conditionally reclaimed and the delivery is reprocessed", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const originalReview = {
+		_id: INBOUND_ID,
+		processingStatus: "needs_review",
+		receivedAt: new Date("2026-08-13T20:00:00.000Z"),
+		dedupeKey: "mid:synthetic",
+		reservationMongoId: null,
+		hasReservationConnection: false,
+		reconciliation: { reservationId: null },
+		provider: "agoda",
+		providerLabel: "Agoda",
+		intent: "new_reservation",
+		eventType: "new",
+		confirmationNumber: "2039878308",
+	};
+	const state = makeState({
+		processedDuplicate: originalReview,
+		createDedupeCollisions: 1,
+		isReclaimableInboundClaim: actualIsReclaimableInboundClaim,
+		forwardMustFollowResponse: false,
+		inlineReconciliation: {
+			status: "created",
+			actionTaken: "created",
+			warnings: [],
+			errors: [],
+			reservationId: "64b000000000000000000206",
+			hotelId: HOTEL_ID,
+			pmsConfirmationNumber: "PMS-RECLAIMED-1",
+		},
+		hotelRunnerConfig: {
+			integrationEnabled: false,
+			configured: false,
+			callbackConfigured: false,
+			projectionEnabled: false,
+			pullEnabled: false,
+			roomListSyncEnabled: false,
+			confirmDeliveryEnabled: false,
+			hotelId: HOTEL_ID,
+		},
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(requestMock(), state.response);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.orchestratorCalls, 1);
+	assert.equal(state.inlineReconcileCalls, 1);
+	assert.equal(state.claimUpdates.length, 1);
+	assert.deepEqual(state.claimUpdates[0].update, { $unset: { dedupeKey: "" } });
+	const reviewCas = state.claimUpdates[0].query.$or.find(
+		(branch) => branch.processingStatus?.$in
+	);
+	assert.deepEqual(reviewCas.processingStatus.$in, [
+		"needs_review",
+		"needs_mapping",
+	]);
+	assert.equal(reviewCas.reservationMongoId, null);
+	assert.deepEqual(reviewCas.hasReservationConnection, { $ne: true });
+	assert.equal(reviewCas["reconciliation.reservationId"], null);
+	assert.equal(state.createdAudits.length, 1);
+	assert.equal(state.createdAudits[0].duplicateOf, null);
+	assert.equal(state.createdAudits[0].dedupeKey, "mid:synthetic");
+});
+
+test("reservation linkage markers prevent needs-review claim reclaim and preserve duplicate handling", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const markerCases = [
+		{ label: "reservation id", reservationMongoId: "64b000000000000000000206" },
+		{ label: "connection marker", hasReservationConnection: true },
+		{ label: "reconciliation link", reconciliation: { reservationId: "64b000000000000000000206" } },
+	];
+	try {
+		for (const marker of markerCases) {
+			const originalReview = {
+				_id: INBOUND_ID,
+				processingStatus: "needs_review",
+				receivedAt: new Date("2026-08-13T20:00:00.000Z"),
+				dedupeKey: "mid:synthetic",
+				reservationMongoId: null,
+				hasReservationConnection: false,
+				reconciliation: { reservationId: null },
+				provider: "agoda",
+				providerLabel: "Agoda",
+				intent: "new_reservation",
+				eventType: "new",
+				confirmationNumber: "2039878308",
+				...marker,
+			};
+			delete originalReview.label;
+			const state = makeState({
+				processedDuplicate: originalReview,
+				createDedupeCollisions: 1,
+				isReclaimableInboundClaim: actualIsReclaimableInboundClaim,
+				forwardMustFollowResponse: false,
+			});
+			const controller = loadControllerWithStubs(state);
+			await controller.handleSendGridInbound(requestMock(), state.response);
+
+			assert.equal(state.response.statusCode, 200, marker.label);
+			assert.equal(state.claimUpdates.length, 0, marker.label);
+			assert.equal(state.orchestratorCalls, 0, marker.label);
+			assert.equal(state.inlineReconcileCalls, 0, marker.label);
+			assert.equal(state.createdAudits.length, 1, marker.label);
+			assert.equal(state.createdAudits[0].duplicateOf, INBOUND_ID, marker.label);
+		}
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+});
+
+test("a lost needs-review reclaim CAS remains duplicate and never reprocesses concurrently linked work", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const originalReview = {
+		_id: INBOUND_ID,
+		processingStatus: "needs_review",
+		receivedAt: new Date("2026-08-13T20:00:00.000Z"),
+		dedupeKey: "mid:synthetic",
+		reservationMongoId: null,
+		hasReservationConnection: false,
+		reconciliation: { reservationId: null },
+		provider: "agoda",
+		intent: "new_reservation",
+		confirmationNumber: "2039878308",
+	};
+	const state = makeState({
+		processedDuplicate: originalReview,
+		createDedupeCollisions: 1,
+		claimUpdateMatched: 0,
+		isReclaimableInboundClaim: actualIsReclaimableInboundClaim,
+		forwardMustFollowResponse: false,
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(requestMock(), state.response);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.claimUpdates.length, 1);
+	assert.equal(state.orchestratorCalls, 0);
+	assert.equal(state.inlineReconcileCalls, 0);
+	assert.equal(state.createdAudits.length, 1);
+	assert.equal(state.createdAudits[0].duplicateOf, INBOUND_ID);
+	assert.equal(originalReview.dedupeKey, "mid:synthetic");
 });

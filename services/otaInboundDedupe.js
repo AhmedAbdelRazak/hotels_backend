@@ -136,6 +136,17 @@ const isReclaimableInboundClaim = (
 ) => {
 	const status = String(record.processingStatus || "").trim().toLowerCase();
 	if (status === "failed") return true;
+	if (["needs_review", "needs_mapping"].includes(status)) {
+		// Parser and mapping holds are deliberately retryable, but only while the
+		// archived delivery is still completely unlinked.  A review result that is
+		// already attached to a reservation may represent a staged lifecycle event
+		// and must retain its original at-most-once delivery claim.
+		return (
+			!record.reservationMongoId &&
+			record.hasReservationConnection !== true &&
+			!record.reconciliation?.reservationId
+		);
+	}
 	if (status !== "received") return false;
 	const receivedAt = new Date(record.receivedAt || 0).getTime();
 	return (

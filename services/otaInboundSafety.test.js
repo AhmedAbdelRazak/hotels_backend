@@ -16,6 +16,9 @@ const {
 	orchestrateInboundReservationEmail,
 } = require("./otaEmailOrchestrator");
 const {
+	MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES,
+	MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES,
+	MAX_HOTELRUNNER_ARABIC_ACTION_REPRESENTATION_BYTES,
 	MAX_OTA_INBOUND_ROOM_COUNT,
 	MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS,
 	buildExistingReservationUpdateSet,
@@ -83,6 +86,9 @@ const {
 } = require("./otaReservationMapper");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 const {
+	validateOtaReleaseHotelBasePrice,
+} = require("./otaReviewPricingInvariants");
+const {
 	buildAuthenticatedProviderCommercialEvidence,
 	buildHotelRunnerUnresolvedCommercialEvidence,
 	validateOtaCommercialEvidence,
@@ -95,6 +101,97 @@ const {
 const {
 	buildCreationAuthorization,
 } = require("./hotelrunnerFallbackIngressGate");
+
+async function assertTrustedOtaParserResourceGuard(emails = [], provider = "") {
+	const guarded = emails.map(extractNormalizedReservation);
+	for (const normalized of guarded) {
+		assert.equal(normalized.provider, provider);
+		assert.equal(normalized.otaInboundParserResourceLimitExceeded, true);
+		assert.equal(normalized.requiresManualReview, true);
+		assert.equal(normalized.blocksUnmappedReservationCreation, true);
+		assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+		assert.match(
+			normalized.manualReviewReasons.join(" "),
+			/bounded parser input budget/i
+		);
+		let rateLookupCalls = 0;
+		const conversion = await applyLiveSarConversion(normalized, {
+			rateLookup: async () => {
+				rateLookupCalls += 1;
+				throw new Error("resource guard must stop before live FX");
+			},
+		});
+		assert.equal(rateLookupCalls, 0);
+		assert.equal(conversion.otaInboundParserResourceLimitExceeded, true);
+	}
+	for (const email of emails) {
+		const orchestrated = await orchestrateInboundReservationEmail(email);
+		assert.equal(orchestrated.normalized.otaInboundParserResourceLimitExceeded, true);
+		assert.equal(orchestrated.decision.usedAI, false);
+		assert.equal(orchestrated.decision.skipped, true);
+		assert.equal(
+			orchestrated.decision.skipReason,
+			"ota_inbound_parser_resource_limit"
+		);
+		assert.ok(orchestrated.emailText.length < 1000);
+	}
+
+	const originals = {
+		reservationFind: Reservations.find,
+		reservationFindOne: Reservations.findOne,
+		reservationFindOneAndUpdate: Reservations.findOneAndUpdate,
+		reservationCreate: Reservations.create,
+		reservationUpdateOne: Reservations.updateOne,
+		hotelFind: HotelDetails.find,
+		hotelFindOne: HotelDetails.findOne,
+	};
+	let externalCalls = 0;
+	const fail = () => {
+		externalCalls += 1;
+		throw new Error("parser resource guard must stop before lookup or write");
+	};
+	Reservations.find = fail;
+	Reservations.findOne = fail;
+	Reservations.findOneAndUpdate = fail;
+	Reservations.create = fail;
+	Reservations.updateOne = fail;
+	HotelDetails.find = fail;
+	HotelDetails.findOne = fail;
+	try {
+		for (const normalized of guarded) {
+			for (const lifecycle of [
+				{ intent: "new_reservation", eventType: "new", statusToApply: "" },
+				{
+					intent: "reservation_update",
+					eventType: "modified",
+					statusToApply: "",
+				},
+				{
+					intent: "reservation_status",
+					eventType: "cancelled",
+					statusToApply: "cancelled",
+				},
+			]) {
+				const result = await reconcileOtaReservation({
+					...normalized,
+					...lifecycle,
+				});
+				assert.equal(result.status, "needs_review");
+				assert.equal(result.actionTaken, "skipped");
+				assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+			}
+		}
+	} finally {
+		Reservations.find = originals.reservationFind;
+		Reservations.findOne = originals.reservationFindOne;
+		Reservations.findOneAndUpdate = originals.reservationFindOneAndUpdate;
+		Reservations.create = originals.reservationCreate;
+		Reservations.updateOne = originals.reservationUpdateOne;
+		HotelDetails.find = originals.hotelFind;
+		HotelDetails.findOne = originals.hotelFindOne;
+	}
+	assert.equal(externalCalls, 0);
+}
 
 const immutableFixtureTextHash = (...parts) =>
 	createHash("sha256")
@@ -1691,6 +1788,269 @@ test("production-shaped wrapped Trip room labels remain one source-backed room",
 	assert.equal(normalized.sourceAmount, 16.83);
 	assert.equal(normalized.sourceCurrency, "USD");
 	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, 15.89);
+});
+
+const productionTripTwoRoomEmail = ({
+	htmlAug12Payout = "15.17",
+} = {}) => {
+	const lines = (aug12Payout) => [
+		"Booking no. # 1648123456789012 #",
+		"Zad Ajyad Hotel",
+		"Guest Name:",
+		"Synthetic Trip Multi Room Guest",
+		"Room Type:Comfort Triple Bed Room - Zad Ajyad - Bus to Haram Non-Refundable-Room",
+		"Only-Prepay | 2 room(s)AllotmentBed type:3 Single bedStaying period:Aug 12, 2026 - Aug 15, 2026 | 3 nights",
+		"Room Type: Comfort Triple Bed Room - Zad Ajyad - Bus to Haram Non-Refundable-Room Only-Prepay | 2 room(s) Allotment",
+		"Staying period: Aug 12, 2026 - Aug 15, 2026 | 3 nights",
+		"Guests (estimated): 6 adults, 0 children",
+		"Payment information",
+		"Net rate | Prepaid | monthly settlement",
+		"Room rate 2 room(s) × 3 night(s)This rate is for 6 adults",
+		"Final room rate (incl. taxes and fees) USD 99.42",
+		"Your payout USD 93.90",
+		"This is a prepaid reservation. The guest has already paid for the room.",
+		"Room ratePrice details",
+		"Aug 12 (2 room(s))",
+		"Final room rate (incl. taxes and fees)16.06*2",
+		`Your payout${aug12Payout}*2`,
+		"Aug 13 (2 room(s))",
+		"Final room rate (incl. taxes and fees)16.06*2",
+		"Your payout15.17*2",
+		"Aug 14 (2 room(s))",
+		"Final room rate (incl. taxes and fees)17.59*2",
+		"Your payout16.61*2",
+		"Additional InformationTypeDetailsRewards",
+	];
+	const textLines = lines("15.17");
+	const htmlLines = lines(htmlAug12Payout);
+	return {
+		from: "Trip.com <ebooking@trip.com>",
+		to: "ota@example.com",
+		subject: "New Booking no. # 1648123456789012 #",
+		messageId: "trip-1648123456789012@mail.trip.com",
+		sourceReceivedAt: "2026-08-13T19:00:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "trip",
+			method: "dkim",
+		},
+		text: textLines.join("\n"),
+		html: htmlLines.map((line) => `<div>${line}</div>`).join(""),
+	};
+};
+
+test("production Trip mirrored two-room rows retain source nightly weights and materialize count-one rooms", async () => {
+	const parsed = extractNormalizedReservation(productionTripTwoRoomEmail());
+	assert.equal(parsed.directTripTemplateMatched, true);
+	assert.equal(parsed.directTripNightlyPricingConflict, false);
+	assert.deepEqual(parsed.genericRepeatedFactConflictFields, []);
+	assert.equal(parsed.requiresManualReview, false);
+	assert.equal(parsed.blocksUnmappedReservationCreation, false);
+	assert.equal(parsed.roomCount, 2);
+	assert.equal(parsed.totalGuests, 6);
+	assert.equal(parsed.sourceAmount, 99.42);
+	assert.equal(parsed.paymentSummary.sourceTotalPayoutAmount, 93.9);
+	assert.deepEqual(
+		parsed.nightlyPricingSource.map((row) => row.clientAmount),
+		[32.12, 32.12, 35.18]
+	);
+	assert.deepEqual(
+		parsed.nightlyPricingSource.map((row) => row.payoutAmount),
+		[30.34, 30.34, 33.22]
+	);
+
+	const converted = await applyLiveSarConversion(parsed, {
+		apiKey: "trip-two-room-test-credential",
+		cache: new Map(),
+		now: () => Date.parse("2026-08-13T20:00:00.000Z"),
+		fetchImpl: async () => ({
+			ok: true,
+			async json() {
+				return {
+					result: "success",
+					base_code: "USD",
+					target_code: "SAR",
+					conversion_rate: 3.75,
+					time_last_update_unix:
+						Date.parse("2026-08-13T18:00:00.000Z") / 1000,
+				};
+			},
+		}),
+	});
+	assert.equal(converted.totalAmountSar, 372.83);
+	assert.equal(converted.totalPayoutSar, 352.13);
+	assert.equal(
+		Number((converted.totalAmountSar - converted.totalPayoutSar).toFixed(2)),
+		20.7
+	);
+	assert.equal(converted.exchangeRateToSar, 3.75);
+	assert.deepEqual(
+		converted.nightlyPricingSar.map((row) => row.clientAmountSar),
+		[120.45, 120.45, 131.93]
+	);
+	assert.deepEqual(
+		converted.nightlyPricingSar.map((row) => row.payoutAmountSar),
+		[113.78, 113.78, 124.57]
+	);
+
+	const room = {
+		_id: "synthetic-trip-triple-room",
+		roomType: "tripleRooms",
+		displayName:
+			"Comfort Triple Bed Room - Zad Ajyad - Bus to Haram Non-Refundable-Room Only-Prepay",
+		activeRoom: true,
+		pricingRate: generateDateRange(
+			converted.checkinDate,
+			converted.checkoutDate
+		).map((calendarDate) => ({ calendarDate, rootPrice: 50 })),
+	};
+	const built = buildReservationDocument(
+		converted,
+		{
+			_id: "synthetic-zad-hotel",
+			belongsTo: "synthetic-owner",
+			currency: "SAR",
+			roomCountDetails: [room],
+		},
+		{
+			roomMatch: {
+				roomDetails: room,
+				score: 1,
+				matchType: "exact_display",
+			},
+		}
+	);
+	assert.equal(built.ok, true, JSON.stringify(built));
+	assert.equal(built.document.total_rooms, 2);
+	assert.equal(built.document.pickedRoomsPricing.length, 2);
+	assert.deepEqual(
+		built.document.pickedRoomsPricing.map((entry) => entry.count),
+		[1, 1]
+	);
+	assert.deepEqual(
+		built.document.pickedRoomsPricing.map((entry) =>
+			entry.pricingByDay.map((day) => day.clientPrice)
+		),
+		[
+			[60.23, 60.23, 65.97],
+			[60.22, 60.22, 65.96],
+		]
+	);
+	assert.deepEqual(
+		built.document.pickedRoomsPricing.map((entry) =>
+			entry.pricingByDay.map((day) => day.netAfterExpenses)
+		),
+		[
+			[56.89, 56.89, 62.29],
+			[56.89, 56.89, 62.28],
+		]
+	);
+	const mappedDays = built.document.pickedRoomsPricing.flatMap(
+		(entry) => entry.pricingByDay
+	);
+	assert.equal(
+		Number(mappedDays.reduce((sum, day) => sum + day.clientPrice, 0).toFixed(2)),
+		372.83
+	);
+	assert.equal(
+		Number(
+			mappedDays.reduce((sum, day) => sum + day.netAfterExpenses, 0).toFixed(2)
+		),
+		352.13
+	);
+
+	const review = buildUnmappedOtaReviewReservationDocument(converted);
+	assert.equal(review.total_rooms, 2);
+	assert.deepEqual(review.pickedRoomsPricing.map((entry) => entry.count), [1, 1]);
+	assert.deepEqual(
+		review.pickedRoomsPricing.map((entry) =>
+			entry.pricingByDay.map((day) => day.clientPrice)
+		),
+		[
+			[60.23, 60.23, 65.97],
+			[60.22, 60.22, 65.96],
+		]
+	);
+	assert.ok(
+		review.pickedRoomsPricing
+			.flatMap((entry) => entry.pricingByDay)
+			.every(
+				(day) =>
+					day.rootPrice === 0 &&
+					day.totalPriceWithoutCommission === 0 &&
+					day.platformMargin === null
+			)
+	);
+});
+
+test("trusted direct Trip parser input budgets stop text and HTML before FX, AI, lookup, or writes", async () => {
+	const normal = wrappedDirectTripRoomEmail();
+	assert.equal(
+		extractNormalizedReservation(normal).otaInboundParserResourceLimitExceeded,
+		false
+	);
+	const oversized = [
+		{
+			...normal,
+			text: `${normal.text}\n${"x".repeat(
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+			)}`,
+		},
+		{
+			...normal,
+			html: `<div>${normal.text}</div>${"x".repeat(
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+			)}`,
+		},
+	];
+	await assertTrustedOtaParserResourceGuard(oversized, "trip");
+});
+
+test("conflicting Trip nightly rows across MIME mirrors fail closed", () => {
+	const normalized = extractNormalizedReservation(
+		productionTripTwoRoomEmail({ htmlAug12Payout: "15.18" })
+	);
+	assert.equal(normalized.directTripTemplateMatched, true);
+	assert.equal(normalized.directTripNightlyPricingConflict, true);
+	assert.deepEqual(normalized.nightlyPricingSource, []);
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(normalized.blocksUnmappedReservationCreation, true);
+	assert.match(normalized.manualReviewReasons.join(" "), /nightly room-rate rows conflict/i);
+	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+});
+
+test("conflicting Trip aggregate, stay, and occupancy facts across MIME mirrors fail closed", () => {
+	for (const [field, mutateHtml] of [
+		[
+			"guestGross",
+			(html) => html.replace("USD 99.42", "USD 100.42"),
+		],
+		[
+			"checkinDate",
+			(html) =>
+				html
+					.replaceAll("Aug 12, 2026 - Aug 15, 2026", "Aug 13, 2026 - Aug 16, 2026"),
+		],
+		[
+			"occupancy",
+			(html) => html.replace("6 adults, 0 children", "5 adults, 0 children"),
+		],
+	]) {
+		const email = productionTripTwoRoomEmail();
+		const normalized = extractNormalizedReservation({
+			...email,
+			html: mutateHtml(email.html),
+		});
+		assert.equal(normalized.requiresManualReview, true, field);
+		assert.equal(normalized.blocksUnmappedReservationCreation, true, field);
+		assert.ok(normalized.directTripMimeConflictFields.includes(field), field);
+		assert.match(
+			normalized.manualReviewReasons.join(" "),
+			/text and HTML representations/i,
+			field
+		);
+		assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+	}
 });
 
 test("direct Trip.com templates retain authenticated source pricing without materializing untrusted FX", () => {
@@ -5874,7 +6234,455 @@ test("the production Agoda six-person template keeps exact identity, room, and p
 	assert.equal(built.document.commission, 0);
 });
 
-test("multi-room or multi-rate Agoda payloads require manual review", () => {
+const productionAgodaQuantityEmail = ({
+	bookingId,
+	guestFirstName,
+	guestLastName,
+	checkin,
+	checkout,
+	roomName,
+	roomCount,
+	adults,
+	nightlyRows,
+	gross,
+	payout,
+	specialRequests,
+	phone = "",
+}) => {
+	const text = [
+		`Booking ID ${bookingId}`,
+		"Reservation Information",
+		"PREPAID",
+		"Booking confirmation",
+		"Zyd Agyad",
+		"(Property ID 90720772)",
+		"City : Mecca",
+		`Customer First Name ${guestFirstName}`,
+		`Customer Last Name ${guestLastName}`,
+		"Country of Residence Saudi Arabia",
+		`Check-in ${checkin}`,
+		`Check-out ${checkout}`,
+		"Other Guests [RmNo.1] Guest A [RmNo.1] Guest B",
+		`Room Type No. of Rooms Occupancy No. of Extra Bed ${roomName} ${roomCount} ${adults} Adults 0`,
+		"Rate Plan name: Non-Refundable ()",
+		"Special Requests ( All special requests are subject to availability upon arrival. )",
+		specialRequests,
+		"Cancellation Policy",
+		"Room Extra Bed Other From - To Rates",
+		...nightlyRows,
+		`Reference sell rate (incl. taxes & fees) SAR ${gross}`,
+		"Commission SAR -26.46",
+		"Agoda Growth Program SAR -17.64",
+		"Tax on Commission SAR -6.62",
+		`Net rate (incl. taxes & fees) SAR ${payout}`,
+		`Customer Info - Name: ${guestFirstName} ${guestLastName}, Phone:${phone ? ` ${phone}` : ""}`,
+		"Attention Hotel Staff",
+		"Agoda Hotline (Saudi Arabia) : (966) 11 510 8739",
+	].join("\n");
+	return {
+		from: 'agoda.com <no-reply@agoda.com>',
+		subject: `Agoda Booking ID ${bookingId} - CONFIRMED Hotel Country: Saudi Arabia Check-in ${checkin} / Language_English`,
+		messageId: `agoda-${bookingId}@mail.agoda.com`,
+		sourceReceivedAt: "2026-08-13T20:00:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "agoda",
+			method: "dkim",
+		},
+		text,
+		html: text
+			.split("\n")
+			.map((line) => `<div>${line}</div>`)
+			.join(""),
+	};
+};
+
+const productionAgodaQuantityFixtures = [
+	{
+		bookingId: "689554695",
+		guestFirstName: "SYNTHETIC FIVE BED GUEST",
+		guestLastName: "TEST ONLY",
+		checkin: "August 14, 2026",
+		checkout: "August 15, 2026",
+		roomName: "5 Beds Room (Comfort 5 Beds Room )",
+		roomCount: 2,
+		adults: 7,
+		nightlyRows: ["August 14, 2026 SAR 109.16"],
+		gross: "176.40",
+		payout: "109.16",
+		specialRequests: "LargeBed, AdjoiningRoom, ArrivalTime:22 00",
+		phone: "",
+		expectedCheckin: "2026-08-14",
+		expectedCheckout: "2026-08-15",
+		expectedNightGross: [88.2],
+		expectedNightPayout: [54.58],
+	},
+	{
+		bookingId: "689553735",
+		guestFirstName: "SYNTHETIC DOUBLE ROOM GUEST",
+		guestLastName: "TEST ONLY",
+		checkin: "August 20, 2026",
+		checkout: "August 22, 2026",
+		roomName: "Comfort Double - Non-Smoking (Comfort Double Room-)",
+		roomCount: 2,
+		adults: 4,
+		nightlyRows: [
+			"August 20, 2026 SAR 89.10",
+			"August 21, 2026 SAR 89.10",
+		],
+		gross: "288.00",
+		payout: "178.20",
+		specialRequests:
+			"NonSmoke, TwinBeds, AdjoiningRoom, ArrivalTime:21 00 - 22 00, AdditionalNotes:Car parking.",
+		phone: "966 500000123",
+		expectedCheckin: "2026-08-20",
+		expectedCheckout: "2026-08-22",
+		expectedNightGross: [72, 72],
+		expectedNightPayout: [44.55, 44.55],
+	},
+];
+
+test("trusted direct Agoda parser input budgets stop text and HTML before FX, AI, lookup, or writes", async () => {
+	const normal = productionAgodaQuantityEmail(productionAgodaQuantityFixtures[0]);
+	assert.equal(
+		extractNormalizedReservation(normal).otaInboundParserResourceLimitExceeded,
+		false
+	);
+	const oversized = [
+		{
+			...normal,
+			text: `${normal.text}\n${"x".repeat(
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+			)}`,
+		},
+		{
+			...normal,
+			html: `<div>${normal.text}</div>${"x".repeat(
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+			)}`,
+		},
+	];
+	await assertTrustedOtaParserResourceGuard(oversized, "agoda");
+});
+
+test("production Agoda homogeneous room quantities materialize as separate count-one rows without doubled totals", () => {
+	for (const fixture of productionAgodaQuantityFixtures) {
+		const normalized = extractNormalizedReservation(
+			productionAgodaQuantityEmail(fixture)
+		);
+		assert.equal(normalized.confirmationNumber, fixture.bookingId);
+		assert.equal(normalized.agodaPropertyId, "90720772");
+		assert.equal(normalized.sourcePresence.agodaPropertyId, true);
+		assert.equal(normalized.agodaHomogeneousRoomQuantity, true);
+		assert.equal(normalized.ambiguousMultiRoomEvidence, false);
+		assert.equal(normalized.requiresManualReview, false);
+		assert.equal(normalized.blocksUnmappedReservationCreation, false);
+		assert.equal(normalized.roomCount, 2);
+		assert.equal(normalized.adults, fixture.adults);
+		assert.equal(normalized.totalGuests, fixture.adults);
+		assert.equal(normalized.checkinDate, fixture.expectedCheckin);
+		assert.equal(normalized.checkoutDate, fixture.expectedCheckout);
+		assert.equal(normalized.guestNotes, fixture.specialRequests);
+		assert.equal(normalized.guestPhone, fixture.phone);
+		assert.equal(normalized.sourcePresence.guestPhone, !!fixture.phone);
+		assert.equal(normalized.totalAmountSar, Number(fixture.gross));
+		assert.equal(normalized.totalPayoutSar, Number(fixture.payout));
+
+		const room = {
+			_id: `room-${fixture.bookingId}`,
+			roomType: "familyRooms",
+			displayName: fixture.roomName,
+			activeRoom: true,
+			pricingRate: generateDateRange(
+				fixture.expectedCheckin,
+				fixture.expectedCheckout
+			).map((calendarDate) => ({ calendarDate, rootPrice: 75 })),
+		};
+		const built = buildReservationDocument(
+			normalized,
+			{
+				_id: "6a40b6a1a6efe70450536038",
+				belongsTo: "68b74714fb50e159d48c714d",
+				currency: "SAR",
+				roomCountDetails: [room],
+			},
+			{
+				roomMatch: {
+					roomDetails: room,
+					score: 1,
+					matchType: "exact_display",
+				},
+			}
+		);
+		assert.equal(built.ok, true, JSON.stringify(built));
+		const document = built.document;
+		assert.equal(document.total_rooms, 2);
+		assert.equal(document.pickedRoomsType.length, 2);
+		assert.equal(document.pickedRoomsPricing.length, 2);
+		assert.deepEqual(document.pickedRoomsPricing.map((entry) => entry.count), [1, 1]);
+		for (const entry of document.pickedRoomsPricing) {
+			assert.deepEqual(
+				entry.pricingByDay.map((day) => day.date),
+				generateDateRange(fixture.expectedCheckin, fixture.expectedCheckout)
+			);
+			assert.deepEqual(
+				entry.pricingByDay.map((day) => day.clientPrice),
+				fixture.expectedNightGross
+			);
+			assert.deepEqual(
+				entry.pricingByDay.map((day) => day.netAfterExpenses),
+				fixture.expectedNightPayout
+			);
+		}
+		const allDays = document.pickedRoomsPricing.flatMap(
+			(entry) => entry.pricingByDay
+		);
+		assert.equal(
+			Number(allDays.reduce((sum, day) => sum + day.clientPrice, 0).toFixed(2)),
+			Number(fixture.gross)
+		);
+		assert.equal(
+			Number(
+				allDays.reduce((sum, day) => sum + day.netAfterExpenses, 0).toFixed(2)
+			),
+			Number(fixture.payout)
+		);
+		assert.equal(document.total_amount, Number(fixture.gross));
+		assert.equal(document.supplierData.otaPropertyId, "90720772");
+		assert.equal(document.supplierData.agodaPropertyId, "90720772");
+
+		const review = buildUnmappedOtaReviewReservationDocument(normalized);
+		assert.equal(review.total_rooms, 2);
+		assert.deepEqual(review.pickedRoomsPricing.map((entry) => entry.count), [1, 1]);
+		assert.ok(
+			review.pickedRoomsPricing
+				.flatMap((entry) => entry.pricingByDay)
+				.every(
+					(day) =>
+						day.rootPrice === 0 &&
+						day.totalPriceWithoutCommission === 0 &&
+						day.platformMargin === null
+				)
+		);
+		assert.equal(review.supplierData.otaPropertyId, "90720772");
+		const release = validateOtaReleaseHotelBasePrice({
+			...review,
+			hotelId: "6a40b6a1a6efe70450536038",
+		});
+		assert.equal(release.ready, false);
+		assert.equal(release.code, "ota_pricing_review_required");
+	}
+});
+
+test("Agoda quantity safety stays authenticated and fails closed for distinct rows, property conflicts, and metadata phones", async () => {
+	const fixture = productionAgodaQuantityFixtures[0];
+	const unauthenticated = extractNormalizedReservation({
+		...productionAgodaQuantityEmail(fixture),
+		senderAuthentication: {},
+	});
+	assert.equal(unauthenticated.agodaHomogeneousRoomQuantity, true);
+	assert.equal(unauthenticated.sourceSenderAuthenticated, false);
+	const unauthenticatedResult = await reconcileOtaReservation(unauthenticated);
+	assert.equal(unauthenticatedResult.status, "needs_review");
+	assert.equal(
+		unauthenticatedResult.skipReason,
+		"unauthenticated_ota_sender_no_mutation"
+	);
+
+	const distinctRows = extractNormalizedReservation({
+		...productionAgodaQuantityEmail(fixture),
+		text: productionAgodaQuantityEmail(fixture).text.replace(
+			`${fixture.roomName} 2 7 Adults 0`,
+			"Double Room 1 2 Adults 0 Triple Room 1 3 Adults 0"
+		),
+		html: "",
+	});
+	assert.equal(distinctRows.ambiguousMultiRoomEvidence, true);
+	assert.equal(distinctRows.blocksUnmappedReservationCreation, true);
+	assert.equal(canCreateUnmappedOtaReviewReservation(distinctRows, true), false);
+
+	const conflictingProperty = extractNormalizedReservation({
+		...productionAgodaQuantityEmail(fixture),
+		text: `${productionAgodaQuantityEmail(fixture).text}\n(Property ID 99999999)`,
+		html: "",
+	});
+	assert.equal(conflictingProperty.requiresManualReview, true);
+	assert.equal(conflictingProperty.blocksUnmappedReservationCreation, true);
+	assert.equal(conflictingProperty.agodaPropertyId, "");
+
+	assert.equal(
+		extractNormalizedReservation(productionAgodaQuantityEmail(fixture)).guestPhone,
+		""
+	);
+	assert.equal(
+		extractNormalizedReservation(productionAgodaQuantityEmail(fixture)).guestNotes,
+		"LargeBed, AdjoiningRoom, ArrivalTime:22 00"
+	);
+	const boilerplateOnly = extractNormalizedReservation({
+		...productionAgodaQuantityEmail(fixture),
+		text: productionAgodaQuantityEmail(fixture).text.replace(
+			fixture.specialRequests,
+			""
+		),
+		html: "",
+	});
+	assert.equal(boilerplateOnly.guestNotes, "");
+	assert.equal(boilerplateOnly.guestPhone, "");
+});
+
+test("Agoda critical commercial, guest, stay, and nightly facts require MIME consensus", () => {
+	const fixture = productionAgodaQuantityFixtures[1];
+	for (const [field, mutateHtml] of [
+		[
+			"referenceSellRate",
+			(html) => html.replace("SAR 288.00", "SAR 288.01"),
+		],
+		[
+			"netRate",
+			(html) => html.replace("SAR 178.20", "SAR 178.21"),
+		],
+		[
+			"guestName",
+			(html) =>
+				html.replaceAll(
+					"SYNTHETIC DOUBLE ROOM GUEST",
+					"SYNTHETIC CONFLICTING GUEST"
+				),
+		],
+		[
+			"checkinDate",
+			(html) => html.replaceAll("August 20, 2026", "August 19, 2026"),
+		],
+		[
+			"nightlyPricing",
+			(html) =>
+				html
+					.replace("August 20, 2026 SAR 89.10", "August 20, 2026 SAR 89.11")
+					.replace("August 21, 2026 SAR 89.10", "August 21, 2026 SAR 89.09"),
+		],
+	]) {
+		const email = productionAgodaQuantityEmail(fixture);
+		const normalized = extractNormalizedReservation({
+			...email,
+			html: mutateHtml(email.html),
+		});
+		assert.equal(normalized.requiresManualReview, true, field);
+		assert.equal(normalized.blocksUnmappedReservationCreation, true, field);
+		assert.ok(normalized.agodaMimeConflictFields.includes(field), field);
+		assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+	}
+	const deductionEmail = productionAgodaQuantityEmail(fixture);
+	const deductionConflict = extractNormalizedReservation({
+		...deductionEmail,
+		html: deductionEmail.html.replace("SAR -26.46", "SAR -26.47"),
+	});
+	assert.equal(deductionConflict.otaDeductionConflict, true);
+	assert.equal(deductionConflict.requiresManualReview, true);
+	assert.equal(deductionConflict.blocksUnmappedReservationCreation, true);
+	assert.match(
+		deductionConflict.manualReviewReasons.join(" "),
+		/conflicting deduction amounts/i
+	);
+	const malformedGrossEmail = productionAgodaQuantityEmail(fixture);
+	const malformedGross = extractNormalizedReservation({
+		...malformedGrossEmail,
+		html: malformedGrossEmail.html.replace("SAR 288.00", "amount unavailable"),
+	});
+	assert.equal(malformedGross.requiresManualReview, true);
+	assert.equal(malformedGross.blocksUnmappedReservationCreation, true);
+	assert.ok(
+		malformedGross.agodaMimeConflictFields.includes("referenceSellRate")
+	);
+});
+
+test("Agoda bounded room-table parsing fails closed instead of accepting a truncated first row", () => {
+	const fixture = productionAgodaQuantityFixtures[0];
+	const email = productionAgodaQuantityEmail(fixture);
+	const oversizedGap = ` ${"bounded-filler ".repeat(150)} `;
+	const text = email.text.replace("Rate Plan name", `${oversizedGap}Rate Plan name`);
+	const normalized = extractNormalizedReservation({
+		...email,
+		text,
+		html: "",
+	});
+	assert.equal(normalized.ambiguousMultiRoomEvidence, true);
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(normalized.blocksUnmappedReservationCreation, true);
+	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+});
+
+test("nightly gross and payout distributions are applied only as one coherent pair", () => {
+	const fixture = productionAgodaQuantityFixtures[1];
+	const normalized = extractNormalizedReservation(
+		productionAgodaQuantityEmail(fixture)
+	);
+	const incoherentNightly = {
+		...normalized,
+		nightlyPricingSar: [
+			{
+				date: "2026-08-20",
+				clientAmountSar: 100,
+				payoutAmountSar: 100.02,
+			},
+			{
+				date: "2026-08-21",
+				clientAmountSar: 188,
+				payoutAmountSar: 78.18,
+			},
+		],
+	};
+	const room = {
+		_id: "synthetic-coherent-pair-room",
+		roomType: "doubleRooms",
+		displayName: fixture.roomName,
+		activeRoom: true,
+		pricingRate: generateDateRange(
+			fixture.expectedCheckin,
+			fixture.expectedCheckout
+		).map((calendarDate) => ({ calendarDate, rootPrice: 50 })),
+	};
+	const built = buildReservationDocument(
+		incoherentNightly,
+		{
+			_id: "synthetic-coherent-pair-hotel",
+			belongsTo: "synthetic-owner",
+			currency: "SAR",
+			roomCountDetails: [room],
+		},
+		{
+			roomMatch: { roomDetails: room, score: 1, matchType: "exact_display" },
+		}
+	);
+	assert.equal(built.ok, true, JSON.stringify(built));
+	for (const day of built.document.pickedRoomsPricing.flatMap(
+		(roomEntry) => roomEntry.pricingByDay
+	)) {
+		assert.equal(day.clientPrice, 72);
+		assert.equal(day.netAfterExpenses, 44.55);
+		assert.equal(day.otaExpenseAmount, 27.45);
+	}
+	assert.equal(built.document.adminPricing.otaExpenseTotal, 109.8);
+	assert.equal(
+		Number(
+			built.document.pickedRoomsPricing
+				.flatMap((roomEntry) => roomEntry.pricingByDay)
+				.reduce((sum, day) => sum + day.otaExpenseAmount, 0)
+				.toFixed(2)
+		),
+		109.8
+	);
+
+	const review = buildUnmappedOtaReviewReservationDocument(incoherentNightly);
+	for (const day of review.pickedRoomsPricing.flatMap(
+		(roomEntry) => roomEntry.pricingByDay
+	)) {
+		assert.equal(day.clientPrice, 72);
+		assert.equal(day.netAfterExpenses, 44.55);
+		assert.equal(day.otaExpenseAmount, 27.45);
+	}
+});
+
+test("distinct-room or multi-rate Agoda payloads require manual review", () => {
 	const multiRoom = extractNormalizedReservation({
 		from: "no-reply@agoda.com",
 		subject: "Agoda Booking ID 682028096 - CONFIRMED",
@@ -5882,7 +6690,7 @@ test("multi-room or multi-rate Agoda payloads require manual review", () => {
 			"Booking ID 682028096 Reservation Information",
 			"Customer First Name Safe Customer Last Name Guest Country of Residence Saudi Arabia Check-in July 23, 2026 Check-out July 24, 2026",
 			"Other Guests [RmNo.1] Safe Guest [RmNo.2] Other Guest",
-			"Room Type No. of Rooms Occupancy No. of Extra Bed Family - 6 Persons 2 6 Adults 0",
+			"Room Type No. of Rooms Occupancy No. of Extra Bed Double Room 1 2 Adults 0 Triple Room 1 3 Adults 0",
 			"Reference sell rate (incl. taxes & fees) SAR 210.00",
 		].join("\n"),
 	});
@@ -6685,6 +7493,277 @@ test("Airbnb genuinely conflicting repeated check-in dates still require review"
 		),
 		true
 	);
+});
+
+const compactHotelRunnerArabicActionEmail = ({
+	htmlGross = "552",
+	htmlIncompleteWithMarker = false,
+	omitHtml = false,
+} = {}) => {
+	const compact = [
+		"يتطلب إجراء",
+		"اسم الفندق Zad AJYAD Hotel رقم التأكيد R411331378 القناة Direct Plus - Google",
+		"اسم النزيل Synthetic Relay Guest الدولة مصر تاريخ تسجيل الوصول نوفمبر 06، 2026",
+		"تاريخ تسجيل المغادرة نوفمبر 12، 2026 متوسط السعر اليومي ﷼ 92 الإجمالي الكلي ﷼ 552 المبلغ المستحق ﷼ 552",
+		"نوع الغرفة غرفة عائلية -6 أفراد- أجياد- أتوبيس مجانى خطة الوجبة غرفة فقط عدد النزلاء 5 إجمالي الغرفة ﷼ 552 سياسة الإلغاء If cancelled before 48 hours no-payment.",
+	].join("\n");
+	const expanded = htmlIncompleteWithMarker
+		? ["يتطلب إجراء", "اسم الفندق", "Zad AJYAD Hotel", "رقم التأكيد"]
+		: [
+		"اسم الفندق",
+		"Zad AJYAD Hotel",
+		"رقم التأكيد",
+		"R411331378",
+		"القناة",
+		"Direct Plus - Google",
+		"اسم النزيل",
+		"Synthetic Relay Guest",
+		"الدولة",
+		"مصر",
+		"تاريخ تسجيل الوصول",
+		"نوفمبر 06، 2026",
+		"تاريخ تسجيل المغادرة",
+		"نوفمبر 12، 2026",
+		"متوسط السعر اليومي",
+		"﷼ 92",
+		"الإجمالي الكلي",
+		`﷼ ${htmlGross}`,
+		"المبلغ المستحق",
+		"﷼ 552",
+		"نوع الغرفة",
+		"غرفة عائلية -6 أفراد- أجياد- أتوبيس مجانى",
+		"خطة الوجبة",
+		"غرفة فقط",
+		"عدد النزلاء",
+		"5",
+		"إجمالي الغرفة",
+		"﷼ 552",
+		"سياسة الإلغاء",
+			"If cancelled before 48 hours no-payment.",
+		  ];
+	return {
+		from: '"HotelRunner" <noreply@hotelrunner.com>',
+		to: "ota@example.com",
+		subject: "Zad AJYAD Hotel - حجز جديد #R411331378",
+		messageId: "hotelrunner-r411331378@mail.hotelrunner.com",
+		sourceReceivedAt: "2026-08-13T20:00:00.000Z",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "hotelrunner",
+			method: "dkim",
+		},
+		text: compact,
+		html: omitHtml
+			? ""
+			: expanded.map((line) => `<div>${line}</div>`).join(""),
+	};
+};
+
+test("compact Arabic HotelRunner action-required facts are deterministic across compact and expanded mirrors", () => {
+	const normalized = extractNormalizedReservation(
+		compactHotelRunnerArabicActionEmail()
+	);
+	assert.equal(normalized.provider, "hotelrunner");
+	assert.equal(normalized.hotelRunnerArabicActionRequiredTemplateMatched, true);
+	assert.equal(normalized.hotelRunnerArabicActionRequiredConflict, false);
+	assert.equal(normalized.hotelRunnerArabicActionResourceLimitExceeded, false);
+	assert.equal(normalized.confirmationNumber, "r411331378");
+	assert.equal(normalized.bookingSource, "Direct Plus - Google");
+	assert.equal(normalized.sourcePresence.bookingSource, true);
+	assert.equal(normalized.hotelName, "Zad AJYAD Hotel");
+	assert.equal(normalized.guestName, "Synthetic Relay Guest");
+	assert.equal(normalized.nationality, "مصر");
+	assert.equal(normalized.checkinDate, "2026-11-06");
+	assert.equal(normalized.checkoutDate, "2026-11-12");
+	assert.equal(
+		normalized.roomName,
+		"غرفة عائلية -6 أفراد- أجياد- أتوبيس مجانى"
+	);
+	assert.equal(normalized.roomCount, 1);
+	assert.equal(normalized.totalGuests, 5);
+	assert.equal(normalized.totalAmountSar, 552);
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(normalized.blocksUnmappedReservationCreation, false);
+	for (const field of [
+		"confirmationNumber",
+		"hotelName",
+		"guestName",
+		"roomName",
+		"checkinDate",
+		"checkoutDate",
+		"amount",
+		"totalGuests",
+		"roomCount",
+	]) {
+		assert.equal(normalized.sourcePresence[field], true, field);
+	}
+	assert.deepEqual(requiredNewReservationMissing(normalized), []);
+
+	const absentMirror = extractNormalizedReservation(
+		compactHotelRunnerArabicActionEmail({ omitHtml: true })
+	);
+	assert.equal(absentMirror.hotelRunnerArabicActionRequiredConflict, false);
+	assert.equal(absentMirror.hotelRunnerArabicActionResourceLimitExceeded, false);
+	assert.equal(absentMirror.bookingSource, "Direct Plus - Google");
+});
+
+test("Arabic HotelRunner action parser budgets fail closed before lookup, creation, or mutation", async () => {
+	const normal = compactHotelRunnerArabicActionEmail({ omitHtml: true });
+	const oversized = {
+		...normal,
+		text: `${normal.text}\n${"x".repeat(
+			MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+		)}`,
+	};
+	const labelFlood = {
+		...normal,
+		text: `${normal.text}\n${Array.from(
+			{ length: MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES + 1 },
+			() => "اسم الفندق"
+		).join(" ")}`,
+	};
+	const oversizedHtml = {
+		...normal,
+		html: `<div>${normal.text}</div>${"x".repeat(
+			MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+		)}`,
+	};
+	const guarded = [oversized, labelFlood, oversizedHtml].map(
+		extractNormalizedReservation
+	);
+	for (const normalized of guarded) {
+		assert.equal(normalized.hotelRunnerArabicActionResourceLimitExceeded, true);
+		assert.equal(normalized.requiresManualReview, true);
+		assert.equal(normalized.blocksUnmappedReservationCreation, true);
+		assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+		assert.match(
+			normalized.manualReviewReasons.join(" "),
+			/bounded parser(?: input| analysis)? budget/i
+		);
+	}
+
+	const orchestrated = await orchestrateInboundReservationEmail(oversized);
+	assert.equal(
+		orchestrated.normalized.hotelRunnerArabicActionResourceLimitExceeded,
+		true
+	);
+	assert.equal(orchestrated.decision.usedAI, false);
+	assert.equal(orchestrated.decision.skipped, true);
+	assert.equal(
+		orchestrated.decision.skipReason,
+		"ota_inbound_parser_resource_limit"
+	);
+	assert.ok(orchestrated.emailText.length < 1000);
+	const orchestratedHtml = await orchestrateInboundReservationEmail(oversizedHtml);
+	assert.equal(
+		orchestratedHtml.normalized.hotelRunnerArabicActionResourceLimitExceeded,
+		true
+	);
+	assert.equal(
+		orchestratedHtml.decision.skipReason,
+		"ota_inbound_parser_resource_limit"
+	);
+	assert.ok(orchestratedHtml.emailText.length < 1000);
+
+	const originals = {
+		reservationFind: Reservations.find,
+		reservationFindOne: Reservations.findOne,
+		reservationCreate: Reservations.create,
+		reservationUpdateOne: Reservations.updateOne,
+		hotelFind: HotelDetails.find,
+		hotelFindOne: HotelDetails.findOne,
+	};
+	let externalCalls = 0;
+	const fail = () => {
+		externalCalls += 1;
+		throw new Error("Arabic parser resource guard must stop before lookup or write");
+	};
+	Reservations.find = fail;
+	Reservations.findOne = fail;
+	Reservations.create = fail;
+	Reservations.updateOne = fail;
+	HotelDetails.find = fail;
+	HotelDetails.findOne = fail;
+	try {
+		for (const normalized of guarded) {
+			for (const lifecycle of [
+				{ intent: "new_reservation", eventType: "new", statusToApply: "" },
+				{
+					intent: "reservation_status",
+					eventType: "cancelled",
+					statusToApply: "cancelled",
+				},
+			]) {
+				const result = await reconcileOtaReservation({
+					...normalized,
+					...lifecycle,
+				});
+				assert.equal(result.status, "needs_review");
+				assert.equal(result.actionTaken, "skipped");
+				assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+			}
+		}
+	} finally {
+		Reservations.find = originals.reservationFind;
+		Reservations.findOne = originals.reservationFindOne;
+		Reservations.create = originals.reservationCreate;
+		Reservations.updateOne = originals.reservationUpdateOne;
+		HotelDetails.find = originals.hotelFind;
+		HotelDetails.findOne = originals.hotelFindOne;
+	}
+	assert.equal(externalCalls, 0);
+});
+
+test("conflicting compact Arabic HotelRunner commercial mirrors fail closed", () => {
+	const normalized = extractNormalizedReservation(
+		compactHotelRunnerArabicActionEmail({ htmlGross: "553" })
+	);
+	assert.equal(normalized.hotelRunnerArabicActionRequiredTemplateMatched, true);
+	assert.equal(normalized.hotelRunnerArabicActionRequiredConflict, true);
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(normalized.blocksUnmappedReservationCreation, true);
+	assert.match(normalized.manualReviewReasons.join(" "), /Arabic action-required/i);
+	assert.equal(canCreateUnmappedOtaReviewReservation(normalized, true), false);
+
+	const incompleteMarkerMirror = extractNormalizedReservation(
+		compactHotelRunnerArabicActionEmail({ htmlIncompleteWithMarker: true })
+	);
+	assert.equal(incompleteMarkerMirror.hotelRunnerArabicActionRequiredConflict, true);
+	assert.equal(incompleteMarkerMirror.requiresManualReview, true);
+	assert.equal(incompleteMarkerMirror.blocksUnmappedReservationCreation, true);
+});
+
+test("full-label Arabic HotelRunner mirrors require consensus even without the action marker", () => {
+	const matchingEmail = compactHotelRunnerArabicActionEmail();
+	const withoutMarker = {
+		...matchingEmail,
+		text: matchingEmail.text.replace("يتطلب إجراء", ""),
+	};
+	const matching = extractNormalizedReservation(withoutMarker);
+	assert.equal(matching.hotelRunnerArabicActionRequiredTemplateMatched, true);
+	assert.equal(matching.hotelRunnerArabicActionRequiredConflict, false);
+	assert.equal(matching.requiresManualReview, false);
+
+	const conflicting = extractNormalizedReservation({
+		...withoutMarker,
+		html: withoutMarker.html.replace("﷼ 552", "﷼ 553"),
+	});
+	assert.equal(conflicting.hotelRunnerArabicActionRequiredTemplateMatched, true);
+	assert.equal(conflicting.hotelRunnerArabicActionRequiredConflict, true);
+	assert.equal(conflicting.requiresManualReview, true);
+	assert.equal(conflicting.blocksUnmappedReservationCreation, true);
+});
+
+test("compact Arabic HotelRunner action-required mutation remains sender-auth gated", async () => {
+	const unauthenticated = extractNormalizedReservation({
+		...compactHotelRunnerArabicActionEmail(),
+		senderAuthentication: {},
+	});
+	assert.equal(unauthenticated.bookingSource, "Direct Plus - Google");
+	assert.equal(unauthenticated.sourceSenderAuthenticated, false);
+	const result = await reconcileOtaReservation(unauthenticated);
+	assert.equal(result.status, "needs_review");
+	assert.equal(result.skipReason, "unauthenticated_ota_sender_no_mutation");
 });
 
 test("Arabic HotelRunner Airbnb messages expose deterministic reservation fields", () => {

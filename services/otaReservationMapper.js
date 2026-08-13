@@ -69,6 +69,13 @@ const MAX_OTA_INBOUND_RESERVATION_TOTAL_SAR =
 // overbooking policy; they bound object/array allocation from one inbound email.
 const MAX_OTA_INBOUND_ROOM_COUNT = 250;
 const MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS = 20000;
+// The compact Arabic HotelRunner template is normally only a few kilobytes and
+// has one occurrence of each canonical label per MIME representation. These
+// ceilings are parser-work budgets, not email-delivery limits: a representation
+// that exceeds either one is retained for audit but cannot drive automation.
+const MAX_HOTELRUNNER_ARABIC_ACTION_REPRESENTATION_BYTES = 32 * 1024;
+const MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES = 256 * 1024;
+const MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES = 40;
 
 const MONEY_CURRENCY_CODES = Array.from(
 	new Set(
@@ -87,6 +94,56 @@ const TRUSTED_EXCHANGE_RATE_PROVIDER = "exchange_rate_api";
 const TRUSTED_EXCHANGE_RATE_SOURCE_TYPE = "trusted_exchange_evidence";
 const AGODA_MULTI_ROOM_ALLOCATION_REVIEW_REASON =
 	"Agoda email contains multiple rooms; automatic partial-room creation is disabled and the booking requires room review.";
+const DATED_RECOVERY_CONVERSION_REPAIR_ID =
+	"missed-direct-ota-email-recovery-20260813-v1";
+const DATED_RECOVERY_CONVERSION_POLICY_DATE = "2026-08-13";
+const DATED_RECOVERY_TRIP_SCOPE = Object.freeze({
+	provider: "trip",
+	confirmationNumber: "1567953939695657",
+	inboundEmailId: "6a778411bf632980ba060016",
+	emailHash:
+		"45d0378aebd409e4fa03395f12d257b28024249dd7e2c10a67419f997a3847a9",
+	textHash:
+		"51cf294c36171862d72880b2551f680c28a639fa60dc4350b4e070cd7f917beb",
+	historicalArchiveTuple: Object.freeze({
+		sourceCurrency: "USD",
+		sourceGross: 99.42,
+		sourcePayout: 93.9,
+		storedExchangeRateToSar: 3.75,
+		storedExchangeRateSource: "exchange_rate_api_cached",
+		amountConvertedAt: "2026-08-08T19:31:30.244Z",
+		sourceReceivedAt: "2026-08-08T19:31:24.000Z",
+		legacyGrossSar: 372.82,
+		legacyPayoutSar: 352.13,
+	}),
+	deterministicOutput: Object.freeze({
+		grossSar: 372.83,
+		payoutSar: 352.13,
+		expenseSar: 20.7,
+		nightlyGrossSar: Object.freeze([120.45, 120.45, 131.93]),
+		nightlyPayoutSar: Object.freeze([113.78, 113.78, 124.57]),
+	}),
+	nightlySource: Object.freeze([
+		Object.freeze({
+			date: "2026-08-12",
+			clientAmount: 32.12,
+			payoutAmount: 30.34,
+			currency: "USD",
+		}),
+		Object.freeze({
+			date: "2026-08-13",
+			clientAmount: 32.12,
+			payoutAmount: 30.34,
+			currency: "USD",
+		}),
+		Object.freeze({
+			date: "2026-08-14",
+			clientAmount: 35.18,
+			payoutAmount: 33.22,
+			currency: "USD",
+		}),
+	]),
+});
 
 const PROVIDER_LABELS = {
 	expedia: "Expedia",
@@ -2251,8 +2308,250 @@ function extractHotelRunnerArabicRoomBlocks(text = "") {
 	return blocks;
 }
 
+function arabicLabelValue(source = "", startLabel = "", endLabels = []) {
+	const start = escapeRegExp(startLabel).replace(/\\ /g, "\\s+");
+	const ends = endLabels
+		.map((label) => escapeRegExp(label).replace(/\\ /g, "\\s+"))
+		.join("|");
+	if (!start || !ends) return "";
+	const match = String(source || "").match(
+		new RegExp(`${start}\\s*[:#-]?\\s*([\\s\\S]{0,300}?)\\s+(?=${ends})`, "iu")
+	);
+	return cleanFieldValue(match?.[1] || "");
+}
+
+function extractHotelRunnerArabicActionRequiredFields(text = "") {
+	const source = String(text || "").replace(/\r/g, " ");
+	if (
+		!/يتطلب\s+إجراء/u.test(source) &&
+		!(/اسم\s+الفندق/u.test(source) &&
+			/رقم\s+التأكيد/u.test(source) &&
+			/نوع\s+الغرفة/u.test(source) &&
+			/الإجمالي\s+الكلي/u.test(source))
+	) {
+		return {};
+	}
+	const hotelName = arabicLabelValue(source, "اسم الفندق", ["رقم التأكيد"]);
+	const confirmationNumber = cleanConfirmationCandidate(
+		arabicLabelValue(source, "رقم التأكيد", ["القناة"])
+	);
+	const channel = arabicLabelValue(source, "القناة", ["اسم النزيل"]);
+	const guestName = arabicLabelValue(source, "اسم النزيل", ["الدولة"]);
+	const nationality = arabicLabelValue(source, "الدولة", ["تاريخ تسجيل الوصول"]);
+	const checkinText = arabicLabelValue(source, "تاريخ تسجيل الوصول", [
+		"تاريخ تسجيل المغادرة",
+	]);
+	const checkoutText = arabicLabelValue(source, "تاريخ تسجيل المغادرة", [
+		"متوسط السعر اليومي",
+	]);
+	const orderTotalText = arabicLabelValue(source, "الإجمالي الكلي", [
+		"المبلغ المستحق",
+	]);
+	const amountDueText = arabicLabelValue(source, "المبلغ المستحق", [
+		"نوع الغرفة",
+	]);
+	const roomName = arabicLabelValue(source, "نوع الغرفة", ["خطة الوجبة"]);
+	const mealPlan = arabicLabelValue(source, "خطة الوجبة", ["عدد النزلاء"]);
+	const guestCountText = arabicLabelValue(source, "عدد النزلاء", [
+		"إجمالي الغرفة",
+	]);
+	const roomTotalText = arabicLabelValue(source, "إجمالي الغرفة", [
+		"سياسة الإلغاء",
+	]);
+	const gross = parseMoney(orderTotalText);
+	const amountDue = parseMoney(amountDueText);
+	const roomTotal = parseMoney(roomTotalText);
+	const totalGuests = countNumber(guestCountText);
+	const complete = !!(
+		hotelName &&
+		confirmationNumber &&
+		guestName &&
+		parseDate(checkinText) &&
+		parseDate(checkoutText) &&
+		roomName &&
+		totalGuests > 0 &&
+		gross.amount > 0 &&
+		gross.currency
+	);
+	return {
+		actionRequiredTemplateMatched: complete,
+		hotelName,
+		confirmationNumber,
+		channel,
+		guestName,
+		nationality,
+		orderTotalText,
+		amount: gross.amount || 0,
+		currency: gross.currency || "",
+		amountDueText,
+		roomTotalText,
+		commercialTotalsConflict: !!(
+			(gross.amount > 0 && amountDue.amount > 0 &&
+				(gross.currency !== amountDue.currency ||
+					Math.abs(gross.amount - amountDue.amount) > 0.01)) ||
+			(gross.amount > 0 && roomTotal.amount > 0 &&
+				(gross.currency !== roomTotal.currency ||
+					Math.abs(gross.amount - roomTotal.amount) > 0.01))
+		),
+		roomName,
+		mealPlan,
+		checkinDate: parseDate(checkinText),
+		checkoutDate: parseDate(checkoutText),
+		roomCount: complete ? 1 : 0,
+		totalGuests,
+		adults: totalGuests,
+		children: 0,
+		hasOccupancyBreakdown: false,
+		roomBlocks: [],
+	};
+}
+
+const HOTELRUNNER_ARABIC_ACTION_LABELS = Object.freeze([
+	"اسم الفندق",
+	"رقم التأكيد",
+	"القناة",
+	"اسم النزيل",
+	"الدولة",
+	"تاريخ تسجيل الوصول",
+	"تاريخ تسجيل المغادرة",
+	"متوسط السعر اليومي",
+	"الإجمالي الكلي",
+	"المبلغ المستحق",
+	"نوع الغرفة",
+	"خطة الوجبة",
+	"عدد النزلاء",
+	"إجمالي الغرفة",
+	"سياسة الإلغاء",
+]);
+
+function hasHotelRunnerArabicActionTemplate(source = "") {
+	const input = String(source || "");
+	return !!(
+		/يتطلب\s+إجراء/u.test(input) ||
+		(/اسم\s+الفندق/u.test(input) &&
+			/رقم\s+التأكيد/u.test(input) &&
+			/نوع\s+الغرفة/u.test(input) &&
+			/الإجمالي\s+الكلي/u.test(input))
+	);
+}
+
+function hotelRunnerArabicActionRepresentationExceedsByteBudget(
+	source = "",
+	maxBytes = MAX_HOTELRUNNER_ARABIC_ACTION_REPRESENTATION_BYTES
+) {
+	const input = String(source || "");
+	return (
+		input.length > maxBytes || Buffer.byteLength(input, "utf8") > maxBytes
+	);
+}
+
+function otaInboundEmailResourceLimitExceeded(email = {}) {
+	if (!trustedProviderFromSenderAddress(email.from || "")) return false;
+	return !!(
+		hotelRunnerArabicActionRepresentationExceedsByteBudget(
+			email.text || "",
+			MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+		) ||
+		hotelRunnerArabicActionRepresentationExceedsByteBudget(
+			email.html || "",
+			MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+		)
+	);
+}
+
+function hotelRunnerArabicActionAnalysisBudget(source = "") {
+	const input = String(source || "");
+	const actionTemplate = hasHotelRunnerArabicActionTemplate(input);
+	if (!actionTemplate) {
+		return { actionTemplate: false, ok: true, reason: "", labelOccurrences: 0 };
+	}
+	if (hotelRunnerArabicActionRepresentationExceedsByteBudget(input)) {
+		return {
+			actionTemplate: true,
+			ok: false,
+			reason: "representation_bytes",
+			labelOccurrences: 0,
+		};
+	}
+	const labelPattern = new RegExp(
+		HOTELRUNNER_ARABIC_ACTION_LABELS.map(escapeRegExp).join("|"),
+		"gu"
+	);
+	let labelOccurrences = 0;
+	for (const unused of input.matchAll(labelPattern)) {
+		void unused;
+		labelOccurrences += 1;
+		if (
+			labelOccurrences > MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES
+		) {
+			return {
+				actionTemplate: true,
+				ok: false,
+				reason: "label_occurrences",
+				labelOccurrences,
+			};
+		}
+	}
+	return { actionTemplate: true, ok: true, reason: "", labelOccurrences };
+}
+
+function hotelRunnerArabicActionLabelValues(source = "", label = "") {
+	const input = String(source || "");
+	const labelPattern = new RegExp(escapeRegExp(label), "gu");
+	const starts = [];
+	for (const match of input.matchAll(labelPattern)) {
+		starts.push(match);
+		if (starts.length > MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES) {
+			return [];
+		}
+	}
+	return starts.map((match) => {
+		const start = Number(match.index || 0) + match[0].length;
+		let end = input.length;
+		for (const nextLabel of HOTELRUNNER_ARABIC_ACTION_LABELS) {
+			const next = input.slice(start).search(new RegExp(escapeRegExp(nextLabel), "u"));
+			if (next >= 0) end = Math.min(end, start + next);
+		}
+		return cleanFieldValue(input.slice(start, end));
+	}).filter(Boolean);
+}
+
+function hotelRunnerArabicActionRepeatedFactConflict(source = "") {
+	const normalizers = {
+		"اسم الفندق": normalizeExplicitHotelFactValue,
+		"رقم التأكيد": (value) => normalizeConfirmation(cleanConfirmationCandidate(value)),
+		"القناة": normalizeIntlComparable,
+		"اسم النزيل": normalizeIntlComparable,
+		"الدولة": normalizeIntlComparable,
+		"تاريخ تسجيل الوصول": (value) => parseDate(value) || "",
+		"تاريخ تسجيل المغادرة": (value) => parseDate(value) || "",
+		"الإجمالي الكلي": (value) => {
+			const money = parseMoney(value);
+			return money.amount > 0 ? `${money.currency}:${round2(money.amount)}` : "";
+		},
+		"المبلغ المستحق": (value) => {
+			const money = parseMoney(value);
+			return money.amount > 0 ? `${money.currency}:${round2(money.amount)}` : "";
+		},
+		"نوع الغرفة": normalizeRoomSignalText,
+		"عدد النزلاء": (value) => String(countNumber(value) || ""),
+		"إجمالي الغرفة": (value) => {
+			const money = parseMoney(value);
+			return money.amount > 0 ? `${money.currency}:${round2(money.amount)}` : "";
+		},
+	};
+	return Object.entries(normalizers).some(([label, normalize]) => {
+		const rawValues = hotelRunnerArabicActionLabelValues(source, label);
+		if (rawValues.length < 2) return false;
+		const values = rawValues.map(normalize);
+		return values.some((value) => !value) || new Set(values).size > 1;
+	});
+}
+
 function extractHotelRunnerArabicFields(text = "") {
 	const source = String(text || "");
+	const actionRequired = extractHotelRunnerArabicActionRequiredFields(source);
+	if (actionRequired.actionRequiredTemplateMatched) return actionRequired;
 	const confirmationNumber = findFirstPattern(source, [
 		/رقم\s*التأكيد\s*[:#-]?\s*([A-Z0-9-]{5,24})\b/i,
 	]);
@@ -2327,6 +2626,87 @@ function extractHotelRunnerArabicFields(text = "") {
 	};
 }
 
+function analyzeHotelRunnerArabicFields(email = {}, fallbackText = "") {
+	const rawRepresentations = [email.text || "", email.html || ""];
+	if (
+			hotelRunnerArabicActionRepresentationExceedsByteBudget(
+				rawRepresentations[0],
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+			) ||
+			hotelRunnerArabicActionRepresentationExceedsByteBudget(
+				rawRepresentations[1],
+				MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES
+		)
+	) {
+		return {
+			fields: {},
+			actionRequiredConflict: false,
+			resourceLimitExceeded: true,
+		};
+	}
+	const representations = [rawRepresentations[0], htmlToText(rawRepresentations[1])]
+		.filter((value) => normalizeWhitespace(value));
+	const representationBudgets = representations.map(
+		hotelRunnerArabicActionAnalysisBudget
+	);
+	const hasActionTemplate = representationBudgets.some(
+		(budget) => budget.actionTemplate
+	);
+	const resourceLimitExceeded = representationBudgets.some(
+		(budget) => budget.actionTemplate && !budget.ok
+	);
+	if (resourceLimitExceeded) {
+		return {
+			fields: {},
+			actionRequiredConflict: false,
+			resourceLimitExceeded: true,
+		};
+	}
+	const actionInputs = hasActionTemplate
+		? representations.filter((value) =>
+				hasHotelRunnerArabicActionTemplate(value)
+		  )
+		: [];
+	const actionRepresentations = actionInputs.map(
+		extractHotelRunnerArabicActionRequiredFields
+	);
+	if (!actionInputs.length) {
+		return {
+			fields: extractHotelRunnerArabicFields(fallbackText),
+			actionRequiredConflict: false,
+			resourceLimitExceeded: false,
+		};
+	}
+	const keys = actionRepresentations.map((value) =>
+		JSON.stringify({
+			hotelName: normalizeExplicitHotelFactValue(value.hotelName),
+			confirmationNumber: normalizeConfirmation(value.confirmationNumber),
+			channel: normalizeIntlComparable(value.channel),
+			guestName: normalizeIntlComparable(value.guestName),
+			nationality: normalizeIntlComparable(value.nationality),
+			checkinDate: value.checkinDate,
+			checkoutDate: value.checkoutDate,
+			roomName: normalizeRoomSignalText(value.roomName),
+			totalGuests: Number(value.totalGuests || 0),
+			amount: round2(value.amount),
+			currency: value.currency,
+		})
+	);
+	return {
+		fields: actionRepresentations[0],
+		resourceLimitExceeded: false,
+		actionRequiredConflict:
+			actionRepresentations.some(
+				(value) => value.actionRequiredTemplateMatched !== true
+			) ||
+			actionInputs.some(hotelRunnerArabicActionRepeatedFactConflict) ||
+			new Set(keys).size > 1 ||
+			actionRepresentations.some(
+				(value) => value.commercialTotalsConflict === true
+			),
+	};
+}
+
 function extractAgodaValueBetweenLabels(
 	text = "",
 	startLabel = "",
@@ -2348,26 +2728,130 @@ function extractAgodaValueBetweenLabels(
 	return cleanAgodaValue(match?.[1] || "");
 }
 
-function extractCompactAgodaRoomDetails(text = "") {
+function analyzeCompactAgodaRoomRows(text = "") {
 	const header =
 		/\bRoom\s+Type\s+No\.?\s+of\s+Rooms\s+Occupancy(?:\s+Children(?:'|’)?s\s+age)?\s+No\.?\s+of\s+Extra\s+Bed\s+/i;
 	const headerMatch = header.exec(String(text || ""));
-	if (!headerMatch) return {};
+	if (!headerMatch) return { rows: [], truncated: false, overflow: false };
 	const rowStart = headerMatch.index + headerMatch[0].length;
-	const tail = String(text || "").slice(rowStart, rowStart + 420);
-	const row = tail.match(
-		/^([\s\S]{2,180}?)\s+(\d+)\s+(\d+)\s+Adults?(?:\s*,?\s*(\d+)\s+(?:Children|Child|Kids?))?(?:\s+[\d,\s-]+)?\s+\d+\b/i
-	);
-	if (!row) return {};
-	const adults = Number(row[3] || 0);
-	const children = Number(row[4] || 0);
-	return {
-		roomName: cleanAgodaValue(row[1]),
-		roomCount: Math.max(1, Number(row[2] || 1)),
-		adults,
-		children,
-		totalGuests: adults + children,
-	};
+	const afterHeader = String(text || "").slice(rowStart);
+	const stopPattern =
+		/\b(?:Rate\s+Plan\s+name|Benefits\s+Included|Special\s+Requests|Cancellation\s+Policy|Room\s+Extra\s+Bed\s+Other\s+From\s*-\s*To)\b/i;
+	const stopIndex = afterHeader.search(stopPattern);
+	const boundedEnd = stopIndex >= 0 ? stopIndex : afterHeader.length;
+	const truncated = boundedEnd > 1800;
+	let tail = afterHeader.slice(0, Math.min(boundedEnd, 1800));
+	const rows = [];
+	const rowPattern =
+		/^([\s\S]{2,240}?)\s+(\d+)\s+(\d+)\s+Adults?(?:\s*,?\s*(\d+)\s+(?:Children|Child|Kids?))?(?:\s+[\d,\s-]+)?\s+(\d+)\b/i;
+	while (rows.length < MAX_OTA_INBOUND_ROOM_COUNT) {
+		tail = tail.replace(/^[\s|,;:-]+/, "");
+		const row = tail.match(rowPattern);
+		if (!row) break;
+		const adults = Number(row[3] || 0);
+		const children = Number(row[4] || 0);
+		const roomCount = Number(row[2] || 0);
+		const roomName = cleanAgodaValue(row[1]);
+		if (!roomName || !Number.isSafeInteger(roomCount) || roomCount <= 0) break;
+		rows.push({
+			roomName,
+			roomCount,
+			adults,
+			children,
+			totalGuests: adults + children,
+		});
+		tail = tail.slice(row[0].length);
+	}
+	const remaining = tail.replace(/^[\s|,;:-]+/, "");
+	const overflow =
+		rows.length >= MAX_OTA_INBOUND_ROOM_COUNT && rowPattern.test(remaining);
+	return { rows, truncated, overflow };
+}
+
+function extractCompactAgodaRoomRows(text = "") {
+	return analyzeCompactAgodaRoomRows(text).rows;
+}
+
+function allocateSourceNightlyAcrossRoomMajorSlots({
+	rows = [],
+	dateRange = [],
+	roomCount = 1,
+	field = "",
+	total = null,
+} = {}) {
+	const expectedTotal = Number(total);
+	if (
+		!field ||
+		!Array.isArray(rows) ||
+		rows.length !== dateRange.length ||
+		!Number.isSafeInteger(roomCount) ||
+		roomCount <= 0 ||
+		!Number.isFinite(expectedTotal) ||
+		expectedTotal < 0
+	) {
+		return [];
+	}
+	const nightly = rows.map((row, index) => {
+		const value = Number(row?.[field]);
+		return row?.date === dateRange[index] && Number.isFinite(value) && value >= 0
+			? value
+			: null;
+	});
+	if (nightly.some((value) => value === null)) return [];
+	if (Math.abs(round2(nightly.reduce((sum, value) => sum + value, 0)) - expectedTotal) > 0.01) {
+		return [];
+	}
+	const byDate = nightly.map((value) => allocateAmountAcrossSlots(value, roomCount));
+	return Array.from({ length: roomCount }, (_room, roomIndex) =>
+		dateRange.map((_date, dateIndex) => byDate[dateIndex][roomIndex])
+	).flat();
+}
+
+function validateMaterializedOtaRoomQuantityShape({
+	rooms = [],
+	roomCount = 0,
+	dateRange = [],
+	guestTotal = null,
+	payoutTotal = null,
+} = {}) {
+	if (
+		!Number.isSafeInteger(roomCount) ||
+		roomCount <= 0 ||
+		!Array.isArray(rooms) ||
+		rooms.length !== roomCount
+	) {
+		return { ok: false, reason: "room_row_count_mismatch" };
+	}
+	for (const room of rooms) {
+		if (Number(room?.count) !== 1) {
+			return { ok: false, reason: "room_row_quantity_must_equal_one" };
+		}
+		const days = Array.isArray(room?.pricingByDay) ? room.pricingByDay : [];
+		if (
+			days.length !== dateRange.length ||
+			days.some((day, index) => day?.date !== dateRange[index])
+		) {
+			return { ok: false, reason: "room_nightly_date_shape_mismatch" };
+		}
+	}
+	const days = rooms.flatMap((room) => room.pricingByDay || []);
+	for (const [field, expected, reason] of [
+		["totalPriceWithCommission", guestTotal, "guest_total_allocation_mismatch"],
+		["netAfterExpenses", payoutTotal, "payout_total_allocation_mismatch"],
+	]) {
+		if (expected === null || expected === undefined) continue;
+		const values = days.map((day) => day?.[field]);
+		if (values.some((value) => !Number.isFinite(Number(value)))) {
+			return { ok: false, reason };
+		}
+		const actual = round2(values.reduce((sum, value) => sum + Number(value), 0));
+		if (Math.abs(actual - round2(expected)) > 0.01) return { ok: false, reason };
+	}
+	return { ok: true };
+}
+
+function extractCompactAgodaRoomDetails(text = "") {
+	return extractCompactAgodaRoomRows(text)[0] || {};
 }
 
 function parseAgodaOccupancy(value = "") {
@@ -2471,6 +2955,67 @@ function extractAgodaRoomDetails(text = "") {
 		adults: occupancy.adults || 0,
 		children: occupancy.children || 0,
 		totalGuests: occupancy.totalGuests || 0,
+	};
+}
+
+function agodaRoomRowKey(row = {}) {
+	return [
+		normalizeRoomSignalText(row.roomName || ""),
+		Number(row.roomCount || 0),
+		Number(row.adults || 0),
+		Number(row.children || 0),
+	].join(":");
+}
+
+function analyzeAgodaRoomTable(email = {}, fallbackText = "") {
+	const representations = [
+		String(email.text || ""),
+		htmlToText(email.html || ""),
+	].filter((value) => normalizeWhitespace(value));
+	if (!representations.length && fallbackText) representations.push(String(fallbackText));
+	const parsed = representations.map((representation) => {
+		const compact = analyzeCompactAgodaRoomRows(representation);
+		return {
+			hasHeader:
+				/\bRoom\s+Type\s+No\.?\s+of\s+Rooms\s+Occupancy\b/i.test(
+					representation
+				),
+			rows: compact.rows,
+			truncated: compact.truncated,
+			overflow: compact.overflow,
+		};
+	});
+	const nonempty = parsed.filter((entry) => entry.rows.length > 0);
+	const representationKeys = nonempty.map((entry) =>
+		entry.rows.map(agodaRoomRowKey).join("|")
+	);
+	const rows = nonempty[0]?.rows || [];
+	const hasUnparsedHeader = parsed.some(
+		(entry) => entry.hasHeader && entry.rows.length === 0
+	);
+	const hasMultipleRows = nonempty.some((entry) => entry.rows.length !== 1);
+	const representationConflict = new Set(representationKeys).size > 1;
+	const boundedTableConflict = parsed.some(
+		(entry) => entry.truncated === true || entry.overflow === true
+	);
+	return {
+		row: rows.length === 1 ? rows[0] : extractAgodaRoomDetails(fallbackText),
+		rowCount: rows.length,
+		singleHomogeneousRow: !!(
+			rows.length === 1 &&
+			!hasMultipleRows &&
+			!representationConflict &&
+			!hasUnparsedHeader &&
+			!boundedTableConflict
+		),
+		ambiguous:
+			hasMultipleRows ||
+			representationConflict ||
+			hasUnparsedHeader ||
+			boundedTableConflict,
+		representationConflict,
+		hasUnparsedHeader,
+		boundedTableConflict,
 	};
 }
 
@@ -2614,16 +3159,332 @@ function extractAgodaHotelName(text = "") {
 	return cleanAgodaValue(
 		findFirstPattern(text, [
 			/\bBooking confirmation\s*\n\s*\*?([^\n*(]{2,120})\*?/i,
+			// Some plain-text deliveries flatten the heading and property name onto
+			// one line. Keep the capture bounded by the next canonical Agoda label;
+			// an unbounded tail would turn guest/stay fields into a false hotel fact.
+			/\bBooking confirmation\s+\*?(.{2,120}?)\*?(?=\s+(?:Customer\s+First\s+Name|Property\s+ID|City|Reservation\s+Information|PREPAID)\b|$)/i,
 		])
 	);
+}
+
+function distinctAgodaPropertyIds(email = {}, fallbackText = "") {
+	const source = [email.text || "", htmlToText(email.html || ""), fallbackText]
+		.filter(Boolean)
+		.join("\n");
+	return Array.from(
+		new Set(
+			Array.from(
+				source.matchAll(/\(\s*Property\s+ID\s*[:#-]?\s*(\d{4,20})\s*\)/gi)
+			).map((match) => String(match[1] || "").trim())
+		)
+	);
+}
+
+function extractAgodaSpecialRequestsFromRepresentation(value = "") {
+	const source = String(value || "").replace(/\r/g, "");
+	const match = source.match(
+		/\bSpecial\s+Requests\b\s*([\s\S]{0,900}?)(?=\bCancellation\s+Policy\b)/i
+	);
+	if (!match) return "";
+	const withoutBoilerplate = String(match[1] || "")
+		.replace(
+			/^\s*\(\s*All\s+special\s+requests\s+are\s+subject\s+to\s+availability\s+upon\s+arrival\.?\s*\)\s*/i,
+			""
+		)
+		.trim();
+	return cleanOtaGuestNote(withoutBoilerplate);
+}
+
+function analyzeAgodaSpecialRequests(email = {}, fallbackText = "") {
+	const values = [email.text || "", htmlToText(email.html || "")]
+		.filter((value) => normalizeWhitespace(value))
+		.map(extractAgodaSpecialRequestsFromRepresentation)
+		.filter(Boolean);
+	if (!values.length && fallbackText) {
+		const fallback = extractAgodaSpecialRequestsFromRepresentation(fallbackText);
+		if (fallback) values.push(fallback);
+	}
+	const distinct = Array.from(
+		new Map(values.map((value) => [normalizeIntlComparable(value), value])).values()
+	);
+	return {
+		value: distinct.length === 1 ? distinct[0] : "",
+		conflict: distinct.length > 1,
+	};
+}
+
+function extractAgodaGuestPhoneFromRepresentation(value = "") {
+	const source = String(value || "").replace(/\r/g, "");
+	const match = source.match(
+		/Customer\s+Info\s*-\s*Name\s*:[^,\n]{1,180},\s*Phone\s*:\s*([^\n]{0,80})/i
+	);
+	if (!match) return "";
+	const candidate = normalizeWhitespace(match[1] || "")
+		.split(/\b(?:Attention\s+Hotel\s+Staff|Agoda\s+Hotline)\b/i)[0]
+		.trim();
+	if (!candidate || !/^[+\d\s().-]+$/.test(candidate)) return "";
+	const digits = candidate.replace(/\D/g, "");
+	if (digits.length < 6 || digits.length > 18) return "";
+	return candidate;
+}
+
+function analyzeAgodaGuestPhone(email = {}, fallbackText = "") {
+	const values = [email.text || "", htmlToText(email.html || "")]
+		.filter((value) => normalizeWhitespace(value))
+		.map(extractAgodaGuestPhoneFromRepresentation)
+		.filter(Boolean);
+	if (!values.length && fallbackText) {
+		const fallback = extractAgodaGuestPhoneFromRepresentation(fallbackText);
+		if (fallback) values.push(fallback);
+	}
+	const distinct = Array.from(new Set(values.map((value) => value.replace(/\D/g, ""))));
+	return {
+		value: distinct.length === 1 ? values[0] : "",
+		conflict: distinct.length > 1,
+	};
+}
+
+function extractAgodaMimeRepresentationFacts(value = "") {
+	const source = String(value || "");
+	const firstName = firstNonEmpty(
+		extractAgodaValueBetweenLabels(source, "Customer First Name", [
+			"Customer Last Name",
+		]),
+		findField(source, ["Customer First Name"])
+	);
+	const lastName = firstNonEmpty(
+		extractAgodaValueBetweenLabels(source, "Customer Last Name", [
+			"Country of Residence",
+			"Check-in",
+		]),
+		findField(source, ["Customer Last Name"])
+	);
+	const customerInfoName = findFirstPattern(source, [
+		/Customer\s+Info\s*-\s*Name\s*:\s*([^,\n]{2,120})/i,
+	]);
+	const checkinText = firstNonEmpty(
+		extractAgodaValueBetweenLabels(source, "Check-in", ["Check-out"]),
+		findField(source, ["Check-in"])
+	);
+	const checkoutText = firstNonEmpty(
+		extractAgodaValueBetweenLabels(source, "Check-out", [
+			"Other Guests",
+			"Room Type",
+		]),
+		findField(source, ["Check-out"])
+	);
+	const referenceSellRate = extractAgodaMoneyByLabel(
+		source,
+		"Reference sell rate (incl. taxes & fees)"
+	);
+	const netRate = extractAgodaMoneyByLabel(
+		source,
+		"Net rate (incl. taxes & fees)"
+	);
+	return {
+		hasConfirmationLabel: /\b(?:Agoda\s+)?Booking\s+ID\b/i.test(source),
+		hasHotelLabel: /\bBooking\s+confirmation\b/i.test(source),
+		hasGuestLabel:
+			/\bCustomer\s+First\s+Name\b/i.test(source) ||
+			/Customer\s+Info\s*-\s*Name\s*:/i.test(source),
+		hasNationalityLabel: /\bCountry\s+of\s+Residence\b/i.test(source),
+		hasCheckinLabel: /\bCheck-in\b/i.test(source),
+		hasCheckoutLabel: /\bCheck-out\b/i.test(source),
+		hasReferenceSellRateLabel:
+			/Reference\s+sell\s+rate\s*\(incl\.\s*taxes\s*&\s*fees\)/i.test(
+				source
+			),
+		hasNetRateLabel:
+			/Net\s+rate\s*\(incl\.\s*taxes\s*&\s*fees\)/i.test(source),
+		hasNightlyRateSection:
+			/From\s*-\s*To\s+Rates/i.test(source) &&
+			/Reference\s+sell\s+rate/i.test(source),
+		confirmationNumber: cleanConfirmationCandidate(
+			firstNonEmpty(
+				findFirstPattern(source, [
+					/\bAgoda\s+Booking\s+ID\s+([A-Z0-9-]{5,})\b/i,
+					/\bBooking\s+ID\s*[:#-]?\s*([A-Z0-9-]{5,})\b/i,
+				]),
+				findNextLineAfterExactLabel(source, "Booking ID", 4)
+			)
+		),
+		hotelName: extractAgodaHotelName(source),
+		guestName: cleanAgodaValue(
+			firstNonEmpty(
+				[firstName, lastName].filter(Boolean).join(" "),
+				customerInfoName
+			)
+		),
+		nationality: cleanAgodaValue(
+			firstNonEmpty(
+				extractAgodaValueBetweenLabels(source, "Country of Residence", [
+					"Check-in",
+				]),
+				findField(source, ["Country of Residence"]),
+				findField(source, ["Country"])
+			)
+		),
+		checkinDate: parseDate(checkinText),
+		checkoutDate: parseDate(checkoutText),
+		referenceSellRate,
+		netRate,
+		nightlyPricingSource: extractAgodaNightlyNetRates(source),
+	};
+}
+
+function agodaMimeMoneyKey(money = {}, { allowZero = false } = {}) {
+	const amount = Number(money.amount);
+	if (
+		money.matched !== true ||
+		!Number.isFinite(amount) ||
+		(allowZero ? amount < 0 : amount <= 0) ||
+		!money.currency
+	) {
+		return "";
+	}
+	return `${normalizeMoneyCurrency(money.currency)}:${round2(amount)}`;
+}
+
+function analyzeAgodaMimeFacts(email = {}, fallbackText = "") {
+	const representations = [email.text || "", htmlToText(email.html || "")]
+		.filter((value) => normalizeWhitespace(value));
+	if (!representations.length && fallbackText) {
+		representations.push(String(fallbackText));
+	}
+	const facts = representations.map(extractAgodaMimeRepresentationFacts);
+	const conflictFields = [];
+	const addConflict = (field, values) => {
+		const canonical = values.filter(Boolean);
+		if (new Set(canonical).size > 1) conflictFields.push(field);
+	};
+	addConflict(
+		"confirmationNumber",
+		facts.map((item) => normalizeConfirmation(item.confirmationNumber || ""))
+	);
+	addConflict(
+		"hotelName",
+		facts.map((item) =>
+			item.hotelName ? normalizeExplicitHotelFactValue(item.hotelName) : ""
+		)
+	);
+	addConflict(
+		"guestName",
+		facts.map((item) =>
+			item.guestName ? normalizeIntlComparable(item.guestName) : ""
+		)
+	);
+	addConflict(
+		"nationality",
+		facts.map((item) =>
+			item.nationality ? normalizeIntlComparable(item.nationality) : ""
+		)
+	);
+	addConflict("checkinDate", facts.map((item) => item.checkinDate || ""));
+	addConflict("checkoutDate", facts.map((item) => item.checkoutDate || ""));
+	addConflict(
+		"referenceSellRate",
+		facts.map((item) => agodaMimeMoneyKey(item.referenceSellRate))
+	);
+	addConflict(
+		"netRate",
+		facts.map((item) =>
+			agodaMimeMoneyKey(item.netRate, { allowZero: true })
+		)
+	);
+	addConflict(
+		"nightlyPricing",
+		facts.map((item) =>
+			item.nightlyPricingSource?.length
+				? JSON.stringify(
+						item.nightlyPricingSource.map((row) => ({
+							date: row.date,
+							payoutAmount: round2(row.payoutAmount),
+							currency: normalizeMoneyCurrency(row.currency),
+						}))
+					)
+				: ""
+		)
+	);
+	for (const [field, assertedField, value] of [
+		[
+			"confirmationNumber",
+			"hasConfirmationLabel",
+			(item) => Boolean(item.confirmationNumber),
+		],
+		["hotelName", "hasHotelLabel", (item) => Boolean(item.hotelName)],
+		["guestName", "hasGuestLabel", (item) => Boolean(item.guestName)],
+		[
+			"nationality",
+			"hasNationalityLabel",
+			(item) => Boolean(item.nationality),
+		],
+		["checkinDate", "hasCheckinLabel", (item) => Boolean(item.checkinDate)],
+		[
+			"checkoutDate",
+			"hasCheckoutLabel",
+			(item) => Boolean(item.checkoutDate),
+		],
+		[
+			"referenceSellRate",
+			"hasReferenceSellRateLabel",
+			(item) => Boolean(agodaMimeMoneyKey(item.referenceSellRate)),
+		],
+		[
+			"netRate",
+			"hasNetRateLabel",
+			(item) => Boolean(agodaMimeMoneyKey(item.netRate, { allowZero: true })),
+		],
+	]) {
+		if (facts.some((item) => item[assertedField] && !value(item))) {
+			conflictFields.push(field);
+		}
+	}
+	const firstValue = (field, isUsable = (value) => Boolean(value)) =>
+		facts.map((item) => item[field]).find(isUsable);
+	return {
+		facts: {
+			confirmationNumber: firstValue("confirmationNumber"),
+			hotelName: firstValue("hotelName"),
+			guestName: firstValue("guestName"),
+			nationality: firstValue("nationality"),
+			checkinDate: firstValue("checkinDate"),
+			checkoutDate: firstValue("checkoutDate"),
+			referenceSellRate: firstValue(
+				"referenceSellRate",
+				(value) => Boolean(agodaMimeMoneyKey(value))
+			),
+			netRate: firstValue(
+				"netRate",
+				(value) => Boolean(agodaMimeMoneyKey(value, { allowZero: true }))
+			),
+			nightlyPricingSource:
+				firstValue(
+					"nightlyPricingSource",
+					(value) => Array.isArray(value) && value.length > 0
+				) || [],
+		},
+		conflict: conflictFields.length > 0,
+		conflictFields: Array.from(new Set(conflictFields)),
+	};
 }
 
 function extractAgodaFields(email = {}, text = "", provider = "") {
 	const source = `${email.subject || ""}\n${text || ""}`;
 	if (provider !== "agoda" && !/\bagoda\b/i.test(source)) return {};
 
+	// Agoda's per-MIME consensus is authoritative only on the direct Agoda
+	// transport. A HotelRunner email can name Agoda as its commercial channel,
+	// but its label grammar belongs to the relay parser and must not be partially
+	// reinterpreted as a direct Agoda representation.
+	const directAgodaTransport =
+		trustedProviderFromSenderAddress(email.from || "") === "agoda";
+	const mimeAnalysis = directAgodaTransport
+		? analyzeAgodaMimeFacts(email, text)
+		: { facts: {}, conflict: false, conflictFields: [] };
+	const mimeFacts = mimeAnalysis.facts || {};
 	const confirmationNumber = cleanConfirmationCandidate(
 		firstNonEmpty(
+			mimeFacts.confirmationNumber,
 			findFirstPattern(source, [
 				/\bAgoda\s+Booking\s+ID\s+([A-Z0-9-]{5,})\b/i,
 				/\bBooking\s+ID\s*\n\s*([A-Z0-9-]{5,})\b/i,
@@ -2631,13 +3492,24 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 			findNextLineAfterExactLabel(text, "Booking ID", 4)
 		)
 	);
-	const room = extractAgodaRoomDetails(text);
-	const hotelName = extractAgodaHotelName(text);
-	const referenceSellRate = extractAgodaMoneyByLabel(
-		text,
-		"Reference sell rate (incl. taxes & fees)"
+	const roomTable = analyzeAgodaRoomTable(email, text);
+	const room = roomTable.row || {};
+	const propertyIds = distinctAgodaPropertyIds(email, text);
+	const specialRequests = analyzeAgodaSpecialRequests(email, text);
+	const guestPhoneEvidence = analyzeAgodaGuestPhone(email, text);
+	const hotelName = firstNonEmpty(
+		mimeFacts.hotelName,
+		extractAgodaHotelName(text)
 	);
-	const netRate = extractAgodaMoneyByLabel(text, "Net rate (incl. taxes & fees)");
+	const referenceSellRate =
+		mimeFacts.referenceSellRate ||
+		extractAgodaMoneyByLabel(
+			text,
+			"Reference sell rate (incl. taxes & fees)"
+		);
+	const netRate =
+		mimeFacts.netRate ||
+		extractAgodaMoneyByLabel(text, "Net rate (incl. taxes & fees)");
 	const hasReferenceSellRate = Number(referenceSellRate.amount || 0) > 0;
 	const hasNetRate =
 		netRate.matched === true &&
@@ -2672,7 +3544,11 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 	]
 		.filter((item) => item.matched)
 		.some((item) => item.currency !== amountCurrency);
-	const nightlyPricingSource = extractAgodaNightlyNetRates(text);
+	const nightlyPricingSource =
+		Array.isArray(mimeFacts.nightlyPricingSource) &&
+		mimeFacts.nightlyPricingSource.length
+			? mimeFacts.nightlyPricingSource
+			: extractAgodaNightlyNetRates(text);
 	const exactNightlyPayout = Boolean(
 		nightlyPricingSource.length &&
 		!nightlyPricingSource.some((row) => row.currency !== payoutCurrency) &&
@@ -2700,25 +3576,12 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 					clientAllocationSource: "gross_proportional_to_source_net",
 			  }))
 			: [];
-	const firstName = firstNonEmpty(
-		extractAgodaValueBetweenLabels(text, "Customer First Name", [
-			"Customer Last Name",
-		]),
-		findField(text, ["Customer First Name"])
-	);
-	const textReferenceSellRateOccurrences = distinctAgodaReferenceSellRates(
-		email.text || ""
-	).length;
-	const htmlReferenceSellRateOccurrences = distinctAgodaReferenceSellRates(
-		htmlToText(email.html || "")
-	).length;
-	const referenceSellRateOccurrences =
-		textReferenceSellRateOccurrences || htmlReferenceSellRateOccurrences
-			? Math.max(
-					textReferenceSellRateOccurrences,
-					htmlReferenceSellRateOccurrences
-			  )
-			: distinctAgodaReferenceSellRates(text).length;
+	const referenceSellRateOccurrences = new Set(
+		[
+			...distinctAgodaReferenceSellRates(email.text || ""),
+			...distinctAgodaReferenceSellRates(htmlToText(email.html || "")),
+		]
+	).size || distinctAgodaReferenceSellRates(text).length;
 	const agodaRoomReferences = Array.from(
 		new Set(
 			Array.from(String(text || "").matchAll(/\[?Rm\s*No\.?\s*(\d+)\]?/gi))
@@ -2726,31 +3589,31 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 				.filter((value) => value > 0)
 		)
 	);
-	const multiRoomEvidence =
-		Number(room.roomCount || 0) > 1 || agodaRoomReferences.length > 1;
-	const lastName = firstNonEmpty(
-		extractAgodaValueBetweenLabels(text, "Customer Last Name", [
-			"Country of Residence",
-			"Check-in",
-		]),
-		findField(text, ["Customer Last Name"])
+	const declaredRoomCount = Number(room.roomCount || 0);
+	const roomReferenceConflict = !!(
+		agodaRoomReferences.length &&
+		(!Number.isSafeInteger(declaredRoomCount) ||
+			declaredRoomCount <= 0 ||
+			Math.max(...agodaRoomReferences) > declaredRoomCount)
 	);
-	const customerInfoName = findFirstPattern(text, [
-		/Customer\s+Info\s*-\s*Name\s*:\s*([^,\n]{2,120})/i,
-	]);
+	const homogeneousRoomQuantity = !!(
+		roomTable.singleHomogeneousRow &&
+		Number.isSafeInteger(declaredRoomCount) &&
+		declaredRoomCount > 1 &&
+		!roomReferenceConflict
+	);
+	const multiRoomEvidence = !!(
+		roomTable.ambiguous ||
+		roomReferenceConflict ||
+		(declaredRoomCount > 1 && !homogeneousRoomQuantity)
+	);
 	const guestName = cleanAgodaValue(
-		firstNonEmpty([firstName, lastName].filter(Boolean).join(" "), customerInfoName)
+		firstNonEmpty(mimeFacts.guestName, findField(text, ["Customer name"]))
 	);
-	const guestPhone = cleanAgodaValue(
-		findFirstPattern(text, [
-			/Customer\s+Info\s*-\s*Name\s*:[^,\n]+,\s*Phone\s*:\s*([+\d\s().-]{6,})/i,
-		])
-	);
+	const guestPhone = cleanAgodaValue(guestPhoneEvidence.value || "");
 	const nationality = cleanAgodaValue(
 		firstNonEmpty(
-			extractAgodaValueBetweenLabels(text, "Country of Residence", [
-				"Check-in",
-			]),
+			mimeFacts.nationality,
 			findField(text, ["Country of Residence"]),
 			findField(text, ["Country"])
 		)
@@ -2771,6 +3634,12 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		confirmationNumber,
 		reservationId: confirmationNumber,
 		hotelName,
+		checkinDate: mimeFacts.checkinDate || null,
+		checkoutDate: mimeFacts.checkoutDate || null,
+		agodaPropertyId: propertyIds.length === 1 ? propertyIds[0] : "",
+		agodaPropertyIdConflict: propertyIds.length > 1,
+		agodaMimeConflict: mimeAnalysis.conflict === true,
+		agodaMimeConflictFields: mimeAnalysis.conflictFields || [],
 		hotelNameAliases: aliases,
 		roomName: room.roomName || "",
 		roomCount: room.roomCount || 0,
@@ -2779,6 +3648,9 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		totalGuests: room.totalGuests || 0,
 		guestName,
 		guestPhone,
+		guestNotes: specialRequests.value,
+		specialRequestsConflict: specialRequests.conflict,
+		guestPhoneConflict: guestPhoneEvidence.conflict,
 		nationality,
 		amount: hasReferenceSellRate ? referenceSellRate.amount : 0,
 		currency: amountCurrency,
@@ -2870,6 +3742,10 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 				: "",
 		referenceSellRateOccurrences,
 		multiRoomEvidence,
+		homogeneousRoomQuantity,
+		roomTableRowCount: roomTable.rowCount,
+		roomTableConflict: roomTable.ambiguous,
+		roomReferenceConflict,
 		sourcePresence: {
 			confirmationNumber: !!confirmationNumber,
 			reservationId: !!confirmationNumber,
@@ -2881,6 +3757,8 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 			totalGuests: !!room.totalGuests,
 			guestName: !!guestName,
 			guestPhone: !!guestPhone,
+			guestNotes: !!specialRequests.value,
+			agodaPropertyId: propertyIds.length === 1,
 			nationality: !!nationality,
 			amount: referenceSellRate.amount > 0,
 			otaCommission:
@@ -3486,7 +4364,294 @@ function agodaMultiRoomAllocationReviewAllowsCommercialOnly(normalized = {}) {
 	);
 }
 
+function canonicalDatedRecoveryValue(value) {
+	if (value === null || value === undefined) return value ?? null;
+	if (value instanceof Date) return value.toISOString();
+	if (Array.isArray(value)) return value.map(canonicalDatedRecoveryValue);
+	if (typeof value === "object") {
+		return Object.fromEntries(
+			Object.keys(value)
+				.sort()
+				.map((key) => [key, canonicalDatedRecoveryValue(value[key])])
+		);
+	}
+	return value;
+}
+
+function datedRecoveryBoundaryHash(value = {}) {
+	const withoutHash = { ...value };
+	delete withoutHash.tupleHash;
+	return crypto
+		.createHash("sha256")
+		.update(JSON.stringify(canonicalDatedRecoveryValue(withoutHash)), "utf8")
+		.digest("hex");
+}
+
+function datedRecoveryConversionError(reason) {
+	const error = new Error(
+		`The dated OTA recovery conversion boundary is invalid: ${reason}.`
+	);
+	error.code = "OTA_DATED_RECOVERY_CONVERSION_BOUNDARY_INVALID";
+	return error;
+}
+
+function exactDatedRecoveryMoney(left, right) {
+	return (
+		Number.isFinite(Number(left)) &&
+		Number.isFinite(Number(right)) &&
+		Math.abs(Number(left) - Number(right)) <= 0.000000001
+	);
+}
+
+function exactDatedRecoveryTripSource(normalized = {}) {
+	const scope = DATED_RECOVERY_TRIP_SCOPE;
+	const paymentSummary = normalized.paymentSummary || {};
+	const sourceRows = (Array.isArray(normalized.nightlyPricingSource)
+		? normalized.nightlyPricingSource
+		: []
+	).map((row) => ({
+		date: String(row?.date || "").trim(),
+		clientAmount: Number(row?.clientAmount),
+		payoutAmount: Number(row?.payoutAmount),
+		currency: String(row?.currency || "").trim().toUpperCase(),
+	}));
+	return Boolean(
+		normalizeOtaIdentityProvider(normalized.provider) === scope.provider &&
+		normalizeConfirmation(normalized.confirmationNumber) ===
+			scope.confirmationNumber &&
+		normalizeId(normalized.inboundEmailId) === scope.inboundEmailId &&
+		normalizeMarker(normalized?.source?.textHash || "") === scope.textHash &&
+		normalized.sourceSenderAuthenticated === true &&
+		normalized.sourceSenderTrusted === true &&
+		normalizeOtaIdentityProvider(normalized.trustedTransportProvider) ===
+			scope.provider &&
+		String(normalized.sourceCurrency || paymentSummary.sourceCurrency || "")
+			.trim()
+			.toUpperCase() === scope.historicalArchiveTuple.sourceCurrency &&
+		exactDatedRecoveryMoney(
+			normalized.sourceAmount ??
+				paymentSummary.sourceTotalGuestPaymentAmount,
+			scope.historicalArchiveTuple.sourceGross
+		) &&
+		exactDatedRecoveryMoney(
+			paymentSummary.sourceTotalPayoutAmount ??
+				normalized.sourcePayoutAmount,
+			scope.historicalArchiveTuple.sourcePayout
+		) &&
+		JSON.stringify(sourceRows) === JSON.stringify(scope.nightlySource)
+	);
+}
+
+function exactHistoricalDatedRecoveryTuple(value = {}) {
+	const expected = DATED_RECOVERY_TRIP_SCOPE.historicalArchiveTuple;
+	const exactTimestamp = (candidate, wanted) => {
+		const parsed = new Date(candidate);
+		return Number.isFinite(parsed.getTime()) && parsed.toISOString() === wanted;
+	};
+	return Boolean(
+		value &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		String(value.sourceCurrency || "").trim().toUpperCase() ===
+			expected.sourceCurrency &&
+		exactDatedRecoveryMoney(value.sourceGross, expected.sourceGross) &&
+		exactDatedRecoveryMoney(value.sourcePayout, expected.sourcePayout) &&
+		exactDatedRecoveryMoney(
+			value.storedExchangeRateToSar,
+			expected.storedExchangeRateToSar
+		) &&
+		normalizeMarker(value.storedExchangeRateSource || "") ===
+			expected.storedExchangeRateSource &&
+		exactTimestamp(value.amountConvertedAt, expected.amountConvertedAt) &&
+		exactTimestamp(value.sourceReceivedAt, expected.sourceReceivedAt) &&
+		exactDatedRecoveryMoney(value.legacyGrossSar, expected.legacyGrossSar) &&
+		exactDatedRecoveryMoney(value.legacyPayoutSar, expected.legacyPayoutSar)
+	);
+}
+
+function datedRecoveryDeterministicOutput(normalized = {}) {
+	const scope = DATED_RECOVERY_TRIP_SCOPE;
+	const tuple = scope.historicalArchiveTuple;
+	const grossSar = multiplyMoney2(tuple.sourceGross, tuple.storedExchangeRateToSar);
+	const payoutSar = multiplyMoney2(
+		tuple.sourcePayout,
+		tuple.storedExchangeRateToSar
+	);
+	const nightlyPricingSar = convertDirectTripNightlyPricing(
+		normalized.nightlyPricingSource,
+		{
+			totalGuestAmountSar: grossSar,
+			totalPayoutAmountSar: payoutSar,
+			exchangeRateToSar: tuple.storedExchangeRateToSar,
+		}
+	);
+	const output = {
+		grossSar,
+		payoutSar,
+		expenseSar: round2(grossSar - payoutSar),
+		nightlyGrossSar: nightlyPricingSar.map((row) => row.clientAmountSar),
+		nightlyPayoutSar: nightlyPricingSar.map((row) => row.payoutAmountSar),
+	};
+	if (
+		JSON.stringify(output) !== JSON.stringify(scope.deterministicOutput)
+	) {
+		throw datedRecoveryConversionError(
+			"deterministic exact-decimal output no longer matches the pinned scope"
+		);
+	}
+	return { ...output, nightlyPricingSar };
+}
+
+function buildDatedRecoveryConversionBoundary(
+	normalized = {},
+	{ emailHash = "", historicalArchiveTuple = null } = {}
+) {
+	const scope = DATED_RECOVERY_TRIP_SCOPE;
+	if (!exactDatedRecoveryTripSource(normalized)) {
+		throw datedRecoveryConversionError(
+			"fresh authenticated source facts do not match the one approved archive"
+		);
+	}
+	if (normalizeMarker(emailHash || "") !== scope.emailHash) {
+		throw datedRecoveryConversionError("archive email hash changed");
+	}
+	if (!exactHistoricalDatedRecoveryTuple(historicalArchiveTuple)) {
+		throw datedRecoveryConversionError(
+			"historical archive exchange tuple changed"
+		);
+	}
+	const output = datedRecoveryDeterministicOutput(normalized);
+	const boundary = {
+		version: 1,
+		evidenceType: "dated_recovery_historical_archive_tuple",
+		repairId: DATED_RECOVERY_CONVERSION_REPAIR_ID,
+		policyDate: DATED_RECOVERY_CONVERSION_POLICY_DATE,
+		provider: scope.provider,
+		confirmationNumber: scope.confirmationNumber,
+		inboundEmailId: scope.inboundEmailId,
+		emailHash: scope.emailHash,
+		textHash: scope.textHash,
+		historicalArchiveTuple: canonicalDatedRecoveryValue(
+			historicalArchiveTuple
+		),
+		deterministicOutput: {
+			grossSar: output.grossSar,
+			payoutSar: output.payoutSar,
+			expenseSar: output.expenseSar,
+			nightlyGrossSar: output.nightlyGrossSar,
+			nightlyPayoutSar: output.nightlyPayoutSar,
+		},
+		trustedForOrdinaryAutomation: false,
+		networkUsed: false,
+	};
+	return { ...boundary, tupleHash: datedRecoveryBoundaryHash(boundary) };
+}
+
+function applyDatedRecoveryConversionBoundary(
+	normalized = {},
+	boundary = {}
+) {
+	const scope = DATED_RECOVERY_TRIP_SCOPE;
+	if (!exactDatedRecoveryTripSource(normalized)) {
+		throw datedRecoveryConversionError(
+			"input is not the one freshly parsed authenticated Trip archive"
+		);
+	}
+	const expected = buildDatedRecoveryConversionBoundary(normalized, {
+		emailHash: boundary.emailHash,
+		historicalArchiveTuple: boundary.historicalArchiveTuple,
+	});
+	if (
+		JSON.stringify(canonicalDatedRecoveryValue(boundary)) !==
+		JSON.stringify(canonicalDatedRecoveryValue(expected)) ||
+		boundary.tupleHash !== datedRecoveryBoundaryHash(boundary) ||
+		boundary.trustedForOrdinaryAutomation !== false ||
+		boundary.networkUsed !== false
+	) {
+		throw datedRecoveryConversionError("boundary fields or tuple hash changed");
+	}
+	const output = datedRecoveryDeterministicOutput(normalized);
+	const paymentSummary = { ...(normalized.paymentSummary || {}) };
+	const next = {
+		...normalized,
+		sourceAmount: scope.historicalArchiveTuple.sourceGross,
+		sourceCurrency: scope.historicalArchiveTuple.sourceCurrency,
+		sourcePayoutAmount: scope.historicalArchiveTuple.sourcePayout,
+		sourcePayoutCurrency: scope.historicalArchiveTuple.sourceCurrency,
+		propertyCurrency: "SAR",
+		propertyConversionVerified: true,
+		totalAmountSar: output.grossSar,
+		amount: output.grossSar,
+		currency: "SAR",
+		totalPayoutSar: output.payoutSar,
+		netAfterExpensesTotal: output.payoutSar,
+		exchangeRateToSar:
+			scope.historicalArchiveTuple.storedExchangeRateToSar,
+		exchangeRateSource: "dated_recovery_historical_archive_tuple",
+		sourceExchangeRateToSar:
+			scope.historicalArchiveTuple.storedExchangeRateToSar,
+		sourceExchangeRateSource:
+			scope.historicalArchiveTuple.storedExchangeRateSource,
+		amountConvertedAt: scope.historicalArchiveTuple.amountConvertedAt,
+		nightlyPricingSar: output.nightlyPricingSar,
+		datedRecoveryConversionEvidence: expected,
+		paymentSummary: {
+			...paymentSummary,
+			sourceCurrency: scope.historicalArchiveTuple.sourceCurrency,
+			sourceTotalGuestPaymentAmount:
+				scope.historicalArchiveTuple.sourceGross,
+			sourceTotalPayoutAmount:
+				scope.historicalArchiveTuple.sourcePayout,
+			sourceTotalPayoutCurrency:
+				scope.historicalArchiveTuple.sourceCurrency,
+			totalGuestPaymentAmount: output.grossSar,
+			totalPayoutAmount: output.payoutSar,
+			currency: "SAR",
+			propertyCurrency: "SAR",
+			propertyConversionVerified: true,
+			exchangeRateToSar:
+				scope.historicalArchiveTuple.storedExchangeRateToSar,
+			exchangeRateSource: "dated_recovery_historical_archive_tuple",
+			amountConvertedAt: scope.historicalArchiveTuple.amountConvertedAt,
+		},
+	};
+	delete next.currencyConversionEvidence;
+	delete next.paymentSummary.currencyConversionEvidence;
+	delete next.otaCommercialEvidence;
+	return next;
+}
+
+function validatedDatedRecoveryConversionEvidence(normalized = {}) {
+	const boundary = normalized.datedRecoveryConversionEvidence;
+	if (!boundary) return null;
+	try {
+		const applied = applyDatedRecoveryConversionBoundary(
+			{ ...normalized, datedRecoveryConversionEvidence: undefined },
+			boundary
+		);
+		return (
+			exactDatedRecoveryMoney(
+				normalized.totalAmountSar,
+				applied.totalAmountSar
+			) &&
+			exactDatedRecoveryMoney(
+				normalized.totalPayoutSar,
+				applied.totalPayoutSar
+			) &&
+			JSON.stringify(normalized.nightlyPricingSar || []) ===
+				JSON.stringify(applied.nightlyPricingSar || [])
+				? boundary
+				: null
+		);
+	} catch (_error) {
+		return null;
+	}
+}
+
 function verifiedPropertyGuestGrossSar(normalized = {}) {
+	if (validatedDatedRecoveryConversionEvidence(normalized)) {
+		return DATED_RECOVERY_TRIP_SCOPE.deterministicOutput.grossSar;
+	}
 	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
 		.trim()
 		.toUpperCase();
@@ -3504,6 +4669,9 @@ function verifiedPropertyGuestGrossSar(normalized = {}) {
 }
 
 function verifiedPropertyPayoutSar(normalized = {}) {
+	if (validatedDatedRecoveryConversionEvidence(normalized)) {
+		return DATED_RECOVERY_TRIP_SCOPE.deterministicOutput.payoutSar;
+	}
 	const propertyCurrency = String(normalized.propertyCurrency || "SAR")
 		.trim()
 		.toUpperCase();
@@ -4103,7 +5271,242 @@ function extractDirectTripConfirmationNumbers(value = "") {
 	);
 }
 
-function extractDirectTripNightlySourceRows(
+function extractDirectTripMimeRepresentationFacts(value = "") {
+	const source = String(value || "").replace(/\r/g, "");
+	const datePattern = dateTextPattern();
+	const stayPattern = new RegExp(
+		`\\bStaying\\s+period\\s*:\\s*(${datePattern})\\s*(?:\\u2014|\\u2013|-)\\s*(${datePattern})\\s*\\|\\s*(\\d+)\\s+nights?`,
+		"gi"
+	);
+	const stays = Array.from(source.matchAll(stayPattern)).map((match) => ({
+		checkinDate: parseDate(match[1] || ""),
+		checkoutDate: parseDate(match[2] || ""),
+		stayNights: Number(match[3] || 0),
+	}));
+	const distinctStays = Array.from(
+		new Map(
+			stays.map((stay) => [
+				`${stay.checkinDate}|${stay.checkoutDate}|${stay.stayNights}`,
+				stay,
+			])
+		).values()
+	);
+	const stay = distinctStays[0] || {};
+	const roomMatches = Array.from(
+		source.matchAll(
+			/\bRoom\s+Type\s*:\s*([\s\S]{2,360}?)\s*\|\s*(\d+)\s+room\(s\)/gi
+		)
+	).map((match) => ({
+		roomName: cleanFieldValue(match[1] || ""),
+		roomCount: Number(match[2] || 0),
+	}));
+	const rooms = Array.from(
+		new Map(
+			roomMatches
+				.filter((room) => room.roomName && room.roomCount > 0)
+				.map((room) => [
+					`${normalizeRoomSignalText(room.roomName)}:${room.roomCount}`,
+					room,
+				])
+		).values()
+	);
+	const roomRateMatches = Array.from(
+		source.matchAll(
+			/\bRoom\s+rate\s+(\d+)\s+room\(s\)\s*[x\u00d7]\s*(\d+)\s+night\(s\)/gi
+		)
+	);
+	const roomCounts = [
+		...rooms.map((room) => room.roomCount),
+		...roomRateMatches.map((match) => Number(match[1] || 0)),
+	].filter((count) => Number.isSafeInteger(count) && count > 0);
+	const distinctRoomCounts = [...new Set(roomCounts)];
+	const declaredNights = roomRateMatches
+		.map((match) => Number(match[2] || 0))
+		.filter((nights) => Number.isSafeInteger(nights) && nights > 0);
+	const occupancy = source.match(
+		/\bGuests\s*\(estimated\)\s*:\s*(\d+)\s+adults?(?:\s*[,|+]\s*(\d+)\s+child(?:ren)?)?/i
+	);
+	const paymentBlock =
+		source.match(
+			/\bPayment\s+information\b([\s\S]{1,1800}?)(?=\bRoom\s+rate\s*Price\s+details\b)/i
+		)?.[1] || "";
+	const finalRates = paymentBlock
+		? Array.from(
+				paymentBlock.matchAll(
+					/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)\s*((?:(?:[A-Z]{3}|US\$|\$)\s*)?[0-9][0-9,.]*)(?:\s*[x×*]\s*(\d+))?/gi
+				)
+		  ).map((match) => {
+				const parsed = parseMoney(match[1] || "");
+				const multiplier = Number(match[2] || 1);
+				return {
+					...parsed,
+					amount: multiplyMoney2(parsed.amount, multiplier),
+				};
+		  })
+		: [];
+	const payouts = paymentBlock
+		? Array.from(
+				paymentBlock.matchAll(
+					/\bYour\s+payout\s*((?:(?:[A-Z]{3}|US\$|\$)\s*)?[0-9][0-9,.]*)(?:\s*[x×*]\s*(\d+))?/gi
+				)
+		  ).map((match) => {
+				const parsed = parseMoney(match[1] || "");
+				const multiplier = Number(match[2] || 1);
+				return {
+					...parsed,
+					amount: multiplyMoney2(parsed.amount, multiplier),
+				};
+		  })
+		: [];
+	// Trip sometimes prints the booking currency on only one of the adjacent
+	// payment-summary rows. Inherit it only when the whole bounded summary has
+	// exactly one explicit currency. Never infer from a locale or provider.
+	const explicitSummaryCurrencies = Array.from(
+		new Set(
+			[...finalRates, ...payouts]
+				.map((money) => normalizeMoneyCurrency(money.currency || ""))
+				.filter(Boolean)
+		)
+	);
+	const soleSummaryCurrency =
+		explicitSummaryCurrencies.length === 1
+			? explicitSummaryCurrencies[0]
+			: "";
+	const currencyBoundFinalRates = finalRates.map((money) => ({
+		...money,
+		currency:
+			normalizeMoneyCurrency(money.currency || "") || soleSummaryCurrency,
+	}));
+	const currencyBoundPayouts = payouts.map((money) => ({
+		...money,
+		currency:
+			normalizeMoneyCurrency(money.currency || "") || soleSummaryCurrency,
+	}));
+	const moneyKey = (money = {}) =>
+		Number(money.amount) > 0 && money.currency
+			? `${normalizeMoneyCurrency(money.currency)}:${round2(money.amount)}`
+			: "";
+	const uniqueFinalRates = Array.from(
+		new Map(
+			currencyBoundFinalRates.map((money) => [moneyKey(money), money])
+		).values()
+	).filter((money) => moneyKey(money));
+	const uniquePayouts = Array.from(
+		new Map(currencyBoundPayouts.map((money) => [moneyKey(money), money])).values()
+	).filter((money) => moneyKey(money));
+	const finalRate = uniqueFinalRates[0] || {};
+	const payout = uniquePayouts[0] || {};
+	const hotelName = cleanFieldValue(
+		findFirstPattern(source, [
+			/(?:^|\n)\s*([^\n]{2,120}\bHotel)\s*\n\s*Guest\s+Name\s*:/i,
+		])
+	);
+	const guestName = cleanFieldValue(
+		findNextLineAfterExactLabel(source, "Guest Name", 3)
+	);
+	const internalConflictFields = [];
+	if (distinctStays.length > 1) internalConflictFields.push("stay");
+	if (rooms.length > 1) internalConflictFields.push("roomName");
+	if (distinctRoomCounts.length > 1) internalConflictFields.push("roomCount");
+	if (new Set(declaredNights).size > 1) internalConflictFields.push("stayNights");
+	if (uniqueFinalRates.length > 1) internalConflictFields.push("guestGross");
+	if (uniquePayouts.length > 1) internalConflictFields.push("hotelPayout");
+	if (explicitSummaryCurrencies.length > 1) {
+		internalConflictFields.push("guestGross", "hotelPayout");
+	}
+	return {
+		hasStayLabel: /\bStaying\s+period\s*:/i.test(source),
+		hasRoomLabel: /\bRoom\s+Type\s*:/i.test(source),
+		hasOccupancyLabel: /\bGuests\s*\(estimated\)\s*:/i.test(source),
+		hasGrossLabel:
+			/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)/i.test(
+				paymentBlock
+			),
+		hasPayoutLabel: /\bYour\s+payout\b/i.test(paymentBlock),
+		hotelName,
+		guestName,
+		roomName: rooms.length === 1 ? rooms[0].roomName : "",
+		roomCount:
+			distinctRoomCounts.length === 1 ? distinctRoomCounts[0] : 0,
+		checkinDate: stay.checkinDate || null,
+		checkoutDate: stay.checkoutDate || null,
+		stayNights: Number(stay.stayNights || 0),
+		adults: Number(occupancy?.[1] || 0),
+		children: Number(occupancy?.[2] || 0),
+		finalRate,
+		payout,
+		internalConflictFields,
+	};
+}
+
+function analyzeDirectTripMimeFacts(email = {}) {
+	const representations = [email.text || "", htmlToText(email.html || "")]
+		.filter((value) => normalizeWhitespace(value));
+	const facts = representations.map(extractDirectTripMimeRepresentationFacts);
+	const conflictFields = facts.flatMap(
+		(item) => item.internalConflictFields || []
+	);
+	const addConflict = (field, values) => {
+		const canonical = values.filter(Boolean);
+		if (new Set(canonical).size > 1) conflictFields.push(field);
+	};
+	const moneyKey = (money = {}) =>
+		Number(money.amount) > 0 && money.currency
+			? `${normalizeMoneyCurrency(money.currency)}:${round2(money.amount)}`
+			: "";
+	addConflict(
+		"hotelName",
+		facts.map((item) =>
+			item.hotelName ? normalizeExplicitHotelFactValue(item.hotelName) : ""
+		)
+	);
+	addConflict(
+		"guestName",
+		facts.map((item) =>
+			item.guestName ? normalizeIntlComparable(item.guestName) : ""
+		)
+	);
+	addConflict(
+		"roomName",
+		facts.map((item) =>
+			item.roomName ? normalizeRoomSignalText(item.roomName) : ""
+		)
+	);
+	addConflict("roomCount", facts.map((item) => String(item.roomCount || "")));
+	addConflict("checkinDate", facts.map((item) => item.checkinDate || ""));
+	addConflict("checkoutDate", facts.map((item) => item.checkoutDate || ""));
+	addConflict("stayNights", facts.map((item) => String(item.stayNights || "")));
+	addConflict(
+		"occupancy",
+		facts.map((item) =>
+			item.hasOccupancyLabel
+				? `${Number(item.adults || 0)}:${Number(item.children || 0)}`
+				: ""
+		)
+	);
+	addConflict("guestGross", facts.map((item) => moneyKey(item.finalRate)));
+	addConflict("hotelPayout", facts.map((item) => moneyKey(item.payout)));
+	for (const [field, assertedField, value] of [
+		["stay", "hasStayLabel", (item) => item.checkinDate && item.checkoutDate],
+		["roomName", "hasRoomLabel", (item) => item.roomName && item.roomCount > 0],
+		["occupancy", "hasOccupancyLabel", (item) => item.adults > 0],
+		["guestGross", "hasGrossLabel", (item) => Boolean(moneyKey(item.finalRate))],
+		["hotelPayout", "hasPayoutLabel", (item) => Boolean(moneyKey(item.payout))],
+	]) {
+		if (facts.some((item) => item[assertedField] && !value(item))) {
+			conflictFields.push(field);
+		}
+	}
+	const uniqueConflictFields = Array.from(new Set(conflictFields));
+	return {
+		representations,
+		facts,
+		conflict: uniqueConflictFields.length > 0,
+		conflictFields: uniqueConflictFields,
+	};
+}
+
+function analyzeDirectTripNightlySourceRows(
 	text = "",
 	{
 		dateRange = [],
@@ -4113,46 +5516,67 @@ function extractDirectTripNightlySourceRows(
 		totalPayoutAmount = 0,
 	} = {}
 ) {
-	if (!dateRange.length || roomCount !== 1 || !currency) return [];
+	const empty = (conflict = false) => ({ rows: [], conflict });
+	if (!dateRange.length || roomCount < 1 || !currency) return empty();
 	const source = String(text || "").replace(/\r/g, "");
 	const detailsMarker = source.search(/\bRoom\s+rate\s*Price\s+details\b/i);
-	if (detailsMarker < 0) return [];
+	if (detailsMarker < 0) return empty();
 	const details = source
 		.slice(detailsMarker)
 		.split(/\bAdditional\s+Information\s*Type\s*Details\s*Rewards\b/i)[0];
 	const rowPattern =
 		/(?:^|\n)\s*([A-Za-z]{3,9}\s+\d{1,2})\s*\(\s*(\d+)\s+room\(s\)\s*\)([\s\S]*?)(?=(?:\n\s*[A-Za-z]{3,9}\s+\d{1,2}\s*\(\s*\d+\s+room\(s\)\s*\))|$)/gi;
-	const rows = Array.from(details.matchAll(rowPattern)).map((match) => {
+	const parsedRows = Array.from(details.matchAll(rowPattern)).map((match) => {
 		const block = match[3] || "";
-		const clientAmount = parseMoney(
-			findFirstPattern(block, [
-				/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*1)?/i,
-			])
-		).amount;
-		const payoutAmount = parseMoney(
-			findFirstPattern(block, [
-				/\bYour\s+payout\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*1)?/i,
-			])
-		).amount;
+		const clientMatch = block.match(
+			/\bFinal\s+room\s+rate\s*\(incl\.\s*taxes\s+and\s+fees\)\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*(\d+))?/i
+		);
+		const payoutMatch = block.match(
+			/\bYour\s+payout\s*(?:[A-Z]{3}|US\$|\$)?\s*([0-9][0-9,.]*)(?:\s*\*\s*(\d+))?/i
+		);
+		const clientUnitAmount = parseMoney(clientMatch?.[1] || "").amount;
+		const payoutUnitAmount = parseMoney(payoutMatch?.[1] || "").amount;
+		const clientMultiplier = Number(clientMatch?.[2] || 1);
+		const payoutMultiplier = Number(payoutMatch?.[2] || 1);
 		return {
 			label: normalizeWhitespace(match[1]).toLowerCase(),
 			roomCount: Number(match[2] || 0),
-			clientAmount,
-			payoutAmount,
+			clientMultiplier,
+			payoutMultiplier,
+			clientAmount: multiplyMoney2(clientUnitAmount, clientMultiplier),
+			payoutAmount: multiplyMoney2(payoutUnitAmount, payoutMultiplier),
 		};
 	});
-	if (rows.length !== dateRange.length) return [];
+	const rowsByLabel = new Map();
+	for (const row of parsedRows) {
+		const key = [
+			row.roomCount,
+			row.clientMultiplier,
+			row.payoutMultiplier,
+			row.clientAmount,
+			row.payoutAmount,
+		].join(":");
+		if (!rowsByLabel.has(row.label)) rowsByLabel.set(row.label, new Map());
+		rowsByLabel.get(row.label).set(key, row);
+	}
+	if ([...rowsByLabel.values()].some((variants) => variants.size !== 1)) {
+		return empty(true);
+	}
+	const rows = [...rowsByLabel.values()].map((variants) => variants.values().next().value);
+	if (rows.length !== dateRange.length) return empty(parsedRows.length > 0);
 	const valid = rows.every((row, index) => {
 		const expectedLabel = dayjs(dateRange[index]).format("MMM D").toLowerCase();
 		return (
 			row.label === expectedLabel &&
-			row.roomCount === 1 &&
+			row.roomCount === roomCount &&
+			row.clientMultiplier === roomCount &&
+			row.payoutMultiplier === roomCount &&
 			row.clientAmount > 0 &&
 			row.payoutAmount > 0 &&
 			row.payoutAmount <= row.clientAmount + 0.01
 		);
 	});
-	if (!valid) return [];
+	if (!valid) return empty(parsedRows.length > 0);
 	const clientSum = round2(
 		rows.reduce((sum, row) => sum + row.clientAmount, 0)
 	);
@@ -4163,14 +5587,17 @@ function extractDirectTripNightlySourceRows(
 		Math.abs(clientSum - Number(totalGuestAmount || 0)) > 0.01 ||
 		Math.abs(payoutSum - Number(totalPayoutAmount || 0)) > 0.01
 	) {
-		return [];
+		return empty(true);
 	}
-	return rows.map((row, index) => ({
-		date: dateRange[index],
-		clientAmount: row.clientAmount,
-		payoutAmount: row.payoutAmount,
-		currency,
-	}));
+	return {
+		rows: rows.map((row, index) => ({
+			date: dateRange[index],
+			clientAmount: row.clientAmount,
+			payoutAmount: row.payoutAmount,
+			currency,
+		})),
+		conflict: false,
+	};
 }
 
 function convertDirectTripNightlyPricing(
@@ -4218,6 +5645,7 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 		) &&
 		/\bYour\s+payout(?=\s|[A-Z]{3}|US\$|\$|[0-9])/i.test(source);
 	if (!templateMatched) return {};
+	const mimeAnalysis = analyzeDirectTripMimeFacts(email);
 
 	const confirmationNumbers = extractDirectTripConfirmationNumbers(source);
 	const confirmationNumberConflict = confirmationNumbers.length > 1;
@@ -4335,15 +5763,67 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 		guestConversion.exchangeRateToSar === undefined
 			? null
 			: Number(guestConversion.exchangeRateToSar);
-	const nightlyPricingSource = pricingIsConsistent
-		? extractDirectTripNightlySourceRows(text, {
-				dateRange: generateDateRange(checkinDate, checkoutDate),
-				roomCount,
-				currency,
-				totalGuestAmount: finalRate.amount,
-				totalPayoutAmount: payout.amount,
-		  })
+	const directTripNightlyRepresentations = [
+		...(mimeAnalysis.representations || []),
+	];
+	if (!directTripNightlyRepresentations.length) {
+		directTripNightlyRepresentations.push(text);
+	}
+	const nightlyPricingAnalyses = pricingIsConsistent
+		? directTripNightlyRepresentations.map((representation, index) => {
+				const representationFacts = mimeAnalysis.facts?.[index] || {};
+				const representationFinalRate = representationFacts.finalRate || finalRate;
+				const representationPayout = representationFacts.payout || payout;
+				const representationFinalCurrency = normalizeMoneyCurrency(
+					representationFinalRate.currency || currency
+				);
+				const representationPayoutCurrency = normalizeMoneyCurrency(
+					representationPayout.currency || currency
+				);
+				const representationCurrency =
+					representationFinalCurrency === representationPayoutCurrency
+						? representationFinalCurrency
+						: "";
+				return analyzeDirectTripNightlySourceRows(representation, {
+					dateRange: generateDateRange(
+						representationFacts.checkinDate || checkinDate,
+						representationFacts.checkoutDate || checkoutDate
+					),
+					roomCount: representationFacts.roomCount || roomCount,
+					currency: representationCurrency || currency,
+					totalGuestAmount:
+						representationFinalRate.amount || finalRate.amount,
+					totalPayoutAmount:
+						representationPayout.amount || payout.amount,
+				});
+			  })
 		: [];
+	const nightlyPricingKeys = new Set(
+		nightlyPricingAnalyses
+			.filter((analysis) => analysis.rows.length > 0)
+			.map((analysis) => JSON.stringify(analysis.rows))
+	);
+	const hasParsedNightlyMirror = nightlyPricingAnalyses.some(
+		(analysis) => analysis.rows.length > 0
+	);
+	const unparsedNightlyMirrorConflict = !!(
+		hasParsedNightlyMirror &&
+		nightlyPricingAnalyses.some(
+			(analysis, index) =>
+				analysis.rows.length === 0 &&
+				/\bRoom\s+rate\s*Price\s+details\b/i.test(
+					directTripNightlyRepresentations[index] || ""
+				)
+		)
+	);
+	const nightlyPricingConflict = !!(
+		nightlyPricingAnalyses.some((analysis) => analysis.conflict === true) ||
+		unparsedNightlyMirrorConflict ||
+		nightlyPricingKeys.size > 1
+	);
+	const nightlyPricingSource = nightlyPricingConflict
+		? []
+		: nightlyPricingAnalyses.find((analysis) => analysis.rows.length > 0)?.rows || [];
 	const nightlyPricingSar = convertDirectTripNightlyPricing(
 		nightlyPricingSource,
 		{
@@ -4368,6 +5848,9 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 
 	return {
 		templateMatched: true,
+		mimeConflict: mimeAnalysis.conflict === true,
+		mimeConflictFields: mimeAnalysis.conflictFields || [],
+		singleRoomBlock: uniqueRoomBlocks.length === 1,
 		confirmationNumber,
 		confirmationNumberConflict,
 		pricingCurrencyConflict,
@@ -4414,6 +5897,7 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 		pricingIsConsistent,
 		nightlyPricingSource,
 		nightlyPricingSar,
+		nightlyPricingConflict,
 		multipleRoomBlocks: uniqueRoomBlocks.length > 1,
 	};
 }
@@ -5730,6 +7214,16 @@ function extractHotelRunnerConfirmationNumber(text = "") {
 }
 
 function extractNormalizedReservation(email) {
+	const otaInboundRawRepresentationResourceLimitExceeded = !!(
+		email?.otaInboundParserResourceLimitExceeded === true ||
+		otaInboundEmailResourceLimitExceeded(email)
+	);
+	if (otaInboundRawRepresentationResourceLimitExceeded) {
+		// Do not feed a large trusted OTA representation through any HTML, MIME,
+		// repeated-fact, or commercial parser. The subject and sender remain usable
+		// for a private audit identity, but the resource flag blocks all automation.
+		email = { ...email, text: "", html: "" };
+	}
 	const rawInboundText = `${email.subject || ""}\n${email.text || ""}\n${htmlToText(
 		email.html || ""
 	)}`;
@@ -5752,15 +7246,10 @@ function extractNormalizedReservation(email) {
 		senderAuthentication.authenticatedAligned === true &&
 		senderAuthentication.trustedProvider === trustedTransportProvider
 	);
-	const genericRepeatedFactConflictFields =
+	let genericRepeatedFactConflictFields =
 		sourceSenderAuthenticated && trustedTransportProvider !== "hotelrunner"
 			? detectGenericOtaRepeatedFactConflicts(rawInboundText)
 			: [];
-	const genericRepeatedFactConflictSet = new Set(
-		genericRepeatedFactConflictFields
-	);
-	const genericRepeatedFactConflict =
-		genericRepeatedFactConflictFields.length > 0;
 	const airbnbFields = extractAirbnbFields(email, text, provider);
 	const verifiedAirbnbCommissionEvidence = !!(
 		provider === "airbnb" &&
@@ -5788,6 +7277,25 @@ function extractNormalizedReservation(email) {
 		provider
 	);
 	const directTripFields = extractDirectTripFields(email, rawInboundText, provider);
+	if (
+		provider === "trip" &&
+		sourceSenderAuthenticated &&
+		directTripFields.templateMatched === true &&
+		directTripFields.singleRoomBlock === true &&
+		directTripFields.multipleRoomBlocks !== true
+	) {
+		// The dedicated Trip parser proves one structured room block. Text and HTML
+		// can wrap that same block differently, so only its generic room-name false
+		// conflict is suppressed; every other repeated-fact conflict remains fatal.
+		genericRepeatedFactConflictFields = genericRepeatedFactConflictFields.filter(
+			(field) => field !== "roomName"
+		);
+	}
+	const genericRepeatedFactConflictSet = new Set(
+		genericRepeatedFactConflictFields
+	);
+	const genericRepeatedFactConflict =
+		genericRepeatedFactConflictFields.length > 0;
 	const directTripExplicitConfirmationNumbers =
 		extractDirectTripConfirmationNumbers(rawInboundText);
 	const genericExplicitConfirmationNumbers =
@@ -5812,9 +7320,15 @@ function extractNormalizedReservation(email) {
 	const hotelRunnerIdentityEvidenceText = isHotelRunnerSender
 		? stripHotelRunnerGuestNoteBlocksForBookingSourceEvidence(rawInboundText)
 		: "";
-	const hotelRunnerArabicFields = isHotelRunnerSender
-		? extractHotelRunnerArabicFields(rawHotelRunnerText)
-		: {};
+	const hotelRunnerArabicAnalysis = isHotelRunnerSender
+		? analyzeHotelRunnerArabicFields(email, rawHotelRunnerText)
+		: { fields: {}, actionRequiredConflict: false };
+	const hotelRunnerArabicFields = hotelRunnerArabicAnalysis.fields || {};
+	const hotelRunnerArabicActionRequiredConflict =
+		hotelRunnerArabicAnalysis.actionRequiredConflict === true;
+	const hotelRunnerArabicActionResourceLimitExceeded =
+		otaInboundRawRepresentationResourceLimitExceeded ||
+		hotelRunnerArabicAnalysis.resourceLimitExceeded === true;
 	const hotelRunnerIdentityArabicFields = isHotelRunnerSender
 		? extractHotelRunnerArabicFields(hotelRunnerIdentityEvidenceText)
 		: {};
@@ -5838,17 +7352,24 @@ function extractNormalizedReservation(email) {
 		  )
 		: [];
 	const hotelRunnerConfirmationNumber = hotelRunnerConfirmationNumbers[0] || "";
-	const hotelRunnerRoomBlocks = isHotelRunnerSender
+	const hotelRunnerStructuredRoomBlocks = isHotelRunnerSender
 		? [
 				extractHotelRunnerRoomBlocks(email.text || ""),
 				extractHotelRunnerRoomBlocks(htmlToText(email.html || "")),
-				hotelRunnerArabicFields.roomBlocks || [],
 		  ].reduce(
 				(longest, blocks) =>
 					blocks.length > longest.length ? blocks : longest,
 				[]
 		  )
 		: [];
+	// The structured English parser can prove that repeated blocks are a single
+	// mirrored rendering when their per-block total equals the explicit order
+	// total. Prefer that proof when present; use the Arabic parser only when the
+	// structured grammar did not match at all. This never collapses two genuinely
+	// booked identical rooms whose combined order total differs from one block.
+	const hotelRunnerRoomBlocks = hotelRunnerStructuredRoomBlocks.length
+		? hotelRunnerStructuredRoomBlocks
+		: hotelRunnerArabicFields.roomBlocks || [];
 	const providerLabel = PROVIDER_LABELS[provider] || provider;
 	const eventType = detectEventType({ subject: email.subject, text });
 	const rawStatusToApply = detectStatusToApply({ subject: email.subject, text });
@@ -5858,7 +7379,12 @@ function extractNormalizedReservation(email) {
 	const warnings = [];
 	const errors = [];
 	const sourceField = isHotelRunnerSender
-		? extractExplicitHotelRunnerBookingSourceField(rawInboundText)
+		? firstNonEmpty(
+				extractExplicitHotelRunnerBookingSourceField(rawInboundText),
+				hotelRunnerArabicFields.actionRequiredTemplateMatched === true
+					? hotelRunnerArabicFields.channel
+					: ""
+		  )
 		: findField(text, [
 				"Booking source",
 				"Reservation source",
@@ -5881,14 +7407,19 @@ function extractNormalizedReservation(email) {
 		isHotelRunnerSender &&
 		hotelRunnerCommercialSourceProviders.length > 1
 	);
-	const bookingSource = resolveBookingSource({
-		provider,
-		providerLabel,
-		from: email.from,
-		subject: email.subject,
-		text,
-		explicitSource: sourceField,
-	});
+	const bookingSource =
+		isHotelRunnerSender &&
+		hotelRunnerArabicFields.actionRequiredTemplateMatched === true &&
+		normalizeWhitespace(hotelRunnerArabicFields.channel)
+			? normalizeWhitespace(hotelRunnerArabicFields.channel).slice(0, 80)
+			: resolveBookingSource({
+					provider,
+					providerLabel,
+					from: email.from,
+					subject: email.subject,
+					text,
+					explicitSource: sourceField,
+			  });
 	const bookingSourceIsSourceBacked = !!(
 		!hotelRunnerBookingSourceConflict &&
 		(normalizeWhitespace(sourceField) ||
@@ -6040,6 +7571,7 @@ function extractNormalizedReservation(email) {
 		airbnbFields.hotelName,
 		agodaFields.hotelName,
 		directTripFields.hotelName,
+		hotelRunnerArabicFields.hotelName,
 		provider === "airbnb" ? explicitHotelName : "",
 		provider === "airbnb" ? "" : extractProviderLogoHotelName(text, provider),
 		provider === "airbnb" ? "" : findHotelNameField(text),
@@ -6302,10 +7834,14 @@ function extractNormalizedReservation(email) {
 		"Booked\\s+Date",
 		"إجمالي\\s*الطلب",
 	]);
-	const guestNotes = firstNonEmpty(airbnbFields.guestNotes, findGuestNoteField(text));
+	const guestNotes = firstNonEmpty(
+		airbnbFields.guestNotes,
+		agodaFields.guestNotes,
+		provider === "agoda" ? "" : findGuestNoteField(text)
+	);
 	const guestPhone = firstNonEmpty(
 		agodaFields.guestPhone,
-		findField(text, [
+		provider === "agoda" ? "" : findField(text, [
 			"Guest phone",
 			"Phone",
 			"Telephone",
@@ -6526,6 +8062,16 @@ function extractNormalizedReservation(email) {
 			"Trip.com declared night counts conflict with the check-in/check-out date range."
 		);
 	}
+	if (directTripFields.nightlyPricingConflict) {
+		warnings.push(
+			"Trip.com nightly room-rate rows conflict across explicit source evidence; no automatic pricing was accepted."
+		);
+	}
+	if (directTripFields.mimeConflict) {
+		warnings.push(
+			"Trip.com email contains conflicting critical facts across text and HTML representations; automatic mutation is disabled."
+		);
+	}
 	if (airbnbFields.otaCommissionConflict === true) {
 		warnings.push(
 			"Airbnb email contains conflicting Host service fee amounts; OTA commission was left unverified."
@@ -6550,6 +8096,13 @@ function extractNormalizedReservation(email) {
 		hotelRunnerRoomBlocks.length > 1 ||
 		directTripFields.multipleRoomBlocks === true ||
 		agodaFields.multiRoomEvidence === true
+	);
+	const agodaEvidenceConflict = !!(
+		agodaFields.agodaPropertyIdConflict === true ||
+		agodaFields.specialRequestsConflict === true ||
+		agodaFields.guestPhoneConflict === true ||
+		agodaFields.otaDeductionConflict === true ||
+		agodaFields.agodaMimeConflict === true
 	);
 
 	return {
@@ -6580,6 +8133,10 @@ function extractNormalizedReservation(email) {
 		airbnbListingTitle: airbnbFields.airbnbListingTitle || "",
 		airbnbMapping: airbnbFields.airbnbMapping || {},
 		roomName,
+		agodaPropertyId: agodaFields.agodaPropertyId || "",
+		agodaHomogeneousRoomQuantity:
+			agodaFields.homogeneousRoomQuantity === true,
+		agodaMimeConflictFields: agodaFields.agodaMimeConflictFields || [],
 		checkinDate,
 		checkoutDate,
 		bookedAt,
@@ -6646,6 +8203,7 @@ function extractNormalizedReservation(email) {
 		otaDeductionComponents: verifiedAgodaDeductionEvidence
 			? agodaFields.otaDeductionComponents || []
 			: [],
+		otaDeductionConflict: agodaFields.otaDeductionConflict === true,
 		targetedPromotionsLabelPresent:
 			verifiedAgodaDeductionEvidence &&
 			agodaFields.targetedPromotionsLabelPresent === true,
@@ -6672,15 +8230,22 @@ function extractNormalizedReservation(email) {
 			paymentInstructionField || paymentCollectionModel,
 			500
 		),
-		requiresManualReview:
+			requiresManualReview:
 			genericRepeatedFactConflict ||
 			ambiguousMultiRoomEvidence ||
+			agodaEvidenceConflict ||
+			otaInboundRawRepresentationResourceLimitExceeded ||
+			(hotelRunnerArabicActionResourceLimitExceeded &&
+				!otaInboundRawRepresentationResourceLimitExceeded) ||
+			hotelRunnerArabicActionRequiredConflict ||
 			hotelRunnerBookingSourceConflict ||
 			otaIdentityConflict ||
 			directTripFields.pricingCurrencyConflict === true ||
 			directTripFields.roomCountConflict === true ||
-			directTripFields.stayNightConflict === true ||
-			Number(agodaFields.referenceSellRateOccurrences || 0) > 1,
+				directTripFields.stayNightConflict === true ||
+				directTripFields.nightlyPricingConflict === true ||
+				directTripFields.mimeConflict === true ||
+				Number(agodaFields.referenceSellRateOccurrences || 0) > 1,
 		ambiguousMultiRoomEvidence,
 		manualReviewReasons:
 			[
@@ -6741,10 +8306,53 @@ function extractNormalizedReservation(email) {
 							"Trip.com declared night counts do not reconcile with the stay dates; automatic reservation mutation is disabled.",
 					  ]
 					: []),
+				...(directTripFields.nightlyPricingConflict === true
+					? [
+							"Trip.com nightly room-rate rows conflict across mirrored representations or with the booking totals; automatic pricing and reservation mutation are disabled.",
+					  ]
+					: []),
+				...(directTripFields.mimeConflict === true
+					? [
+							`Trip.com email contains conflicting or malformed critical facts across text and HTML representations (${(
+								directTripFields.mimeConflictFields || []
+							).join(", ")}); automatic mutation is disabled.`,
+					  ]
+					: []),
 				...(Number(agodaFields.referenceSellRateOccurrences || 0) > 1
 					? [
 							"Agoda email contains multiple reference sell-rate rows; automatic aggregation is disabled and the booking requires pricing review.",
 					  ]
+					: []),
+				...(agodaFields.agodaPropertyIdConflict === true
+					? ["Agoda email contains conflicting Property ID values; automatic hotel and reservation mutation is disabled."]
+					: []),
+				...(agodaFields.specialRequestsConflict === true
+					? ["Agoda email contains conflicting special-request values across message representations; automatic mutation is disabled."]
+					: []),
+				...(agodaFields.guestPhoneConflict === true
+					? ["Agoda email contains conflicting bounded guest-phone values; automatic mutation is disabled."]
+					: []),
+				...(agodaFields.otaDeductionConflict === true
+					? [
+							"Agoda email contains conflicting deduction amounts or currencies across source evidence; automatic mutation is disabled.",
+					  ]
+					: []),
+				...(agodaFields.agodaMimeConflict === true
+					? [
+							`Agoda email contains conflicting critical facts across text and HTML representations (${(
+								agodaFields.agodaMimeConflictFields || []
+							).join(", ")}); automatic mutation is disabled.`,
+					  ]
+					: []),
+				...(hotelRunnerArabicActionRequiredConflict
+					? ["HotelRunner Arabic action-required message contains conflicting identity, stay, room, occupancy, or commercial facts across representations; automatic mutation is disabled."]
+					: []),
+				...(otaInboundRawRepresentationResourceLimitExceeded
+					? ["OTA inbound email exceeded the bounded parser input budget; automatic reservation lookup, creation, and mutation are disabled."]
+					: []),
+				...(hotelRunnerArabicActionResourceLimitExceeded &&
+				!otaInboundRawRepresentationResourceLimitExceeded
+					? ["HotelRunner Arabic action-required message exceeded the bounded parser analysis budget; automatic reservation lookup, creation, and mutation are disabled."]
 					: []),
 				...(agodaFields.multiRoomEvidence === true
 					? [AGODA_MULTI_ROOM_ALLOCATION_REVIEW_REASON]
@@ -6818,6 +8426,7 @@ function extractNormalizedReservation(email) {
 				!genericRepeatedFactConflictSet.has("guestName") && !!guestName,
 			guestEmail: !!guestEmail,
 			guestPhone: !!guestPhone,
+			agodaPropertyId: agodaFields.sourcePresence?.agodaPropertyId === true,
 			nationality: !!nationality,
 			comment: !!guestNotes,
 			guestNotes: !!guestNotes,
@@ -6857,8 +8466,18 @@ function extractNormalizedReservation(email) {
 			senderAuthentication,
 		},
 		directTripTemplateMatched: directTripFields.templateMatched === true,
+		directTripNightlyPricingConflict:
+			directTripFields.nightlyPricingConflict === true,
+		directTripMimeConflictFields:
+			directTripFields.mimeConflictFields || [],
 		directTripLifecycleTemplateMatched,
 		hotelRunnerTripRelayEvidence,
+		hotelRunnerArabicActionRequiredTemplateMatched:
+			hotelRunnerArabicFields.actionRequiredTemplateMatched === true,
+		hotelRunnerArabicActionRequiredConflict,
+		hotelRunnerArabicActionResourceLimitExceeded,
+		otaInboundParserResourceLimitExceeded:
+			otaInboundRawRepresentationResourceLimitExceeded,
 		hotelRunnerBookingSourceConflict,
 		hotelRunnerCommercialSourceProviders,
 		hotelRunnerNonTripIdentityConflict,
@@ -6873,11 +8492,18 @@ function extractNormalizedReservation(email) {
 		blocksUnmappedReservationCreation: !!(
 			genericRepeatedFactConflict ||
 			ambiguousMultiRoomEvidence ||
+			agodaEvidenceConflict ||
+			otaInboundRawRepresentationResourceLimitExceeded ||
+			(hotelRunnerArabicActionResourceLimitExceeded &&
+				!otaInboundRawRepresentationResourceLimitExceeded) ||
+			hotelRunnerArabicActionRequiredConflict ||
 			hotelRunnerBookingSourceConflict ||
 			otaIdentityConflict ||
 			directTripFields.pricingCurrencyConflict ||
 			directTripFields.roomCountConflict ||
-			directTripFields.stayNightConflict
+			directTripFields.stayNightConflict ||
+			directTripFields.nightlyPricingConflict ||
+			directTripFields.mimeConflict
 		),
 		warnings,
 		errors,
@@ -8437,62 +10063,62 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 		normalizeComparable(normalized.trustedTransportProvider || "") ===
 			"airbnb" &&
 		normalized.sourceSenderAuthenticated === true;
-	const usesSourceNightlyGross =
-		roomCount === 1 &&
-		nightlyPricingSar.length === dateRange.length &&
-		nightlyPricingSar.every(
-			(row, index) =>
-				row?.date === dateRange[index] &&
-				Number(row.clientAmountSar || 0) > 0
-		) &&
-		hasVerifiedGuestGross &&
-		Math.abs(
-			round2(
-				nightlyPricingSar.reduce(
-					(sum, row) => sum + Number(row.clientAmountSar || 0),
-					0
-				)
-			) - totalAmountSar
-		) <= 0.01;
-	const usesSourceNightlyPayout =
-		roomCount === 1 &&
-		nightlyPricingSar.length === dateRange.length &&
-		nightlyPricingSar.every(
-			(row, index) =>
-				row?.date === dateRange[index] &&
-				Number(row.payoutAmountSar || 0) > 0 &&
-				(!hasVerifiedGuestGross ||
-					Number(row.payoutAmountSar) <=
-						Number(row.clientAmountSar || Number.POSITIVE_INFINITY) + 0.01)
-		) &&
-		hasVerifiedPayout &&
-		Math.abs(
-			round2(
-				nightlyPricingSar.reduce(
-					(sum, row) => sum + Number(row.payoutAmountSar || 0),
-					0
-				)
-			) - totalPayoutSar
-		) <= 0.01;
+	const sourceNightlyGrossSlots = hasVerifiedGuestGross
+		? allocateSourceNightlyAcrossRoomMajorSlots({
+				rows: nightlyPricingSar,
+				dateRange,
+				roomCount,
+				field: "clientAmountSar",
+				total: totalAmountSar,
+		  })
+		: [];
+	const sourceNightlyPayoutSlots = hasVerifiedPayout
+		? allocateSourceNightlyAcrossRoomMajorSlots({
+				rows: nightlyPricingSar,
+				dateRange,
+				roomCount,
+				field: "payoutAmountSar",
+				total: totalPayoutSar,
+		  })
+		: [];
+	const hasSourceNightlyGross =
+		sourceNightlyGrossSlots.length === daysOfResidence * roomCount;
+	const hasSourceNightlyPayout =
+		sourceNightlyPayoutSlots.length === daysOfResidence * roomCount;
+	const hasCoherentSourceNightlyPair = !!(
+		hasSourceNightlyGross &&
+		hasSourceNightlyPayout &&
+		sourceNightlyPayoutSlots.every(
+			(value, index) =>
+				Math.round(Number(value) * 100) <=
+				Math.round(Number(sourceNightlyGrossSlots[index]) * 100)
+		)
+	);
+	// When both commercial totals are known, their per-night distributions are
+	// one atomic fact. Mixing a source payout curve with an equal/fallback gross
+	// curve can make daily payout exceed gross and corrupt the expense total.
+	const usesSourceNightlyGross = hasVerifiedPayout
+		? hasCoherentSourceNightlyPair
+		: hasSourceNightlyGross;
+	const usesSourceNightlyPayout = hasVerifiedGuestGross
+		? hasCoherentSourceNightlyPair
+		: hasSourceNightlyPayout;
 	const slotPrices = usesSourceNightlyGross
-		? nightlyPricingSar.map((row) => round2(row.clientAmountSar))
+		? sourceNightlyGrossSlots
 		: hasVerifiedGuestGross
 			? allocateAmountAcrossSlots(
 					totalAmountSar,
 					daysOfResidence * roomCount
 			  )
 			: Array(daysOfResidence * roomCount).fill(null);
-	const netAfterExpensesSlots = hasVerifiedPayout
+	const netAfterExpensesSlots = usesSourceNightlyPayout
+		? sourceNightlyPayoutSlots
+		: hasVerifiedPayout
 		? allocateAmountAcrossSlots(
 				totalPayoutSar,
 				daysOfResidence * roomCount
 		  )
 		: Array(daysOfResidence * roomCount).fill(null);
-	if (usesSourceNightlyPayout) {
-		nightlyPricingSar.forEach((row, index) => {
-			netAfterExpensesSlots[index] = round2(row.payoutAmountSar);
-		});
-	}
 	let slotIndex = 0;
 	let sumRootPriceAllRooms = 0;
 	let sumTotalPriceAllRooms = 0;
@@ -8607,6 +10233,20 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 		hasVerifiedPayout && allRootPricesKnown
 			? round2(sumPlatformMarginAllRooms)
 			: null;
+	const materializedShape = validateMaterializedOtaRoomQuantityShape({
+		rooms: pickedRoomsType,
+		roomCount,
+		dateRange,
+		guestTotal: hasVerifiedGuestGross ? totalAmountSar : null,
+		payoutTotal: hasVerifiedPayout ? totalPayoutSar : null,
+	});
+	if (!materializedShape.ok) {
+		return {
+			ok: false,
+			code: "OTA_INBOUND_ROOM_QUANTITY_SHAPE_INVALID",
+			error: `Inbound OTA room quantity could not be materialized safely: ${materializedShape.reason}.`,
+		};
+	}
 
 	return {
 		ok: true,
@@ -8682,6 +10322,8 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 		normalized,
 		{ propertyCurrency }
 	);
+	const datedRecoveryConversionEvidence =
+		validatedDatedRecoveryConversionEvidence(normalized);
 	const normalizedForPricing = {
 		...normalized,
 		propertyCurrency,
@@ -8905,11 +10547,16 @@ function buildReservationDocument(normalized, hotelDetails, options = {}) {
 			supplierData: {
 				supplierName: providerLabel,
 				...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
+				...(datedRecoveryConversionEvidence
+					? { datedRecoveryConversionEvidence }
+					: {}),
 				suppliedBookingNo: normalized.reservationId,
 				otaConfirmationNumber: normalized.confirmationNumber,
 				platformConfirmationNumber: normalized.confirmationNumber,
 				otaAutomationPipeline: automationPipeline,
 				otaProvider: normalized.provider,
+				otaPropertyId: normalized.agodaPropertyId || "",
+				agodaPropertyId: normalized.agodaPropertyId || "",
 				otaSourceAuthority: otaSourceAuthority(normalized),
 				otaHotelName: normalized.hotelName || "",
 				otaRoomName: normalized.roomName || "",
@@ -14301,6 +15948,13 @@ function requiredNewReservationMissing(normalized = {}) {
 }
 
 async function applyLiveSarConversion(normalized = {}, conversionOptions = {}) {
+	if (normalized?.otaInboundParserResourceLimitExceeded === true) {
+		return {
+			...normalized,
+			warnings: [...(normalized.warnings || [])],
+			errors: [...(normalized.errors || [])],
+		};
+	}
 	const next = {
 		...normalized,
 		warnings: [...(normalized.warnings || [])],
@@ -15837,6 +17491,7 @@ async function createUnmappedOtaReviewReservation({
 	allowCreate = false,
 	resolvedHotel = null,
 	hotelRunnerFirstFallbackBoundary = null,
+	beforeCreateInsert = null,
 } = {}) {
 	const crossTransportIdentityKey = buildOtaCrossTransportIdentityKey(
 		normalized,
@@ -16010,6 +17665,13 @@ async function createUnmappedOtaReviewReservation({
 						hotelRunnerFirstFallbackBoundary
 					);
 			}
+			if (typeof beforeCreateInsert === "function") {
+				await beforeCreateInsert({
+					reservationData: document,
+					inventoryValidation: null,
+					mapped: false,
+				});
+			}
 			created = await Reservations.create(document);
 			if (hotelRunnerFirstFallbackBoundary) {
 				await commitHotelRunnerFirstFallbackCreation(
@@ -16135,6 +17797,10 @@ async function createUnmappedOtaReviewReservation({
 }
 
 async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
+	const beforeCreateInsert =
+		typeof options?.beforeCreateInsert === "function"
+			? options.beforeCreateInsert
+			: null;
 	const fallbackBoundarySupplied = Boolean(
 		options?.hotelRunnerFirstFallbackBoundary
 	);
@@ -16226,7 +17892,22 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			matchedReservationBy: [],
 		};
 	}
-	const normalized = await applyLiveSarConversion(inputNormalized || {});
+	// One closed-scope 2026-08-13 recovery may replay an immutable historical
+	// exchange tuple without network access. A caller-controlled boolean cannot
+	// bypass conversion: the full boundary is recomputed and hash-checked against
+	// the exact authenticated archive before any reservation lookup or mutation.
+	const normalized = Object.prototype.hasOwnProperty.call(
+		options || {},
+		"datedRecoveryConversionBoundary"
+	)
+		? applyDatedRecoveryConversionBoundary(
+				inputNormalized || {},
+				options.datedRecoveryConversionBoundary
+		  )
+		: await applyLiveSarConversion(
+				inputNormalized || {},
+				options?.sarConversionOptions || {}
+		  );
 	const warnings = [...(normalized.warnings || [])];
 	const errors = [...(normalized.errors || [])];
 	const unresolvedSourceBackedHotelResult = (
@@ -16482,6 +18163,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 				allowCreate: true,
 				resolvedHotel: manuallyResolvedSourceHotel,
 				hotelRunnerFirstFallbackBoundary,
+				beforeCreateInsert,
 			});
 		}
 		return {
@@ -17301,6 +18983,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			allowCreate: hotelOnlyMissing,
 			resolvedHotel: hotelRunnerFirstFallbackResolvedHotel,
 			hotelRunnerFirstFallbackBoundary,
+			beforeCreateInsert,
 		});
 	}
 
@@ -17367,6 +19050,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			allowCreate: true,
 			resolvedHotel: hotelRunnerFirstFallbackResolvedHotel,
 			hotelRunnerFirstFallbackBoundary,
+			beforeCreateInsert,
 		});
 	}
 	if (existing && normalized.authoritativeExistingRefresh === true) {
@@ -17486,6 +19170,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			allowCreate: true,
 			resolvedHotel: hotelDetails,
 			hotelRunnerFirstFallbackBoundary,
+			beforeCreateInsert,
 		});
 	}
 
@@ -17675,6 +19360,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			allowCreate: true,
 			resolvedHotel: hotelDetails,
 			hotelRunnerFirstFallbackBoundary,
+			beforeCreateInsert,
 		});
 	}
 	(built.warnings || []).forEach((warning) => {
@@ -17752,6 +19438,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			allowCreate: true,
 			resolvedHotel: hotelDetails,
 			hotelRunnerFirstFallbackBoundary,
+			beforeCreateInsert,
 		});
 	}
 	if (existing && normalized.authoritativeExistingRefresh === true) {
@@ -17962,17 +19649,24 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 				normalized.source?.from === "expedia-sync"
 					? "ota_sync_create"
 					: "ota_email_create",
-				hotelRunnerFirstFallbackBoundary
-					? {
-							beforeInsert: async ({ reservationData }) => {
-								creationAuthorization =
-									await authorizeAndStampHotelRunnerFirstFallbackCreation(
-										reservationData,
-										hotelRunnerFirstFallbackBoundary
-									);
-							},
-						  }
-					: {}
+				{
+					beforeInsert: async ({ reservationData, inventoryValidation }) => {
+						if (hotelRunnerFirstFallbackBoundary) {
+							creationAuthorization =
+								await authorizeAndStampHotelRunnerFirstFallbackCreation(
+									reservationData,
+									hotelRunnerFirstFallbackBoundary
+								);
+						}
+						if (beforeCreateInsert) {
+							await beforeCreateInsert({
+								reservationData,
+								inventoryValidation,
+								mapped: true,
+							});
+						}
+					},
+				}
 			);
 			if (hotelRunnerFirstFallbackBoundary) {
 				await commitHotelRunnerFirstFallbackCreation(
@@ -18236,14 +19930,60 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		dateRange.length ||
 		calculateDaysOfResidence(normalized.checkinDate, normalized.checkoutDate);
 	const slots = Math.max(1, dateRange.length * roomCount);
+	const nightlyPricingSar = Array.isArray(normalized.nightlyPricingSar)
+		? normalized.nightlyPricingSar
+		: [];
+	const sourceNightlyClientSlots =
+		totalAmountSar === null
+			? []
+			: allocateSourceNightlyAcrossRoomMajorSlots({
+					rows: nightlyPricingSar,
+					dateRange,
+					roomCount,
+					field: "clientAmountSar",
+					total: totalAmountSar,
+			  });
+	const sourceNightlyNetSlots =
+		netAfterExpensesTotal === null
+			? []
+			: allocateSourceNightlyAcrossRoomMajorSlots({
+					rows: nightlyPricingSar,
+					dateRange,
+					roomCount,
+					field: "payoutAmountSar",
+					total: netAfterExpensesTotal,
+			  });
+	const hasSourceNightlyClient = sourceNightlyClientSlots.length === slots;
+	const hasSourceNightlyNet = sourceNightlyNetSlots.length === slots;
+	const hasCoherentSourceNightlyPair = !!(
+		hasSourceNightlyClient &&
+		hasSourceNightlyNet &&
+		sourceNightlyNetSlots.every(
+			(value, index) =>
+				Math.round(Number(value) * 100) <=
+				Math.round(Number(sourceNightlyClientSlots[index]) * 100)
+		)
+	);
+	const useSourceNightlyClient =
+		netAfterExpensesTotal === null
+			? hasSourceNightlyClient
+			: hasCoherentSourceNightlyPair;
+	const useSourceNightlyNet =
+		totalAmountSar === null
+			? hasSourceNightlyNet
+			: hasCoherentSourceNightlyPair;
 	const clientSlots =
 		totalAmountSar === null
 			? Array(slots).fill(null)
-			: allocateAmountAcrossSlots(totalAmountSar, slots);
+			: useSourceNightlyClient
+				? sourceNightlyClientSlots
+				: allocateAmountAcrossSlots(totalAmountSar, slots);
 	const netSlots =
 		netAfterExpensesTotal === null
 			? Array(slots).fill(null)
-			: allocateAmountAcrossSlots(netAfterExpensesTotal, slots);
+			: useSourceNightlyNet
+				? sourceNightlyNetSlots
+				: allocateAmountAcrossSlots(netAfterExpensesTotal, slots);
 	let slotIndex = 0;
 	const roomDisplayName =
 		normalizeWhitespace(normalized.roomName || "") || "Unmapped OTA room";
@@ -18299,6 +20039,20 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			hotelShouldGet: 0,
 		};
 	});
+	const materializedShape = validateMaterializedOtaRoomQuantityShape({
+		rooms: pickedRoomsType,
+		roomCount,
+		dateRange,
+		guestTotal: totalAmountSar,
+		payoutTotal: netAfterExpensesTotal,
+	});
+	if (!materializedShape.ok) {
+		const error = new RangeError(
+			`Inbound OTA room quantity could not be materialized safely: ${materializedShape.reason}.`
+		);
+		error.code = "OTA_INBOUND_ROOM_QUANTITY_SHAPE_INVALID";
+		throw error;
+	}
 	const paymentMapping = resolvePaymentMapping(
 		normalized,
 		totalAmountSar,
@@ -18450,6 +20204,8 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			platformConfirmationNumber: normalized.confirmationNumber,
 			otaAutomationPipeline: automationPipeline,
 			otaProvider: normalized.provider,
+			otaPropertyId: normalized.agodaPropertyId || "",
+			agodaPropertyId: normalized.agodaPropertyId || "",
 			otaSourceAuthority: otaSourceAuthority(normalized),
 			otaHotelName: normalized.hotelName || "",
 			otaHotelNameSourceBacked: hasSourceField(normalized, "hotelName"),
@@ -18519,8 +20275,15 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 
 module.exports = {
 	PROVIDER_LABELS,
+	DATED_RECOVERY_CONVERSION_POLICY_DATE,
+	DATED_RECOVERY_CONVERSION_REPAIR_ID,
+	DATED_RECOVERY_TRIP_SCOPE,
 	MAX_OTA_INBOUND_ROOM_COUNT,
 	MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS,
+	MAX_HOTELRUNNER_ARABIC_ACTION_REPRESENTATION_BYTES,
+	MAX_OTA_INBOUND_RAW_REPRESENTATION_BYTES,
+	MAX_HOTELRUNNER_ARABIC_ACTION_LABEL_OCCURRENCES,
+	otaInboundEmailResourceLimitExceeded,
 	normalizeRow,
 	pick,
 	n,
@@ -18533,6 +20296,10 @@ module.exports = {
 	getSarConversionMeta,
 	getSarConversionMetaAsync,
 	applyLiveSarConversion,
+	applyDatedRecoveryConversionBoundary,
+	buildDatedRecoveryConversionBoundary,
+	datedRecoveryBoundaryHash,
+	validatedDatedRecoveryConversionEvidence,
 	htmlToText,
 	redactSensitive,
 	safeSnippet,

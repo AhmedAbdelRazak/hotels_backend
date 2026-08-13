@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the comprehensive xHotelPro OTA inbound coverage audit daily
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+AccuracySec=5min
+RandomizedDelaySec=5min
+Persistent=true
+Unit=xhotelpro-ota-inbound-coverage-full.service
+
+[Install]
+WantedBy=timers.target
