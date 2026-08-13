@@ -24,6 +24,7 @@ const {
 	expectedTripDatedRecoveryEvidence,
 	guestKeyHash,
 	hashObject,
+	historicalArchiveConversionTuple,
 	inventoryFingerprint,
 	loadedForbiddenHotelRunnerModules,
 	noNetworkSarConversionOptions,
@@ -565,6 +566,11 @@ test("applied audit idempotence requires the full dated recovery tuple", () => {
 		},
 	};
 	assert.equal(assertAppliedAuditState(target, audit), undefined);
+	assert.deepEqual(
+		historicalArchiveConversionTuple(target, audit),
+		expectedTripDatedRecoveryEvidence(target).historicalArchiveTuple,
+		"an applied audit must re-use only its hash-pinned historical tuple"
+	);
 	const tampered = structuredClone(audit);
 	tampered.reconciliation.directArchiveEvidence.textHash = "f".repeat(64);
 	assert.throws(() => assertAppliedAuditState(target, tampered), /evidence tuple changed/);
