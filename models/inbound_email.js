@@ -159,6 +159,18 @@ inboundEmailSchema.index(
 	}
 );
 inboundEmailSchema.index({ provider: 1, confirmationNumber: 1 });
+// Coverage monitoring admits authenticated new-reservation identities even when
+// the top-level provider/confirmation copy is only partially finalized.  This
+// narrow time index keeps that read-only transport/intent query bounded without
+// relying on fields whose absence is itself what the monitor must detect.
+inboundEmailSchema.index(
+	{
+		"senderAuthentication.authenticatedAligned": 1,
+		receivedAt: -1,
+		_id: -1,
+	},
+	{ name: "inbound_authenticated_received_at" },
+);
 inboundEmailSchema.index({ paymentCollectionModel: 1, receivedAt: -1 });
 inboundEmailSchema.index({ processingStatus: 1, receivedAt: -1 });
 inboundEmailSchema.index({ automationAction: 1, receivedAt: -1 });

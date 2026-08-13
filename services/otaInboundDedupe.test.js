@@ -159,7 +159,7 @@ test("startup readiness creates only the inbound dedupe index", async () => {
 	]);
 });
 
-test("only failed or stale in-flight claims can be reclaimed automatically", () => {
+test("failed, unlinked review, mapping, or stale in-flight claims can be reclaimed automatically", () => {
 	const now = Date.parse("2026-07-23T12:00:00.000Z");
 	assert.equal(
 		isReclaimableInboundClaim({ processingStatus: "failed" }, { now }),
@@ -185,7 +185,38 @@ test("only failed or stale in-flight claims can be reclaimed automatically", () 
 		),
 		false,
 	);
-	for (const processingStatus of ["needs_review", "needs_mapping", "created"]) {
+	for (const processingStatus of ["needs_review", "needs_mapping"]) {
+		assert.equal(
+			isReclaimableInboundClaim({ processingStatus }, { now }),
+			true,
+			processingStatus,
+		);
+		assert.equal(
+			isReclaimableInboundClaim(
+				{ processingStatus, reservationMongoId: "linked-reservation" },
+				{ now },
+			),
+			false,
+			`${processingStatus} linked`,
+		);
+		assert.equal(
+			isReclaimableInboundClaim(
+				{ processingStatus, hasReservationConnection: true },
+				{ now },
+			),
+			false,
+			`${processingStatus} connection marker`,
+		);
+		assert.equal(
+			isReclaimableInboundClaim(
+				{ processingStatus, reconciliation: { reservationId: "linked" } },
+				{ now },
+			),
+			false,
+			`${processingStatus} reconciliation link`,
+		);
+	}
+	for (const processingStatus of ["created", "updated", "duplicate_reservation"]) {
 		assert.equal(
 			isReclaimableInboundClaim({ processingStatus }, { now }),
 			false,

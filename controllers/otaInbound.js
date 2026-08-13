@@ -11,6 +11,7 @@ const {
 	safeSnippet,
 	normalizeWhitespace,
 	evaluateTrustedSenderAuthentication,
+	extractNormalizedReservation,
 	resolveHotel,
 } = require("../services/otaReservationMapper");
 const {
@@ -61,6 +62,14 @@ try {
 }
 
 const ObjectId = mongoose.Types.ObjectId;
+
+// Raw MIME includes base64 attachment payloads, so its pre-parser ceiling must
+// be materially higher than the 256 KiB trusted text/HTML representation
+// ceiling enforced by otaReservationMapper. 16 MiB still accommodates one
+// ordinary 10 MiB attachment after base64 expansion while preventing the
+// multipart field's 25 MiB maximum from reaching mailparser unchecked.
+const RAW_MIME_PREPARSER_MAX_BYTES = 16 * 1024 * 1024;
+const RAW_MIME_HEADER_SCAN_MAX_BYTES = 64 * 1024;
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -221,6 +230,41 @@ const getRawMimeBodyFallback = (raw = "") => {
 	return normalizeWhitespace(body || text);
 };
 
+const rawMimeByteLength = (raw = "") =>
+	Buffer.isBuffer(raw)
+		? raw.length
+		: Buffer.byteLength(String(raw || ""), "utf8");
+
+const boundedRawMimeHeaderBlock = (raw = "") => {
+	const prefix = Buffer.isBuffer(raw)
+		? raw
+				.subarray(0, Math.min(raw.length, RAW_MIME_HEADER_SCAN_MAX_BYTES))
+				.toString("utf8")
+		: Buffer.from(
+				String(raw || "").slice(0, RAW_MIME_HEADER_SCAN_MAX_BYTES),
+				"utf8"
+			)
+				.subarray(0, RAW_MIME_HEADER_SCAN_MAX_BYTES)
+				.toString("utf8");
+	const separator = prefix.search(/\r?\n\r?\n/);
+	const headerBlock = separator >= 0 ? prefix.slice(0, separator) : prefix;
+	// RFC 5322 folding is bounded to the header window before unfolding.
+	return headerBlock.replace(/\r?\n[ \t]+/g, " ");
+};
+
+const boundedInboundHeader = (value = "", maxLength = 4096) =>
+	normalizeWhitespace(String(value || "").slice(0, maxLength * 4)).slice(
+		0,
+		maxLength
+	);
+
+const boundedRawMimeAuthenticationBody = (body = {}, boundedHeaders = "") => ({
+	SPF: boundedInboundHeader(body.SPF ?? body.spf ?? "", 4096),
+	dkim: boundedInboundHeader(body.dkim ?? body.DKIM ?? "", 16384),
+	envelope: String(body.envelope || "").slice(0, 64 * 1024),
+	headers: String(body.headers || boundedHeaders || "").slice(0, 64 * 1024),
+});
+
 const validInboundMessageDate = (value, receivedAt = new Date()) => {
 	if (!value) return null;
 	const parsed = value instanceof Date ? new Date(value) : new Date(String(value));
@@ -260,11 +304,60 @@ const withSendGridSenderAuthentication = (email = {}, body = {}) => {
 	};
 };
 
-const parseSendGridPayload = async (body = {}, files = []) => {
+const parseSendGridPayload = async (
+	body = {},
+	files = [],
+	{ mimeParser = simpleParser } = {}
+) => {
 	const rawMime = body.email || body.raw || body.mime || body.rawEmail || "";
 	if (rawMime) {
-		if (simpleParser) {
-			const parsed = await simpleParser(rawMime);
+		const rawBytes = rawMimeByteLength(rawMime);
+		if (rawBytes > RAW_MIME_PREPARSER_MAX_BYTES) {
+			const boundedHeaders = boundedRawMimeHeaderBlock(rawMime);
+			const boundedAuthenticationBody = boundedRawMimeAuthenticationBody(
+				body,
+				boundedHeaders
+			);
+			// Deliberately do not call mailparser or the raw-body fallback here. Only
+			// bounded transport headers survive so authentication, dedupe/audit, and
+			// coverage can still identify the delivery without parsing its body.
+			return withSendGridSenderAuthentication({
+				from: boundedInboundHeader(
+					body.from || getMimeHeader(boundedHeaders, "from")
+				),
+				to: boundedInboundHeader(
+					body.to || getMimeHeader(boundedHeaders, "to")
+				),
+				cc: "",
+				bcc: "",
+				subject: boundedInboundHeader(
+					body.subject || getMimeHeader(boundedHeaders, "subject")
+				),
+				text: "",
+				html: "",
+				messageId: boundedInboundHeader(
+					body.messageId ||
+						body["message-id"] ||
+						getMimeHeader(boundedHeaders, "message-id") ||
+						getHeaderMessageId(boundedAuthenticationBody.headers),
+					1024
+				),
+				date: boundedInboundHeader(
+					body.date ||
+						getMimeHeader(boundedHeaders, "date") ||
+						getMimeHeader(boundedAuthenticationBody.headers, "date"),
+					256
+				),
+				rawHash: hashText(rawMime),
+				hasRawMime: true,
+				rawMimeByteLength: rawBytes,
+				rawMimePreparserMaxBytes: RAW_MIME_PREPARSER_MAX_BYTES,
+				otaInboundParserResourceLimitExceeded: true,
+				attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
+			}, boundedAuthenticationBody);
+		}
+		if (mimeParser) {
+			const parsed = await mimeParser(rawMime);
 			const attachments = [
 				...(Array.isArray(parsed.attachments)
 					? parsed.attachments.map(fileMetadata)
@@ -335,9 +428,10 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 };
 
 exports.parseSendGridPayload = parseSendGridPayload;
+exports.RAW_MIME_PREPARSER_MAX_BYTES = RAW_MIME_PREPARSER_MAX_BYTES;
 
 const duplicateRecordSelection =
-	"_id processingStatus receivedAt dedupeKey reservationMongoId hotelId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel";
+	"_id processingStatus receivedAt dedupeKey reservationMongoId hotelId hasReservationConnection reconciliation.reservationId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel";
 
 const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (!emailHash && !messageId) return null;
@@ -376,6 +470,12 @@ const releaseReclaimableClaim = async (record = {}, dedupeKey = "") => {
 			dedupeKey,
 			$or: [
 				{ processingStatus: "failed" },
+				{
+					processingStatus: { $in: ["needs_review", "needs_mapping"] },
+					reservationMongoId: null,
+					hasReservationConnection: { $ne: true },
+					"reconciliation.reservationId": null,
+				},
 				{ processingStatus: "received", receivedAt: { $lte: staleBefore } },
 			],
 		},
@@ -1167,6 +1267,77 @@ const emitReservationRefreshIfNeeded = async (req, reconciliation) => {
 	});
 };
 
+const archiveRawMimeParserResourceLimitInbound = async (req, email = {}) => {
+	const record = await createInboundEmailRecord(email);
+	const normalized = {
+		...extractNormalizedReservation({
+			...email,
+			text: "",
+			html: "",
+			otaInboundParserResourceLimitExceeded: true,
+		}),
+		otaInboundParserResourceLimitExceeded: true,
+		inboundEmailId: String(record._id),
+	};
+	const resourceLimitMessage =
+		"Raw MIME exceeded the bounded pre-parser budget; body parsing and all reservation lookup or mutation were disabled.";
+	const reconciliation = {
+		status: "needs_review",
+		actionTaken: "skipped",
+		skipReason: "ota_inbound_parser_resource_limit",
+		automationComment: resourceLimitMessage,
+		warnings: [
+			...(normalized.warnings || []),
+			...(normalized.manualReviewReasons || []),
+		],
+		errors: [...(normalized.errors || []), resourceLimitMessage],
+		reservationId: null,
+		hotelId: null,
+		pmsConfirmationNumber: "",
+		matchedReservationBy: [],
+	};
+	const updated = await finalizeRecord(record._id, {
+		processingStatus: reconciliation.status,
+		provider: normalized.provider || "",
+		providerLabel: normalized.providerLabel || "",
+		intent: normalized.intent || "",
+		eventType: normalized.eventType || "",
+		confirmationNumber: normalized.confirmationNumber || "",
+		hotelName: normalized.hotelName || "",
+		roomName: "",
+		...buildInboundExtractionFields(normalized, reconciliation),
+		hotelId: null,
+		reservationMongoId: null,
+		normalizedReservation: normalized,
+		emailContext: {
+			rawMimeResourceLimitExceeded: true,
+			rawMimeByteLength: Number(email.rawMimeByteLength || 0),
+			rawMimePreparserMaxBytes: Number(
+				email.rawMimePreparserMaxBytes || RAW_MIME_PREPARSER_MAX_BYTES
+			),
+		},
+		orchestratorDecision: {
+			usedAI: false,
+			skipped: true,
+			skipReason: "ota_inbound_parser_resource_limit",
+			reason: resourceLimitMessage,
+		},
+		reconciliation,
+		parseWarnings: reconciliation.warnings,
+		parseErrors: reconciliation.errors,
+		reconcileWarnings: reconciliation.warnings,
+		reconcileErrors: reconciliation.errors,
+		safeSnippet: safeSnippet(email.subject || "", 800),
+	});
+	emitInboundEmailUpdated(req, updated || record, {
+		processingStatus: reconciliation.status,
+		provider: normalized.provider || "",
+		intent: normalized.intent || "",
+		confirmationNumber: normalized.confirmationNumber || "",
+	});
+	return { record, updated: updated || record, normalized, reconciliation };
+};
+
 exports.handleSendGridInbound = async (req, res) => {
 	let inboundRecord = null;
 	let parsedEmail = null;
@@ -1204,6 +1375,21 @@ exports.handleSendGridInbound = async (req, res) => {
 				size: attachment.size,
 			})),
 		});
+
+		if (email.otaInboundParserResourceLimitExceeded === true) {
+			const guarded = await archiveRawMimeParserResourceLimitInbound(req, email);
+			inboundRecord = guarded.updated;
+			logInbound("payload.raw_mime_resource_limit", {
+				inboundEmailId: String(guarded.record._id),
+				provider: guarded.normalized.provider || "",
+				intent: guarded.normalized.intent || "",
+				confirmationNumber: guarded.normalized.confirmationNumber || "",
+				rawMimeByteLength: Number(email.rawMimeByteLength || 0),
+				rawMimePreparserMaxBytes: RAW_MIME_PREPARSER_MAX_BYTES,
+				reservationAutomationSkipped: true,
+			});
+			return res.status(200).send("OK");
+		}
 
 		const preliminaryHash = email.hasRawMime ? email.rawHash : "";
 		const dedupeKey = buildInboundDedupeKey(email);

@@ -1,0 +1,51 @@
+[Unit]
+Description=xHotelPro comprehensive OTA inbound email coverage audit
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ahmedadmin
+Group=ahmedadmin
+WorkingDirectory=/home/ahmedadmin/Hotels/hotels_backend
+Environment=NODE_ENV=production
+Environment=OTA_COVERAGE_MONITOR_TIMEOUT_SECONDS=120
+Environment=OTA_COVERAGE_STATE_DIR=/var/lib/xhotelpro-ota-inbound-coverage
+ExecStartPre=/usr/bin/test -r /home/ahmedadmin/Hotels/hotels_backend/.env
+ExecStartPre=/usr/bin/test -r /home/ahmedadmin/Hotels/hotels_backend/scripts/ops/ota-inbound-coverage-monitor.sh
+ExecStartPre=/usr/bin/test -r /home/ahmedadmin/Hotels/hotels_backend/scripts/auditOtaInboundCoverage20260813.js
+ExecStart=/bin/bash /home/ahmedadmin/Hotels/hotels_backend/scripts/ops/ota-inbound-coverage-monitor.sh full
+TimeoutStartSec=150
+Restart=no
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=384M
+TasksMax=64
+StateDirectory=xhotelpro-ota-inbound-coverage
+StateDirectoryMode=0700
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xhotelpro-ota-inbound-coverage-full
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RemoveIPC=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

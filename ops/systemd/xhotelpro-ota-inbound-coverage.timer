@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the recent xHotelPro OTA inbound coverage audit every five minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=15s
+Persistent=true
+Unit=xhotelpro-ota-inbound-coverage.service
+
+[Install]
+WantedBy=timers.target

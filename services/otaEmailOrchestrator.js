@@ -24,6 +24,7 @@ const {
 	resolveBookingSource,
 	requiredNewReservationMissing,
 	otaInboundAllocationSafety,
+	otaInboundEmailResourceLimitExceeded,
 } = require("./otaReservationMapper");
 
 const ALLOWED_INTENTS = new Set([
@@ -864,6 +865,14 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 };
 
 const orchestrateInboundReservationEmail = async (email = {}) => {
+	if (otaInboundEmailResourceLimitExceeded(email)) {
+		email = {
+			...email,
+			text: "",
+			html: "",
+			otaInboundParserResourceLimitExceeded: true,
+		};
+	}
 	logOrchestrator("start", {
 		envelopeFrom: email.from || "",
 		envelopeTo: email.to || "",
@@ -950,6 +959,25 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 		emailContext,
 		emailText
 	);
+	if (heuristic.otaInboundParserResourceLimitExceeded === true) {
+		logOrchestrator("heuristic.parser_resource_limit", {
+			provider: heuristic.provider,
+			confirmationNumber: heuristic.confirmationNumber,
+		});
+		return {
+			normalized: heuristic,
+			decision: {
+				usedAI: false,
+				skipped: true,
+				skipReason: "ota_inbound_parser_resource_limit",
+				reason:
+					"The trusted OTA representation exceeds the bounded parser input budget; HTML conversion, live conversion, extraction AI, and reservation automation were skipped.",
+			},
+			emailContext,
+			emailText,
+			safeSnippet: safeSnippet(emailText, 800),
+		};
+	}
 	if (heuristic.intent === "new_reservation") {
 		const allocationSafety = otaInboundAllocationSafety(heuristic);
 		if (!allocationSafety.ok) {

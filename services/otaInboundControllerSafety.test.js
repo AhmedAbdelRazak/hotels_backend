@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const {
 	parseSendGridPayload,
 	requireInboundSecret,
+	RAW_MIME_PREPARSER_MAX_BYTES,
 } = require("../controllers/otaInbound");
 const {
 	extractNormalizedReservation,
@@ -167,6 +168,81 @@ test("SendGrid DKIM authentication requires an aligned passing signing domain", 
 		copiedHeaderOnly.senderAuthentication.reason,
 		"missing_sender_authentication"
 	);
+});
+
+test("oversized raw MIME is header-only, authenticated, and marked before mailparser", async () => {
+	const rawHeaders = [
+		"From: Agoda <no-reply@agoda.com>",
+		"To: ota@example.com",
+		"Subject: Agoda Booking ID 777888999 - CONFIRMED",
+		"Message-ID: <oversized-agoda-777888999@example.com>",
+		"Date: Thu, 13 Aug 2026 10:00:00 +0000",
+		"",
+		"THIS BODY MUST NEVER BE PARSED",
+	].join("\r\n");
+	const rawMime = `${rawHeaders}${"A".repeat(
+		RAW_MIME_PREPARSER_MAX_BYTES + 1
+	)}`;
+	let mailparserCalls = 0;
+	const parsed = await parseSendGridPayload(
+		{
+			email: rawMime,
+			SPF: "pass",
+			envelope: JSON.stringify({
+				from: "bounce@mailer.agoda.com",
+				to: ["ota@example.com"],
+			}),
+		},
+		[],
+		{
+			mimeParser: async () => {
+				mailparserCalls += 1;
+				throw new Error("oversized raw MIME reached mailparser");
+			},
+		}
+	);
+
+	assert.equal(mailparserCalls, 0);
+	assert.equal(parsed.otaInboundParserResourceLimitExceeded, true);
+	assert.equal(parsed.hasRawMime, true);
+	assert.ok(parsed.rawMimeByteLength > RAW_MIME_PREPARSER_MAX_BYTES);
+	assert.equal(parsed.text, "");
+	assert.equal(parsed.html, "");
+	assert.equal(parsed.from, "Agoda <no-reply@agoda.com>");
+	assert.equal(parsed.to, "ota@example.com");
+	assert.equal(parsed.subject, "Agoda Booking ID 777888999 - CONFIRMED");
+	assert.equal(parsed.messageId, "<oversized-agoda-777888999@example.com>");
+	assert.equal(parsed.senderAuthentication.authenticatedAligned, true);
+	assert.equal(parsed.senderAuthentication.trustedProvider, "agoda");
+
+	const normalized = extractNormalizedReservation(parsed);
+	assert.equal(normalized.provider, "agoda");
+	assert.equal(normalized.otaInboundParserResourceLimitExceeded, true);
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(normalized.blocksUnmappedReservationCreation, true);
+});
+
+test("raw MIME within the pre-parser budget still uses the MIME parser", async () => {
+	let mailparserCalls = 0;
+	const parsed = await parseSendGridPayload(
+		{ email: "From: Agoda <no-reply@agoda.com>\r\n\r\nsmall body" },
+		[],
+		{
+			mimeParser: async () => {
+				mailparserCalls += 1;
+				return {
+					from: { text: "Agoda <no-reply@agoda.com>" },
+					to: { text: "ota@example.com" },
+					subject: "Small raw MIME",
+					text: "small body",
+					attachments: [],
+				};
+			},
+		}
+	);
+	assert.equal(mailparserCalls, 1);
+	assert.equal(parsed.text, "small body");
+	assert.equal(parsed.otaInboundParserResourceLimitExceeded, undefined);
 });
 
 test("controller authentication verdict reaches extraction and blocks forged lifecycle mutation", async () => {
