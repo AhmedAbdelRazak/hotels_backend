@@ -45,13 +45,13 @@ The email-only cutover was deployed and verified without making a HotelRunner ve
 - Eighty historical direct-API reservations were retained as provenance. Every one had a valid OTA lifecycle watermark, so authenticated newer OTA email can be ordered safely without deleting or fabricating historical fields.
 - The aggregate local HotelRunner quota ledger was unchanged across deployment: five live buckets, 19 total reserved calls, and the same most recent update at `2026-08-13T09:10:38.469Z`. This is supporting evidence that shutdown verification itself made no vendor request.
 
-One administrator-only cleanup remains: the system `xhotelpro-hotelrunner-sync.service` unit is still enabled because both an unprivileged disable and noninteractive `sudo` were rejected. Its stable process is in the verified master-disabled inert guard, reports zero TCP and zero UDP connections, and initializes no database connection/model, HotelRunner client, quota claim, event lease, or reservation work. This residual supervisor state cannot call HotelRunner, but it must not be described as disabled. An administrator should run:
+Final supervisor cleanup was completed by the administrator at **2026-08-13 04:46 PDT** with:
 
 ```bash
 sudo systemctl disable --now xhotelpro-hotelrunner-sync.service
 ```
 
-Afterward, verify `systemctl is-enabled` reports `disabled`, `systemctl is-active` reports `inactive`, and no HotelRunner worker process remains. Do not test the shutdown by calling HotelRunner.
+Independent read-only verification then confirmed `systemctl is-enabled` reported `disabled`, `systemctl is-active` reported `inactive`, `MainPID` was `0`, and the HotelRunner worker process count was zero. Backend and public OTA inbound-email health remained `200`; the public HotelRunner callback remained `404`. The aggregate local HotelRunner quota ledger was still unchanged at five live buckets, 19 total reserved calls, and most recent update `2026-08-13T09:10:38.469Z`, confirming that the final shutdown verification made no vendor request. The email-only cutover has no remaining HotelRunner supervisor cleanup.
 
 ## Historical decision summary — inactive
 
