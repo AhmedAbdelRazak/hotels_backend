@@ -151,3 +151,67 @@ Required after deployment:
 
 Production observations and applied reconciliation counts must be appended
 only after live verification; source changes alone are not deployment proof.
+
+## Production verification — 2026-08-13 14:29 PDT
+
+Backend PR #78 was merged and production was fast-forwarded to merge commit
+`5908b96ed2edddac75bbf9c7becfb571e2174a74`. The production checkout had no
+tracked local changes; longstanding untracked backup artifacts were preserved.
+Before restart, the exact production checkout passed the financial/inventory
+suite 55/55, OTA inbound suite 479/479, and HotelRunner shutdown suite 532/532.
+The `hotels-backend` PM2 process restarted successfully and remained online.
+
+Read-only financial verification after restart produced the same result from
+the full reservation, admin-list projection, and report projection for PMS
+confirmation `5482777647`: gross SAR 481.20, net SAR 297.68, both available,
+with source `audited_ota_pricing_override`. Eight nights therefore display a
+gross nightly amount of SAR 60.15. PMS confirmation `3977450949` remained
+explicitly unavailable in all three shapes because its evidence conflict was
+not silently repaired or bypassed.
+
+The live paid-overview query for hotel `6a40b6a1a6efe70450536038`, check-in
+dates 2026-07-15 through 2026-08-13, returned 426 rows at verification time:
+
+- paid ledger: SAR 91,981.81;
+- gross booking subtotal: SAR 93,098.31, 425 included and one unavailable;
+- net booking subtotal: SAR 75,123.97, 425 included, one unavailable, and one
+  deliberate gross fallback;
+- foreign-currency exclusions: zero.
+
+The eight paid-ledger categories independently summed to the same SAR
+91,981.81. The corrected Agoda row retained its original SAR 490.90 payment
+fact while presenting the later audited SAR 481.20 gross / SAR 297.68 net
+booking prices. Paid money was not rewritten to force the two accounting
+concepts to match.
+
+A fresh production reconciliation dry run scanned 82 tightly scoped records
+and admitted exactly 81 reservations / 89 rooms. Seventy-one candidates
+belonged to the selected hotel. Exactly one row carried historical terminal
+reversion metadata and was excluded unchanged. The proof-bound apply completed
+81/81 CAS writes at `2026-08-13T21:29:39.141Z`. Global readback found exactly
+one repair marker per repaired document, the same apply timestamp, the flag
+set true, the original audit prefix intact, and no immutable-state mismatch.
+An immediate second dry run scanned only the intentionally excluded historical
+row and found zero candidates.
+
+The selected hotel's active `Finance Rejected` correction stay now blocks one
+room from 2026-07-24 through 2026-08-21, check-in inclusive and checkout
+exclusive. It contributes exactly 21 room-nights to the requested report range
+through 2026-08-13. A production-shaped exact hotel `Rejected` state remained
+nonblocking even when tested with a stale true marker.
+
+The actual overall-report inventory for 2026-07-15 through 2026-08-13 then
+returned capacity 3,060, booked 1,183, occupied 990, and remaining 2,070 across
+30 UTC calendar days. Occupancy was 32.352941%, warnings remained 39, and the
+peak was 2026-08-13 at 74 booked / 57 occupied / 102 capacity. The selected net
+financial total was SAR 83,642.53 with one fallback and zero unavailable rows.
+These inventory figures are a dated production observation and will change as
+reservations progress; their purpose is to record the verified post-repair
+baseline, not to freeze future report output.
+
+OTA inbound-email health returned `200`. The HotelRunner callback and backend
+admin route returned `404`; the master and four legacy API gates remained
+false; `xhotelpro-hotelrunner-sync.service` remained disabled/inactive with
+`MainPID=0`. The most recent local HotelRunner quota-ledger update remained
+`2026-08-13T09:10:38.462Z`, supporting that this deployment and verification
+made no HotelRunner vendor request.
