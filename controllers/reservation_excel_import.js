@@ -676,6 +676,7 @@ exports.commitReservationExcelImport = async (req, res) => {
 					reservation_status: "Pending Confirmation",
 					pendingConfirmation: {
 						status: "pending",
+						inventoryBlocks: true,
 						rejectionReason: "",
 						createdFromExcelAt: new Date(),
 						lastUpdatedAt: new Date(),

@@ -1350,6 +1350,7 @@ const buildAdminCorrectionResubmission = (
 		pendingConfirmation: {
 			...existingPending,
 			status: "pending",
+			inventoryBlocks: true,
 			rejectionReason: "",
 			confirmationReason: "",
 			confirmedAt: null,
@@ -2464,6 +2465,36 @@ const getReservationLifecycleStatusAfterFinance = (
 			: STATUS_PENDING_AGENT_COMMISSION_APPROVAL;
 	}
 	return STATUS_CONFIRMED;
+};
+
+const syncInventoryBlockForFinancialLifecycle = (
+	reservation = {},
+	updatePayload = {},
+	lifecycleStatus = ""
+) => {
+	if (
+		![
+			STATUS_PENDING_FINANCE_REVIEW,
+			STATUS_PENDING_AGENT_COMMISSION_APPROVAL,
+			STATUS_FINANCE_REJECTED,
+		].includes(lifecycleStatus)
+	) {
+		return;
+	}
+	const existingPending = plainReservationObject(reservation).pendingConfirmation || {};
+	const updatePending = updatePayload.pendingConfirmation || {};
+	if (
+		String(updatePending.status || existingPending.status || "")
+			.trim()
+			.toLowerCase() !== "confirmed"
+	) {
+		return;
+	}
+	updatePayload.pendingConfirmation = {
+		...existingPending,
+		...updatePending,
+		inventoryBlocks: true,
+	};
 };
 
 const buildCommissionMissingFilter = () => ({
@@ -3766,6 +3797,7 @@ const buildAdminStatusWorkflowSyncUpdate = ({
 			pendingConfirmation: {
 				...basePending,
 				status: "pending",
+				inventoryBlocks: true,
 				rejectionReason: "",
 				confirmationReason:
 					existingPending.confirmationReason ||
@@ -3805,6 +3837,7 @@ const buildAdminStatusWorkflowSyncUpdate = ({
 			pendingConfirmation: {
 				...basePending,
 				status: "confirmed",
+				inventoryBlocks: true,
 				rejectionReason: "",
 				confirmationReason: existingPending.confirmationReason || reason,
 				confirmedAt: existingPending.confirmedAt || now,
@@ -3821,12 +3854,35 @@ const buildAdminStatusWorkflowSyncUpdate = ({
 		};
 	}
 
+	if (statusKey === "rejected") {
+		return {
+			pendingConfirmation: {
+				...basePending,
+				status: "rejected",
+				inventoryBlocks: false,
+				rejectionReason: existingPending.rejectionReason || reason,
+				confirmationReason: "",
+				confirmedAt: null,
+				rejectedAt: existingPending.rejectedAt || now,
+			},
+			agentDecisionSnapshot: {
+				status: "rejected",
+				reason,
+				decidedAt: now,
+				decidedBy: auditActor,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			},
+		};
+	}
+
 	if (["cancelled", "canceled", "noshow"].includes(statusKey)) {
 		const closedStatus = statusKey === "noshow" ? "no_show" : STATUS_CANCELLED;
 		return {
 			pendingConfirmation: {
 				...basePending,
 				status: closedStatus,
+				inventoryBlocks: false,
 				rejectionReason: existingPending.rejectionReason || reason,
 				confirmationReason: "",
 				rejectedAt: existingPending.rejectedAt || now,
@@ -3872,6 +3928,7 @@ const buildSuperAdminPendingReversionUpdate = ({
 		pendingConfirmation: {
 			...existingPending,
 			status: "pending",
+			inventoryBlocks: true,
 			rejectionReason: "",
 			confirmationReason: "",
 			confirmedAt: null,
@@ -8392,6 +8449,7 @@ exports.updateReservation = async (req, res) => {
 				normalizedUpdateData.pendingConfirmation = {
 					...existingPending,
 					status: STATUS_CANCELLED,
+					inventoryBlocks: false,
 					rejectionReason: cancellationReason,
 					confirmationReason: "",
 					cancelledAt: now,
@@ -8425,6 +8483,7 @@ exports.updateReservation = async (req, res) => {
 				normalizedUpdateData.pendingConfirmation = {
 					...existingPending,
 					status: "pending",
+					inventoryBlocks: true,
 					rejectionReason: "",
 					confirmationReason: "",
 					confirmedAt: null,
@@ -9035,6 +9094,13 @@ exports.updateReservation = async (req, res) => {
 			) {
 				normalizedUpdateData.reservation_status = lifecycleStatus;
 				normalizedUpdateData.state = lifecycleStatus;
+			}
+			if (lifecycleStatus) {
+				syncInventoryBlockForFinancialLifecycle(
+					existingReservation,
+					normalizedUpdateData,
+					lifecycleStatus
+				);
 			}
 		}
 		delete normalizedUpdateData.__commissionAssignmentReset;
@@ -12276,6 +12342,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			updatePayload.pendingConfirmation = {
 				...existingPending,
 				status: "confirmed",
+				inventoryBlocks: true,
 				rejectionReason: "",
 				confirmationReason,
 				confirmedAt: now,
@@ -12323,6 +12390,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			updatePayload.pendingConfirmation = {
 				...existingPending,
 				status: STATUS_CANCELLED,
+				inventoryBlocks: false,
 				rejectionReason: cancellationReason,
 				confirmationReason: "",
 				cancelledAt: now,
@@ -12351,6 +12419,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			updatePayload.pendingConfirmation = {
 				...existingPending,
 				status: "rejected",
+				inventoryBlocks: false,
 				rejectionReason,
 				confirmationReason: "",
 				confirmedAt: null,
@@ -12390,6 +12459,11 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			if (lifecycleStatus) {
 				updatePayload.reservation_status = lifecycleStatus;
 				updatePayload.state = lifecycleStatus;
+				syncInventoryBlockForFinancialLifecycle(
+					reservation,
+					updatePayload,
+					lifecycleStatus
+				);
 			}
 		}
 
@@ -12861,6 +12935,11 @@ exports.updateAgentCommissionApproval = async (req, res) => {
 		if (lifecycleStatus) {
 			updatePayload.reservation_status = lifecycleStatus;
 			updatePayload.state = lifecycleStatus;
+			syncInventoryBlockForFinancialLifecycle(
+				reservation,
+				updatePayload,
+				lifecycleStatus
+			);
 		}
 
 		const auditEntries = buildReservationAuditEntries(

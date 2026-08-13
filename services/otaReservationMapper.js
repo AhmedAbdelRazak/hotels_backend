@@ -12851,9 +12851,6 @@ function buildExistingReservationUpdateSet({
 		normalized,
 		{ propertyCurrency }
 	);
-	if (otaCommercialEvidence) {
-		set["supplierData.otaCommercialEvidence"] = otaCommercialEvidence;
-	}
 	if (
 		(isOtaInboundEmail(normalized) &&
 			hasActiveHotelRunnerLifecycleAuthority(existing)) ||
@@ -13267,6 +13264,7 @@ function buildExistingReservationUpdateSet({
 				source: "ota_email_status",
 			};
 			if (["cancelled", "no_show"].includes(incomingStatus)) {
+				pendingConfirmation.inventoryBlocks = false;
 				pendingConfirmation.rejectionReason = `${providerName} ${
 					incomingStatus === "cancelled" ? "cancellation" : "no-show"
 				} email received.`;
@@ -13278,6 +13276,7 @@ function buildExistingReservationUpdateSet({
 				pendingConfirmation.noShowAt =
 					incomingStatus === "no_show" ? statusUpdatedAt : null;
 			} else if (incomingStatus === "confirmed") {
+				pendingConfirmation.inventoryBlocks = true;
 				pendingConfirmation.rejectionReason = "";
 				pendingConfirmation.confirmationReason = `${providerName} status email`;
 				pendingConfirmation.confirmedAt = statusUpdatedAt;
@@ -18563,6 +18562,7 @@ module.exports = {
 	reconcileOtaReservation,
 	reconcileDirectHotelRunnerOwnedEmail,
 	buildReservationDocument,
+	buildNormalizedOtaCommercialEvidence,
 	resolvePaymentMapping,
 	resolveHotel,
 	resolveRoomMatch,
@@ -18581,6 +18581,7 @@ module.exports = {
 	isAuthoritativeSourceUpgrade,
 	buildHotelRunnerEmailCommercialEvidence,
 	hotelRunnerEmailCommercialEvidenceHash,
+	validatedHotelRunnerEmailCommercialEvidenceMarker,
 	decimalMoneyCents,
 	multipliedMoneyCents,
 	verifiedHotelRunnerEmailCommercialEvidence,

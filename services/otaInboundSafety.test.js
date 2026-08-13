@@ -25,6 +25,7 @@ const {
 	buildOtaCrossTransportIdentityKey,
 	buildOtaConfirmationLookup,
 	buildOtaIdentityKey,
+	buildNormalizedOtaCommercialEvidence,
 	buildReservationDocument,
 	buildUnmappedOtaReviewReservationDocument,
 	applyExactResolvedHotelToUnmappedReview,
@@ -82,6 +83,7 @@ const {
 } = require("./otaReservationMapper");
 const { matchOtaRoomWithOpenAi } = require("./otaAiRoomMatcher");
 const {
+	buildAuthenticatedProviderCommercialEvidence,
 	buildHotelRunnerUnresolvedCommercialEvidence,
 	validateOtaCommercialEvidence,
 } = require("./otaCommercialEvidence");
@@ -6293,9 +6295,9 @@ test("authenticated Agoda gross without payout keeps the payout role unavailable
 	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, null);
 	assert.equal(normalized.paymentSummary.totalPayoutAmount, null);
 
-	const evidence = buildExistingReservationUpdateSet({ normalized })[
-		"supplierData.otaCommercialEvidence"
-	];
+	const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency: "SAR",
+	});
 	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
 	assert.equal(evidence.verificationState, "partial");
 	assert.equal(evidence.roles.guestGross.verified, true);
@@ -6326,9 +6328,9 @@ test("authenticated Airbnb gross without payout keeps the payout role unavailabl
 	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, null);
 	assert.equal(normalized.paymentSummary.totalPayoutAmount, null);
 
-	const evidence = buildExistingReservationUpdateSet({ normalized })[
-		"supplierData.otaCommercialEvidence"
-	];
+	const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+		propertyCurrency: "SAR",
+	});
 	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
 	assert.equal(evidence.verificationState, "partial");
 	assert.equal(evidence.roles.guestGross.verified, true);
@@ -6388,9 +6390,9 @@ test("authenticated Agoda and Airbnb explicit zero payouts remain verified zero 
 			fixture.provider
 		);
 
-		const evidence = buildExistingReservationUpdateSet({ normalized })[
-			"supplierData.otaCommercialEvidence"
-		];
+		const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+			propertyCurrency: "SAR",
+		});
 		assert.equal(validateOtaCommercialEvidence(evidence).ok, true, fixture.provider);
 		assert.equal(evidence.verificationState, "verified", fixture.provider);
 		assert.equal(evidence.roles.hotelPayout.verified, true, fixture.provider);
@@ -6471,9 +6473,9 @@ test("authenticated Agoda and Airbnb currency-mismatched payouts remain raw evid
 			fixture.provider
 		);
 
-		const evidence = buildExistingReservationUpdateSet({ normalized })[
-			"supplierData.otaCommercialEvidence"
-		];
+		const evidence = buildNormalizedOtaCommercialEvidence(normalized, {
+			propertyCurrency: "SAR",
+		});
 		assert.equal(validateOtaCommercialEvidence(evidence).ok, true, fixture.provider);
 		assert.equal(evidence.verificationState, "partial", fixture.provider);
 		assert.equal(evidence.roles.guestGross.verified, true, fixture.provider);
@@ -7458,6 +7460,128 @@ test("ordinary OTA modifications are staged without overwriting canonical guest 
 		set["otaPlatformReview.proposedInbound"].pricing.totalPayoutSar,
 		null
 	);
+});
+
+test("a staged OTA modification preserves canonical commercial evidence and retains the incoming hash for review", () => {
+	const canonicalEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "trip",
+		authenticatedProvider: "trip",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_ota_email",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "a".repeat(64),
+		sourceTimestamp: "2026-08-09T10:00:00.000Z",
+		sourceId: "trip-accepted-commercial",
+		guestGross: { verified: true, amount: 60.22 },
+		hotelPayout: { verified: true, amount: 56.89 },
+	});
+	const incomingEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "trip",
+		authenticatedProvider: "trip",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_ota_email",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "b".repeat(64),
+		sourceTimestamp: "2026-08-10T10:00:00.000Z",
+		sourceId: "trip-cancellation-request",
+		guestGross: { verified: true, amount: 56.89 },
+	});
+	const set = buildExistingReservationUpdateSet({
+		normalized: {
+			inboundEmailId: "trip-cancellation-request",
+			intent: "reservation_update",
+			eventType: "modified",
+			provider: "trip",
+			providerLabel: "Trip.com",
+			confirmationNumber: "1539366680929675",
+			amount: 56.89,
+			totalAmountSar: 56.89,
+			sourceAmount: 56.89,
+			sourceCurrency: "SAR",
+			otaCommercialEvidence: incomingEvidence,
+			sourcePresence: {
+				confirmationNumber: true,
+				amount: true,
+			},
+		},
+		existing: {
+			otaIdentityKey: "trip:1539366680929675",
+			supplierData: { otaCommercialEvidence: canonicalEvidence },
+		},
+	});
+
+	assert.equal(set["supplierData.otaCommercialEvidence"], undefined);
+	assert.equal(
+		set["otaPlatformReview.proposedInbound"].pricing.commercialEvidenceHash,
+		incomingEvidence.evidenceHash
+	);
+	assert.equal(canonicalEvidence.roles.guestGross.propertyAmount, 60.22);
+});
+
+test("an authoritative rebuilt OTA refresh persists only its document evidence generation", () => {
+	const normalizedEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "agoda",
+		authenticatedProvider: "agoda",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_ota_email",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "d".repeat(64),
+		sourceTimestamp: "2026-08-11T09:59:00.000Z",
+		sourceId: "agoda-prebuild-generation",
+		guestGross: { verified: true, amount: 100 },
+		hotelPayout: { verified: true, amount: 79 },
+	});
+	const documentEvidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "agoda",
+		authenticatedProvider: "agoda",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_ota_email",
+		sourceCurrency: "SAR",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "c".repeat(64),
+		sourceTimestamp: "2026-08-11T10:00:00.000Z",
+		sourceId: "agoda-authoritative-refresh",
+		guestGross: { verified: true, amount: 100 },
+		hotelPayout: { verified: true, amount: 80 },
+	});
+	const set = buildExistingReservationUpdateSet({
+		normalized: {
+			provider: "agoda",
+			intent: "reservation_update",
+			eventType: "modified",
+			authoritativeExistingRefresh: true,
+			otaCommercialEvidence: normalizedEvidence,
+			amount: 100,
+			totalAmountSar: 100,
+			sourcePresence: { amount: true },
+		},
+		existing: {},
+		document: {
+			total_amount: 100,
+			supplierData: { otaCommercialEvidence: documentEvidence },
+		},
+	});
+
+	assert.deepEqual(
+		set["supplierData.otaCommercialEvidence"],
+		documentEvidence
+	);
+	assert.notEqual(
+		set["supplierData.otaCommercialEvidence"].evidenceHash,
+		normalizedEvidence.evidenceHash
+	);
+	assert.equal(set["otaPlatformReview.proposedInbound"], null);
 });
 
 test("source-backed HotelRunner relays upgrade only display source fields to Trip.com", () => {
@@ -9989,7 +10113,9 @@ test("trusted Expedia USD conversion materializes cent-exact SAR roles in the co
 	assert.equal(converted.paymentSummary.currency, "SAR");
 	assert.equal(converted.amountConvertedAt, fetchedAt);
 
-	const evidence = buildExistingReservationUpdateSet({ normalized: converted })["supplierData.otaCommercialEvidence"];
+	const evidence = buildNormalizedOtaCommercialEvidence(converted, {
+		propertyCurrency: "SAR",
+	});
 	assert.equal(validateOtaCommercialEvidence(evidence).ok, true);
 	assert.equal(evidence.provider, "expedia");
 	assert.equal(evidence.sourceCurrency, "USD");
@@ -10577,14 +10703,8 @@ test("a direct-owned reservation accepts verified gross, net, daily, and OTA-col
 			});
 		assert.deepEqual(
 			Object.keys(generalUpdaterSet),
-			["supplierData.otaCommercialEvidence"],
-			"the general updater may retain immutable evidence but must not mutate reservation or finance fields"
-		);
-		assert.equal(
-			validateOtaCommercialEvidence(
-				generalUpdaterSet["supplierData.otaCommercialEvidence"]
-			).ok,
-			true
+			[],
+			"the lower-authority general updater must not replace canonical evidence or mutate reservation and finance fields"
 		);
 	} finally {
 		Reservations.find = originalReservationFind;

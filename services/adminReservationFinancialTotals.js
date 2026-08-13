@@ -9,6 +9,7 @@ const {
 	isHotelRunnerReservation,
 	verifiedHotelRunnerProfitMetrics,
 } = require("./hotelrunnerReportPricing");
+const { summarizeRooms } = require("./reservationPricing");
 
 const OTA_BOOKING_SOURCE_PATTERN =
 	/(?:\bota\b|expedia|agoda|booking\.?com|airbnb|hotels?\.?com|trivago|trip\.?com|\btrip\b|ctrip)/i;
@@ -17,6 +18,8 @@ const CALCULATED_PRICING_MODE_PATTERN =
 const SAVED_PRICING_BREAKDOWN_MODE_PATTERN =
 	/^(?:admin_three_price$|ota(?:_|$)|platform(?:_|$))/i;
 const SAVED_PRICING_SUMMARY_TOLERANCE = 0.5;
+const AUDITED_OVERRIDE_SOURCE = "platform_ota_pricing_review";
+const AUDITED_OVERRIDE_MODES = new Set(["ota_review", "admin_three_price"]);
 
 const hasOwn = (source, field) =>
 	Boolean(
@@ -54,12 +57,34 @@ const sameMoney = (left, right) => {
 	);
 };
 
+const sameSignedMoney = (left, right) => {
+	const leftAmount = finiteMoneyOrNull(left, { allowNegative: true });
+	const rightAmount = finiteMoneyOrNull(right, { allowNegative: true });
+	return (
+		leftAmount !== null &&
+		rightAmount !== null &&
+		Math.abs(leftAmount - rightAmount) <= 0.009
+	);
+};
+
 const explicitCurrency = (...values) => {
 	for (const value of values) {
 		const currency = String(value || "").trim().toUpperCase();
 		if (/^[A-Z]{3}$/.test(currency)) return currency;
 	}
 	return "";
+};
+
+const allExplicitCurrenciesAre = (expected, ...values) => {
+	const currencies = values
+		.map((value) => String(value || "").trim().toUpperCase())
+		.filter(Boolean);
+	return (
+		currencies.length > 0 &&
+		currencies.every(
+			(currency) => /^[A-Z]{3}$/.test(currency) && currency === expected
+		)
+	);
 };
 
 const explicitMoneyCandidates = (entries = []) => {
@@ -75,6 +100,376 @@ const explicitMoneyCandidates = (entries = []) => {
 
 const amountMatchesMaterializedCandidates = (amount, candidates) =>
 	candidates.valid && candidates.amounts.every((value) => sameMoney(value, amount));
+
+const normalizedId = (value) =>
+	String(value?._id || value?.id || value || "").trim();
+
+const validAuditActorId = (value) =>
+	/^[a-f0-9]{24}$/i.test(normalizedId(value));
+
+const validAuditDate = (value) => {
+	if (!value) return false;
+	const parsed = new Date(value);
+	return Number.isFinite(parsed.getTime());
+};
+
+const sameAuditMoment = (left, right) => {
+	if (!validAuditDate(left) || !validAuditDate(right)) return false;
+	return new Date(left).getTime() === new Date(right).getTime();
+};
+
+const normalizedProvider = (value) =>
+	String(value || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+
+const nonEmptyString = (value) =>
+	typeof value === "string" && value.trim().length > 0;
+
+const strictFiniteNumber = (value, { allowNegative = false } = {}) =>
+	typeof value === "number" &&
+	Number.isFinite(value) &&
+	(allowNegative || value >= 0);
+
+const strictLegacyEmailMarkerShape = (marker = {}) =>
+	Boolean(
+		marker &&
+			typeof marker === "object" &&
+			!Array.isArray(marker) &&
+			typeof marker.version === "number" &&
+			marker.version === 2 &&
+			marker.verified === true &&
+			marker.source === "authenticated_ota_email" &&
+			[
+				marker.provider,
+				marker.otaIdentityKey,
+				marker.inboundEmailId,
+				marker.sourceTextHash,
+				marker.sourceReceivedAt,
+				marker.evidenceHash,
+			].every(nonEmptyString) &&
+			/^[a-f0-9]{64}$/i.test(marker.sourceTextHash.trim()) &&
+			/^[a-f0-9]{64}$/i.test(marker.evidenceHash.trim()) &&
+			strictFiniteNumber(marker.grossTotalSar) &&
+			strictFiniteNumber(marker.payoutTotalSar) &&
+			strictFiniteNumber(marker.otaExpenseTotalSar) &&
+			(marker.otaCommissionSar === null ||
+				strictFiniteNumber(marker.otaCommissionSar)) &&
+			strictFiniteNumber(marker.unclassifiedDeductionSar) &&
+			Array.isArray(marker.deductionComponents) &&
+			marker.deductionComponents.every(
+				(component) =>
+					component &&
+					typeof component === "object" &&
+					!Array.isArray(component) &&
+					[component.type, component.label, component.currency, component.source].every(
+						nonEmptyString
+					) &&
+					strictFiniteNumber(component.amountSar) &&
+					component.amountSar > 0
+			) &&
+			Array.isArray(marker.unpricedDeductionLabels) &&
+			marker.unpricedDeductionLabels.every(nonEmptyString) &&
+			validAuditDate(marker.sourceReceivedAt) &&
+			validAuditDate(marker.appliedAt)
+	);
+
+const legacyMarkerMatchesCanonicalEvidence = (
+	reservation,
+	marker,
+	evidence
+) => {
+	if (!strictLegacyEmailMarkerShape(marker)) return false;
+	const supplier = reservation?.supplierData || {};
+	const primary = evidence?.provenance?.primary;
+	const evidenceProvider = normalizedProvider(evidence?.provider);
+	if (
+		!primary ||
+		typeof primary !== "object" ||
+		primary.sourceType !== "authenticated_ota_email" ||
+		!evidenceProvider ||
+		normalizedProvider(primary.provider) !== evidenceProvider ||
+		normalizedProvider(marker.provider) !== evidenceProvider ||
+		(Boolean(String(supplier.otaProvider || "").trim()) &&
+			normalizedProvider(supplier.otaProvider) !== evidenceProvider) ||
+		String(marker.sourceTextHash).trim() !==
+			String(primary.sourceHash || "").trim() ||
+		String(marker.inboundEmailId).trim() !==
+			String(primary.sourceId || "").trim() ||
+		String(marker.sourceReceivedAt).trim() !==
+			String(primary.sourceTimestamp || "").trim()
+	) {
+		return false;
+	}
+	return true;
+};
+
+const hasExplicitReviewedPricingDay = (day = {}) =>
+	["totalPriceWithCommission", "price"].some((field) => hasOwn(day, field)) &&
+	["rootPrice", "totalPriceWithoutCommission"].some((field) =>
+		hasOwn(day, field)
+	) &&
+	[
+		"netAfterExpenses",
+		"netAfterOtaExpenses",
+		"netAfterOtherExpenses",
+		"otaExpenseAmount",
+		"otherExpenseAmount",
+		"expenseAmount",
+	].some((field) => hasOwn(day, field));
+
+const reviewedPricingRoomsAreComplete = (rooms = []) =>
+	Array.isArray(rooms) &&
+	rooms.length > 0 &&
+	rooms.every((room) => {
+		const count = Number(room?.count ?? 1);
+		const rows = Array.isArray(room?.pricingByDay) ? room.pricingByDay : [];
+		return (
+			Number.isSafeInteger(count) &&
+			count > 0 &&
+			rows.length > 0 &&
+			rows.every(hasExplicitReviewedPricingDay)
+		);
+	});
+
+const persistedOriginalEvidenceAgrees = (
+	reservation,
+	{ gross, payout, expense }
+) => {
+	const found = { gross: false, payout: false, expense: false };
+	for (const summary of [
+		reservation?.ota_financial_summary,
+		reservation?.otaFinancialSummary,
+	]) {
+		if (!summary || typeof summary !== "object") continue;
+		for (const [role, fields, expected] of [
+			["gross", ["clientTotal", "client_total"], gross],
+			[
+				"payout",
+				["netAfterExpenses", "netAfterOtaExpenses", "hotelPayout"],
+				payout,
+			],
+			["expense", ["otaExpenseTotal", "ota_expense_total"], expense],
+		]) {
+			for (const field of fields) {
+				if (!hasOwn(summary, field)) continue;
+				const value = summary[field];
+				if (value === null || value === undefined || value === "") continue;
+				found[role] = true;
+				if (!sameMoney(value, expected)) return false;
+			}
+		}
+		const summaryCurrencies = [summary.propertyCurrency, summary.currency].filter(
+			(value) => String(value || "").trim()
+		);
+		if (
+			summaryCurrencies.length > 0 &&
+			!allExplicitCurrenciesAre("SAR", ...summaryCurrencies)
+		) {
+			return false;
+		}
+	}
+	return found.gross && found.payout && found.expense;
+};
+
+/**
+ * Resolve the server-stamped OTA pricing-review override without weakening the
+ * normal evidence conflict boundary. The original authenticated OTA evidence
+ * remains immutable; this branch accepts the later reviewed price only when
+ * every persisted override, review, currency, and nightly-pricing invariant
+ * reconciles exactly.
+ */
+const resolveAuditedOtaPricingOverride = (reservation = {}) => {
+	const unavailable = () => ({
+		available: false,
+		gross: unavailableRole("invalid_audited_ota_pricing_override"),
+		net: unavailableRole("invalid_audited_ota_pricing_override"),
+	});
+	const pricing = reservation?.adminPricing;
+	if (!pricing || typeof pricing !== "object") return unavailable();
+	if (pricing.clientTotalOverrideActive !== true) return unavailable();
+	if (
+		String(pricing.clientTotalOverrideSource || "").trim() !==
+			AUDITED_OVERRIDE_SOURCE ||
+		!AUDITED_OVERRIDE_MODES.has(
+			String(pricing.mode || "").trim().toLowerCase()
+		) ||
+		pricing.commercialVerified !== true
+	) {
+		return unavailable();
+	}
+
+	const overrideAt = pricing.clientTotalOverrideAt;
+	const overrideActorId = normalizedId(pricing.clientTotalOverrideBy);
+	const review = reservation?.otaPlatformReview || {};
+	const reviewActorId = normalizedId(review.lastPricingUpdatedBy);
+	if (
+		!validAuditActorId(overrideActorId) ||
+		!validAuditActorId(reviewActorId) ||
+		overrideActorId !== reviewActorId ||
+		!sameAuditMoment(overrideAt, review.lastPricingUpdatedAt) ||
+		!new Set(["pending", "released"]).has(
+			String(review.status || "").trim().toLowerCase()
+		)
+	) {
+		return unavailable();
+	}
+
+	const evidence = reservation?.supplierData?.otaCommercialEvidence;
+	if (
+		!evidence ||
+		typeof evidence !== "object" ||
+		Array.isArray(evidence) ||
+		String(
+			reservation?.supplierData?.otaCommercialEvidenceStaleReason || ""
+		).trim() ||
+		!validateOtaCommercialEvidence(evidence).ok ||
+		evidence.bookingBasis !== "reservation_total" ||
+		explicitCurrency(evidence.propertyCurrency) !== "SAR"
+	) {
+		return unavailable();
+	}
+	const evidenceGrossRole = evidence?.roles?.guestGross;
+	const originalGross =
+		evidenceGrossRole?.verified === true &&
+		evidenceGrossRole.bookingBasis === evidence.bookingBasis &&
+		explicitCurrency(evidenceGrossRole.propertyCurrency) === "SAR"
+			? finiteMoneyOrNull(evidenceGrossRole.propertyAmount)
+			: null;
+	if (originalGross === null || originalGross <= 0) return unavailable();
+	// The exceptional override must also remain anchored to the independently
+	// hashed authenticated-email marker. This validator checks marker schema,
+	// identity/provider, SAR arithmetic, timestamps, and its constant-time hash
+	// without requiring the old source tuple to remain materialized as current
+	// pricing.
+	const markerCandidate =
+		reservation?.supplierData?.hotelRunnerEmailCommercialEvidence;
+	if (
+		!legacyMarkerMatchesCanonicalEvidence(
+			reservation,
+			markerCandidate,
+			evidence
+		)
+	) {
+		return unavailable();
+	}
+	const {
+		validatedHotelRunnerEmailCommercialEvidenceMarker,
+	} = require("./otaReservationMapper");
+	const legacyMarker = validatedHotelRunnerEmailCommercialEvidenceMarker(
+		reservation,
+		{
+			provider: evidence.provider,
+			grossTotalSar: originalGross,
+			currency: "SAR",
+		}
+	);
+	if (!legacyMarker) return unavailable();
+	const evidencePayoutRole = evidence?.roles?.hotelPayout;
+	const originalPayout =
+		evidencePayoutRole?.verified === true &&
+		evidencePayoutRole.bookingBasis === evidence.bookingBasis &&
+		explicitCurrency(evidencePayoutRole.propertyCurrency) === "SAR"
+			? finiteMoneyOrNull(evidencePayoutRole.propertyAmount)
+			: null;
+	const originalExpense =
+		originalPayout !== null
+			? finiteMoneyOrNull(originalGross - originalPayout)
+			: null;
+	if (
+		originalPayout === null ||
+		originalPayout <= 0 ||
+		originalExpense === null ||
+		!sameMoney(legacyMarker.payoutTotalSar, originalPayout) ||
+		!sameMoney(legacyMarker.otaExpenseTotalSar, originalExpense) ||
+		!persistedOriginalEvidenceAgrees(reservation, {
+			gross: originalGross,
+			payout: originalPayout,
+			expense: originalExpense,
+		})
+	) {
+		return unavailable();
+	}
+
+	const overrideGross = finiteMoneyOrNull(pricing.clientTotalOverrideSar);
+	const overrideOriginal = finiteMoneyOrNull(
+		pricing.clientTotalOverrideOriginalSar
+	);
+	const sourceOriginal = finiteMoneyOrNull(pricing.sourceClientTotalSar);
+	const materializedGross = finiteMoneyOrNull(reservation.total_amount);
+	const pricingGross = finiteMoneyOrNull(pricing.clientTotal);
+	const pricingNet = finiteMoneyOrNull(pricing.netAfterExpensesTotal, {
+		allowNegative: true,
+	});
+	const pricingExpense = finiteMoneyOrNull(pricing.otaExpenseTotal);
+	const pricingRoot = finiteMoneyOrNull(pricing.rootTotal);
+	const pricingMargin = finiteMoneyOrNull(pricing.platformMarginTotal, {
+		allowNegative: true,
+	});
+	if (
+		overrideGross === null ||
+		overrideGross <= 0 ||
+		![materializedGross, pricingGross].every((value) =>
+			sameMoney(value, overrideGross)
+		) ||
+		![overrideOriginal, sourceOriginal].every((value) =>
+			sameMoney(value, originalGross)
+		) ||
+		!String(pricing.sourceClientTotalSource || "").trim() ||
+		pricingNet === null ||
+		pricingExpense === null ||
+		pricingRoot === null ||
+		pricingMargin === null ||
+		!sameMoney(pricingNet + pricingExpense, overrideGross) ||
+		!sameSignedMoney(pricingNet - pricingRoot, pricingMargin) ||
+		!allExplicitCurrenciesAre(
+			"SAR",
+			pricing.propertyCurrency,
+			reservation.currency
+		) ||
+		(Boolean(String(pricing.sourceCurrency || "").trim()) &&
+			explicitCurrency(pricing.sourceCurrency) !==
+				explicitCurrency(evidence.sourceCurrency))
+	) {
+		return unavailable();
+	}
+
+	const rooms = reservation.pickedRoomsPricing;
+	if (!reviewedPricingRoomsAreComplete(rooms)) return unavailable();
+	const roomSummary = summarizeRooms(rooms);
+	if (
+		!sameMoney(roomSummary.total_amount, overrideGross) ||
+		!sameMoney(roomSummary.adminPricing.clientTotal, pricingGross) ||
+		!sameMoney(roomSummary.adminPricing.rootTotal, pricingRoot) ||
+		!sameSignedMoney(
+			roomSummary.adminPricing.netAfterExpensesTotal,
+			pricingNet
+		) ||
+		!sameMoney(roomSummary.adminPricing.otaExpenseTotal, pricingExpense) ||
+		!sameSignedMoney(
+			roomSummary.adminPricing.platformMarginTotal,
+			pricingMargin
+		)
+	) {
+		return unavailable();
+	}
+
+	return {
+		available: true,
+		gross: availableRole(
+			overrideGross,
+			"SAR",
+			"audited_ota_pricing_override"
+		),
+		net: availableRole(
+			pricingNet,
+			"SAR",
+			"audited_ota_pricing_override",
+			{ allowNegative: true }
+		),
+	};
+};
 
 const hasOtaManagedPricingSignal = (reservation = {}) => {
 	const supplierData = reservation?.supplierData || {};
@@ -357,6 +752,20 @@ const resolveCalculatedNet = (reservation = {}) => {
 };
 
 const resolveAdminReservationFinancialTotals = (reservation = {}) => {
+	const auditedOverride = resolveAuditedOtaPricingOverride(reservation);
+	if (auditedOverride.available) {
+		return {
+			grossTotalAmount: auditedOverride.gross.amount,
+			netTotalAmount: auditedOverride.net.amount,
+			currency: "SAR",
+			grossAvailable: true,
+			netAvailable: true,
+			grossSource: auditedOverride.gross.source,
+			netSource: auditedOverride.net.source,
+			isOtaManaged: hasOtaManagedPricingSignal(reservation),
+			isHotelRunner: isHotelRunnerReservation(reservation),
+		};
+	}
 	const providerEvidence = resolveProviderNeutralEvidence(reservation);
 	const legacyEvidence = resolveLegacyEmailEvidence(reservation);
 	const chooseEvidenceRole = (providerRole, legacyRole) => {
@@ -446,5 +855,6 @@ const resolveAdminReservationFinancialTotals = (reservation = {}) => {
 module.exports = {
 	finiteMoneyOrNull,
 	hasOtaManagedPricingSignal,
+	resolveAuditedOtaPricingOverride,
 	resolveAdminReservationFinancialTotals,
 };
