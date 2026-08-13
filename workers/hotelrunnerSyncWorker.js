@@ -42,7 +42,49 @@ const assertRoomDiscoveryConfigSafe = (config = {}) => {
 	throw error;
 };
 
+const waitForDisabledShutdown = () =>
+	new Promise((resolve) => {
+		let settled = false;
+		// Signal listeners alone do not keep Node's event loop referenced. The inert
+		// interval prevents a Restart=always supervisor from creating a five-second
+		// crash loop while an administrator is still disabling the legacy unit. It
+		// performs no I/O and is removed immediately on shutdown.
+		const keepAlive = setInterval(() => {}, 24 * 60 * 60 * 1000);
+		const finish = (signal) => {
+			if (settled) return;
+			settled = true;
+			clearInterval(keepAlive);
+			process.removeListener("SIGINT", onSigint);
+			process.removeListener("SIGTERM", onSigterm);
+			console.log(
+				`[hotelrunner-worker] ${signal} received; disabled guard stopped.`
+			);
+			resolve();
+		};
+		const onSigint = () => finish("SIGINT");
+		const onSigterm = () => finish("SIGTERM");
+		process.once("SIGINT", onSigint);
+		process.once("SIGTERM", onSigterm);
+	});
+
 const main = async () => {
+	const {
+		getHotelRunnerConfig,
+	} = require("../services/hotelrunnerConfig");
+	const config = getHotelRunnerConfig();
+	if (config.integrationEnabled !== true) {
+		console.log(
+			"[hotelrunner-worker] integration disabled; idle guard active with no database or vendor access."
+		);
+		if (
+			process.argv.includes("--once") ||
+			process.argv.includes("--rooms-only")
+		) {
+			return;
+		}
+		await waitForDisabledShutdown();
+		return;
+	}
 	// Attest the release before loading any reservation worker implementation.
 	// This prevents a process from starting out of a tracked, partially deployed
 	// checkout and gives the long-running guard an immutable startup identity.
@@ -59,16 +101,12 @@ const main = async () => {
 		createHotelRunnerWorker,
 	} = require("../services/hotelrunnerWorker");
 	const {
-		getHotelRunnerConfig,
-	} = require("../services/hotelrunnerConfig");
-	const {
 		ensureHotelRunnerIndexes,
 	} = require("../services/hotelrunnerEventService");
 	const {
 		verifyHotelRunnerReservationIndexes,
 	} = require("../services/hotelrunnerReservationIndexReadiness");
 	const HotelRunnerSyncState = require("../models/hotelrunner_sync_state");
-	const config = getHotelRunnerConfig();
 	if (!config.configured) {
 		const error = new Error("HotelRunner worker configuration is incomplete.");
 		error.code = "HOTELRUNNER_CONFIG_INVALID";
@@ -203,4 +241,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { assertRoomDiscoveryConfigSafe, main };
+module.exports = { assertRoomDiscoveryConfigSafe, main, waitForDisabledShutdown };

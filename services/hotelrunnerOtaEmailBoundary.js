@@ -30,7 +30,23 @@ function hasDirectHotelRunnerProjection(reservation = {}) {
 	);
 }
 
+/**
+ * Historical provenance remains useful to reports and audits after a provider
+ * is turned off. Lifecycle authority is different: in email-only mode, a
+ * trusted OTA email must be allowed to update/cancel those historical rows.
+ */
+function hasActiveHotelRunnerLifecycleAuthority(
+	reservation = {},
+	config = require("./hotelrunnerConfig").getHotelRunnerConfig()
+) {
+	return (
+		config?.integrationEnabled === true &&
+		hasDirectHotelRunnerProjection(reservation)
+	);
+}
+
 module.exports = {
+	hasActiveHotelRunnerLifecycleAuthority,
 	hasDirectHotelRunnerProjection,
 	normalizeMarker,
 };

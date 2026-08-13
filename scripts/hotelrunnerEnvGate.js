@@ -12,7 +12,9 @@ const {
 } = require("../services/hotelrunnerConfig");
 
 const TOOL_VERSION = 1;
+const MASTER_GATE_KEY = "HOTELRUNNER_INTEGRATION_ENABLED";
 const GATE_KEYS = Object.freeze([
+	MASTER_GATE_KEY,
 	"HOTELRUNNER_PROJECTION_ENABLED",
 	"HOTELRUNNER_PULL_ENABLED",
 	"HOTELRUNNER_ROOM_LIST_SYNC_ENABLED",
@@ -318,6 +320,7 @@ const mutationChanges = (command, notBefore, secretInput, enabled) => {
 				"INVALID_ACTIVATION_CUTOFF"
 			);
 		}
+		changes[MASTER_GATE_KEY] = "true";
 		changes.HOTELRUNNER_PROJECTION_ENABLED = "true";
 		changes.HOTELRUNNER_ROOM_LIST_SYNC_ENABLED = "true";
 		changes[CUTOFF_KEY] = clean(notBefore);
@@ -641,6 +644,7 @@ module.exports = {
 	CREDENTIAL_KEYS,
 	CUTOFF_KEY,
 	GATE_KEYS,
+	MASTER_GATE_KEY,
 	HotelRunnerEnvGateError,
 	REVIEW_MODE_COMMAND,
 	REVIEW_MODE_KEY,

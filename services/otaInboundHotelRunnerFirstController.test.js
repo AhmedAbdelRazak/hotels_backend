@@ -19,6 +19,7 @@ const INBOUND_ID = "64b000000000000000000103";
 const JOB_ID = "64b000000000000000000104";
 
 const config = Object.freeze({
+	integrationEnabled: true,
 	configured: true,
 	projectionEnabled: true,
 	hotelId: HOTEL_ID,
@@ -71,6 +72,23 @@ const makeNormalized = (overrides = {}) => ({
 	...overrides,
 });
 
+test("master-disabled mode bypasses HotelRunner-first routing for direct OTA email", () => {
+	const result = hotelRunnerFirstPreliminaryGate({
+		normalized: makeNormalized(),
+		inboundRecord: makeInboundRecord(),
+		config: {
+			...config,
+			integrationEnabled: false,
+			configured: false,
+			projectionEnabled: false,
+		},
+	});
+	assert.deepEqual(result, {
+		eligible: false,
+		reason: "hotelrunner_integration_disabled",
+	});
+});
+
 const hotelRunnerAuthentication = Object.freeze({
 	authenticatedAligned: true,
 	trustedProvider: "hotelrunner",
@@ -83,6 +101,25 @@ const makeHotelRunnerRelayNormalized = (overrides = {}) => ({
 	senderAuthentication: hotelRunnerAuthentication,
 	hotelRunnerCommercialSourceProviders: ["agoda"],
 	...overrides,
+});
+
+test("master-disabled mode returns authenticated HotelRunner relays to inline email processing", () => {
+	const result = hotelRunnerFirstPreliminaryGate({
+		normalized: makeHotelRunnerRelayNormalized(),
+		inboundRecord: makeInboundRecord({
+			senderAuthentication: hotelRunnerAuthentication,
+		}),
+		config: {
+			...config,
+			integrationEnabled: false,
+			configured: false,
+			projectionEnabled: false,
+		},
+	});
+	assert.deepEqual(result, {
+		eligible: false,
+		reason: "hotelrunner_integration_disabled",
+	});
 });
 
 const activeHotel = Object.freeze({

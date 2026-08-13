@@ -76,6 +76,12 @@ function validateBaseUrl(baseUrl) {
 }
 
 function createHotelRunnerClient({ config, hotelId, fetchImpl = fetch, quotaDependencies } = {}) {
+	if (config?.integrationEnabled !== true) {
+		throw new HotelRunnerApiError("HotelRunner integration is disabled.", {
+			code: "HOTELRUNNER_INTEGRATION_DISABLED",
+			retryable: false,
+		});
+	}
 	if (!config?.configured) {
 		throw new HotelRunnerApiError("HotelRunner API is not configured.", {
 			code: "HOTELRUNNER_CONFIG_INVALID",

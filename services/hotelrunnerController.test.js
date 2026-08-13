@@ -4,12 +4,15 @@ process.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "SG.test";
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const http = require("node:http");
 const express = require("express");
 const {
 	callbackCredentialsMatch,
 	callbackLeadingSyntax,
 	createHandleHotelRunnerCallback,
+	hotelRunnerCallbackHealth,
 	hotelRunnerCallbackPreflight,
 	hotelRunnerAdminStatus,
 	listHotelRunnerRoomMappings,
@@ -26,6 +29,7 @@ const HotelRunnerRoomMapping = require("../models/hotelrunner_room_mapping");
 const HotelRunnerSyncState = require("../models/hotelrunner_sync_state");
 
 const CONFIG_ENV_KEYS = [
+	"HOTELRUNNER_INTEGRATION_ENABLED",
 	"HOTELRUNNER_API_TOKEN",
 	"HOTELRUNNER_API_HR_ID",
 	"HOTELRUNNER_SUPPORTED_HOTELIDS",
@@ -44,6 +48,7 @@ async function withSyntheticConfig(callback) {
 		CONFIG_ENV_KEYS.map((key) => [key, process.env[key]])
 	);
 	process.env.HOTELRUNNER_API_TOKEN = "synthetic-token-not-a-real-secret";
+	process.env.HOTELRUNNER_INTEGRATION_ENABLED = "true";
 	process.env.HOTELRUNNER_API_HR_ID = "synthetic-hr-id";
 	process.env.HOTELRUNNER_SUPPORTED_HOTELIDS = "64b000000000000000000001";
 	process.env.HOTELRUNNER_CALLBACK_BODY_LIMIT_BYTES = "65536";
@@ -360,6 +365,46 @@ test("callback authentication attaches only validated server-side configuration"
 		assert.equal(rejectedResponse.statusCode, 401);
 		assert.deepEqual(rejectedResponse.body, { error: "Unauthorized" });
 	});
+});
+
+test("master-disabled callback is absent before authentication or persistence", async () => {
+	await withSyntheticConfig(async () => {
+		process.env.HOTELRUNNER_INTEGRATION_ENABLED = "false";
+		const response = responseRecorder();
+		let nextCalls = 0;
+		requireHotelRunnerCallbackAuth(
+			requestFor({
+				query: {
+					token: "synthetic-token-not-a-real-secret",
+					hr_id: "synthetic-hr-id",
+				},
+			}),
+			response,
+			() => {
+				nextCalls += 1;
+			}
+		);
+		assert.equal(response.statusCode, 404);
+		assert.deepEqual(response.body, { error: "Not found" });
+		assert.equal(nextCalls, 0);
+		const healthResponse = responseRecorder();
+		hotelRunnerCallbackHealth({}, healthResponse);
+		assert.equal(healthResponse.statusCode, 404);
+	});
+});
+
+test("server tombstones the disabled callback before body parsing and unmounts HotelRunner routes", () => {
+	const source = fs.readFileSync(path.join(__dirname, "../server.js"), "utf8");
+	const disabledBoundary = source.indexOf("integrationEnabled === true");
+	const callbackTombstone = source.indexOf(
+		'app.all("/api/hotelrunner/callback"'
+	);
+	const legacyParser = source.indexOf('express.json({ limit: "50mb"');
+	const routeFilter = source.indexOf('routeFile !== "hotelrunner.js"');
+	assert.ok(disabledBoundary > -1);
+	assert.ok(callbackTombstone > disabledBoundary);
+	assert.ok(callbackTombstone < legacyParser);
+	assert.ok(routeFilter > legacyParser);
 });
 
 test("callback preflight authenticates before accepting form media types and enforces size", async () => {

@@ -131,6 +131,10 @@ function callbackCredentialsMatch(query = {}, config = {}) {
 }
 
 exports.hotelRunnerCallbackHealth = (_req, res) => {
+	const config = getHotelRunnerConfig();
+	if (config.integrationEnabled !== true) {
+		return res.status(404).json({ error: "Not found" });
+	}
 	return res.status(200).json({ ok: true });
 };
 
@@ -139,6 +143,9 @@ exports.requireHotelRunnerCallbackAuth = (req, res, next) => {
 		return next();
 	}
 	const config = getHotelRunnerConfig();
+	if (config.integrationEnabled !== true) {
+		return res.status(404).json({ error: "Not found" });
+	}
 	if (!config.callbackConfigured) {
 		res.set("Retry-After", "300");
 		return res.status(503).json({ error: "Integration is temporarily unavailable." });

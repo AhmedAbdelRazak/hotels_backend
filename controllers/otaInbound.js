@@ -719,6 +719,9 @@ const hotelRunnerFirstPreliminaryGate = ({
 	if (!directTransport && !hotelRunnerRelay) {
 		return { eligible: false, reason: "not_authenticated_direct_ota" };
 	}
+	if (config?.integrationEnabled !== true) {
+		return { eligible: false, reason: "hotelrunner_integration_disabled" };
+	}
 	const provider = hotelRunnerRelay ? embeddedProvider : parsedProvider;
 	const handlingMode = hotelRunnerRelay
 		? "hotelrunner_relay_audit_only"

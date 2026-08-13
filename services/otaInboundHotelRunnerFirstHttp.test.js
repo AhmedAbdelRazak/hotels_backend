@@ -147,7 +147,10 @@ function loadControllerWithStubs(state) {
 				},
 				reconcileOtaReservation: async () => {
 					state.inlineReconcileCalls += 1;
-					throw new Error("eligible inbound reached inline reconciliation");
+					if (!state.inlineReconciliation) {
+						throw new Error("eligible inbound reached inline reconciliation");
+					}
+					return state.inlineReconciliation;
 				},
 			},
 		],
@@ -173,12 +176,18 @@ function loadControllerWithStubs(state) {
 			{
 				forwardImportantInboundEmail: async () => {
 					state.forwardCalls += 1;
-					assert.equal(
-						state.response.ended,
-						true,
-						"HTTP response must be ended before optional forwarding starts"
-					);
-					return new Promise(() => {});
+					if (state.forwardMustFollowResponse) {
+						assert.equal(
+							state.response.ended,
+							true,
+							"HTTP response must be ended before optional forwarding starts"
+						);
+						return new Promise(() => {});
+					}
+					return {
+						decision: { shouldForward: false, reason: "not_important" },
+						forwarding: { status: "not_requested", forwardedTo: [] },
+					};
 				},
 			},
 		],
@@ -230,6 +239,7 @@ function loadControllerWithStubs(state) {
 			{
 				getHotelRunnerConfig: () =>
 					state.hotelRunnerConfig || {
+						integrationEnabled: true,
 						configured: true,
 						projectionEnabled: true,
 						hotelId: HOTEL_ID,
@@ -292,6 +302,7 @@ const makeState = (overrides = {}) => ({
 	duplicateQueries: [],
 	enqueueCalls: [],
 	inlineReconcileCalls: 0,
+	inlineReconciliation: null,
 	orchestratorCalls: 0,
 	coordinatorCreations: 0,
 	forwardCalls: 0,
@@ -302,6 +313,7 @@ const makeState = (overrides = {}) => ({
 	orchestrationNormalized: null,
 	hotelRunnerConfig: null,
 	response: responseMock(),
+	forwardMustFollowResponse: true,
 	...overrides,
 });
 
@@ -375,12 +387,137 @@ test("eligible HTTP ingress ACKs before optional forwarding and bypasses every i
 	);
 });
 
+test("master-disabled mode processes direct OTA email inline despite legacy HotelRunner settings", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const state = makeState({
+		forwardMustFollowResponse: false,
+		inlineReconciliation: {
+			status: "created",
+			actionTaken: "created",
+			skipReason: "",
+			warnings: [],
+			errors: [],
+			reservationId: "64b000000000000000000206",
+			hotelId: HOTEL_ID,
+			pmsConfirmationNumber: "PMS-EMAIL-ONLY-1",
+		},
+		hotelRunnerConfig: {
+			integrationEnabled: false,
+			configured: false,
+			callbackConfigured: false,
+			projectionEnabled: true,
+			pullEnabled: true,
+			roomListSyncEnabled: true,
+			confirmDeliveryEnabled: true,
+			token: "synthetic-present",
+			hrId: "synthetic-present",
+			hotelId: HOTEL_ID,
+		},
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(requestMock(), state.response);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.response.body, "OK");
+	assert.equal(state.inlineReconcileCalls, 1);
+	assert.equal(state.coordinatorCreations, 0);
+	assert.equal(state.enqueueCalls.length, 0);
+	assert.equal(state.events.includes("persist_audit"), false);
+	assert.equal(state.createdAudits.length, 1);
+	const finalized = state.auditUpdates.find(
+		(entry) => entry.update?.$set?.processingStatus === "created"
+	);
+	assert.ok(finalized);
+	assert.equal(
+		Object.prototype.hasOwnProperty.call(
+			finalized.update.$set,
+			"hotelRunnerFirstFallback"
+		),
+		false
+	);
+});
+
+test("master-disabled mode processes an authenticated HotelRunner relay through the inline email path", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const relayAuthentication = {
+		authenticatedAligned: true,
+		trustedProvider: "hotelrunner",
+		method: "dkim",
+	};
+	const state = makeState({
+		forwardMustFollowResponse: false,
+		senderAuthentication: relayAuthentication,
+		orchestrationNormalized: {
+			...normalizedReservation(),
+			trustedTransportProvider: "hotelrunner",
+			senderAuthentication: relayAuthentication,
+			hotelRunnerCommercialSourceProviders: ["agoda"],
+		},
+		inlineReconciliation: {
+			status: "created",
+			actionTaken: "created",
+			skipReason: "",
+			warnings: [],
+			errors: [],
+			reservationId: "64b000000000000000000207",
+			hotelId: HOTEL_ID,
+			pmsConfirmationNumber: "PMS-EMAIL-ONLY-RELAY-1",
+		},
+		hotelRunnerConfig: {
+			integrationEnabled: false,
+			configured: false,
+			callbackConfigured: false,
+			projectionEnabled: true,
+			pullEnabled: true,
+			roomListSyncEnabled: true,
+			confirmDeliveryEnabled: true,
+			token: "synthetic-present",
+			hrId: "synthetic-present",
+			hotelId: HOTEL_ID,
+		},
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(
+			requestMock({
+				from: "HotelRunner <noreply@hotelrunner.com>",
+				subject: "Agoda reservation relayed by HotelRunner",
+				messageId: "<disabled-hotelrunner-relay@example.com>",
+			}),
+			state.response
+		);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.response.body, "OK");
+	assert.equal(state.inlineReconcileCalls, 1);
+	assert.equal(state.coordinatorCreations, 0);
+	assert.equal(state.enqueueCalls.length, 0);
+	assert.equal(state.events.includes("persist_relay_audit"), false);
+	assert.ok(
+		state.auditUpdates.some(
+			(entry) => entry.update?.$set?.processingStatus === "created"
+		)
+	);
+});
+
 test("projection-off configured property is archived and returns retry without inline mutation", async () => {
 	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
 	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
 	const state = makeState({
-		hotelRunnerConfig: {
-			configured: false,
+			hotelRunnerConfig: {
+				integrationEnabled: true,
+				configured: false,
 			projectionEnabled: false,
 			hotelId: HOTEL_ID,
 			hrIdFingerprint: "a".repeat(64),
