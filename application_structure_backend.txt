@@ -3148,3 +3148,15 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     separate review.
 - Operational details, audited example totals, expected report coverage, test
   gates, and post-deploy verification are documented in the dated runbook.
+- Production result (2026-08-13 14:29 PDT):
+  - Backend PR #78 / merge `5908b96ed2edddac75bbf9c7becfb571e2174a74`
+    was deployed; production suites passed 55 financial/inventory, 479 OTA
+    inbound, and 532 HotelRunner tests before restart.
+  - PMS `5482777647` resolved in full/list/report projections to SAR 481.20
+    gross and SAR 297.68 net; the intentionally conflicted Trip row stayed
+    unavailable.
+  - The proof-bound inventory reconciliation applied 81/81 exact CAS updates
+    covering 89 rooms; one historical revert was preserved, and the immediate
+    idempotency dry run found zero remaining candidates.
+  - OTA inbound health was 200. HotelRunner remained master-off, callback/admin
+    routes returned 404, and its systemd worker remained disabled/inactive.
