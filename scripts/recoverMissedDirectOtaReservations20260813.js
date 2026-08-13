@@ -480,6 +480,21 @@ function assertAppliedAuditState(target, audit) {
 function historicalArchiveConversionTuple(target, audit) {
 	if (target.sourceCurrency === "SAR") return null;
 	const stored = audit.normalizedReservation || {};
+	if (lower(audit.reconciliation?.repairId) === REPAIR_ID) {
+		// A completed recovery intentionally promotes the audit's display totals to
+		// the exact-decimal SAR result. On later idempotence checks, recover the
+		// immutable pre-recovery inputs only from the complete, hash-pinned dated
+		// boundary that was stored on the applied audit; never reinterpret the
+		// promoted top-level totals as historical archive values.
+		assertAppliedAuditState(target, audit);
+		const evidence = stored.datedRecoveryConversionEvidence;
+		assertExactTripDatedRecoveryEvidence(
+			target,
+			evidence,
+			"Applied audit Trip dated recovery evidence"
+		);
+		return canonicalize(evidence.historicalArchiveTuple);
+	}
 	const paymentSummary = stored.paymentSummary || {};
 	assert.equal(money(audit.sourceAmount), target.sourceGross, "Archived top-level source gross changed.");
 	assert.equal(clean(audit.sourceCurrency).toUpperCase(), target.sourceCurrency, "Archived top-level source currency changed.");
