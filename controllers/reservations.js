@@ -473,6 +473,69 @@ const PAYMENT_BREAKDOWN_NUMERIC_KEYS = [
 	...PAYMENT_BREAKDOWN_SETTLEMENT_KEYS,
 ];
 
+const buildNarrowPaidBreakdownPersistenceUpdate = (
+	updates = {},
+	reservation = {}
+) => {
+	if (
+		!Object.prototype.hasOwnProperty.call(updates, "paid_amount_breakdown") ||
+		!updates.paid_amount_breakdown ||
+		typeof updates.paid_amount_breakdown !== "object" ||
+		Array.isArray(updates.paid_amount_breakdown)
+	) {
+		return { ...updates };
+	}
+
+	const requestedBreakdown =
+		typeof updates.paid_amount_breakdown.toObject === "function"
+			? updates.paid_amount_breakdown.toObject()
+			: updates.paid_amount_breakdown;
+	const existingBreakdown =
+		reservation?.paid_amount_breakdown &&
+		typeof reservation.paid_amount_breakdown.toObject === "function"
+			? reservation.paid_amount_breakdown.toObject()
+			: reservation?.paid_amount_breakdown || {};
+	const persistenceUpdate = { ...updates };
+
+	delete persistenceUpdate.paid_amount_breakdown;
+	Object.keys(persistenceUpdate).forEach((field) => {
+		if (field.startsWith("paid_amount_breakdown.")) {
+			delete persistenceUpdate[field];
+		}
+	});
+
+	for (const key of PAYMENT_BREAKDOWN_NUMERIC_KEYS) {
+		const nextValue = n2(requestedBreakdown[key]);
+		if (nextValue !== n2(existingBreakdown[key])) {
+			persistenceUpdate[`paid_amount_breakdown.${key}`] = nextValue;
+		}
+	}
+
+	const nextComment =
+		typeof requestedBreakdown.payment_comments === "string"
+			? requestedBreakdown.payment_comments
+			: "";
+	const existingComment =
+		typeof existingBreakdown.payment_comments === "string"
+			? existingBreakdown.payment_comments
+			: "";
+	if (nextComment !== existingComment) {
+		persistenceUpdate["paid_amount_breakdown.payment_comments"] = nextComment;
+	}
+
+	// A payment-editor payload always recomputes paid_amount from the normalized
+	// breakdown. Avoid a redundant write when the stored source-of-truth total is
+	// already correct, while retaining the correction when it is not.
+	if (
+		Object.prototype.hasOwnProperty.call(persistenceUpdate, "paid_amount") &&
+		n2(persistenceUpdate.paid_amount) === n2(reservation?.paid_amount)
+	) {
+		delete persistenceUpdate.paid_amount;
+	}
+
+	return persistenceUpdate;
+};
+
 const sumBreakdownKeys = (breakdown = {}, keys = []) =>
 	keys.reduce((sum, key) => {
 		return sum + moneyNumber(breakdown?.[key]);
@@ -839,6 +902,23 @@ const TRACKED_RESERVATION_FIELDS = [
 	"agentDecisionSnapshot",
 ];
 
+const PAYMENT_RECONCILIATION_FIELD = "payment_reconciliation";
+
+const stripClientSuppliedPaymentReconciliation = (payload = {}) => {
+	Object.keys(payload || {}).forEach((field) => {
+		if (
+			field === PAYMENT_RECONCILIATION_FIELD ||
+			field.startsWith(`${PAYMENT_RECONCILIATION_FIELD}.`)
+		) {
+			delete payload[field];
+		}
+	});
+	return payload;
+};
+
+exports.stripClientSuppliedPaymentReconciliation =
+	stripClientSuppliedPaymentReconciliation;
+
 const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"_id",
 	"id",
@@ -862,6 +942,7 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"otaCrossTransportIdentityKey",
 	"otaPlatformReview",
 	"commission_ota",
+	PAYMENT_RECONCILIATION_FIELD,
 ];
 
 const stripServerManagedReservationUpdateFields = (payload = {}) => {
@@ -3681,6 +3762,7 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		protectDirectHotelRunnerIdentityUpdate,
 		protectDirectHotelRunnerPendingFinanceActor,
 		protectDirectHotelRunnerSourceUpdate,
+		buildNarrowPaidBreakdownPersistenceUpdate,
 		stripServerManagedReservationUpdateFields,
 	});
 }
@@ -5421,6 +5503,7 @@ const sendEmailWithPdf = async (reservationData, opts = {}) => {
 };
 
 exports.create = async (req, res) => {
+	req.body = stripClientSuppliedPaymentReconciliation({ ...(req.body || {}) });
 	const routeHotelId = normalizeId(req.params?.hotelId);
 	const bodyHotelId = normalizeId(req.body?.hotelId);
 	const createActorId = normalizeId(req.auth?._id || req.params?.userId);
@@ -9223,7 +9306,12 @@ exports.updateReservation = async (req, res) => {
 			updatePayload,
 			auditActor
 		);
-		const updateOperation = { $set: updatePayload };
+		const persistenceUpdatePayload =
+			buildNarrowPaidBreakdownPersistenceUpdate(
+				updatePayload,
+				existingReservation
+			);
+		const updateOperation = { $set: persistenceUpdatePayload };
 
 		if (auditEntries.length) {
 			updateOperation.$set.adminLastUpdatedAt = new Date();

@@ -39,11 +39,8 @@ const {
 	sendingEmailForPaymentLink,
 	verifyReservationToken,
 	updatingTokenizedId,
-	triggeringSpecificTokenizedIdToCharge,
 	getRoomByIds,
-	updateReservationDetails,
 	createNewReservationClient2,
-	sendEmailForTriggeringPayment,
 	compileCustomerList,
 	listOfAllActiveHotelsMonthlyAndOffers,
 	getSingleReservationInvoice,
@@ -67,6 +64,20 @@ const {
 	exportAdminPendingConfirmationReservations,
 	adminPendingFinanceReservations,
 } = require("../controllers/overall_dashboard");
+
+const retiredReservationClientUpdate = (_req, res) =>
+	res.status(410).json({
+		success: false,
+		code: "reservation_client_update_route_retired",
+		error: "This unauthenticated reservation update endpoint has been retired.",
+	});
+
+const retiredLegacyStoredCardPayment = (_req, res) =>
+	res.status(410).json({
+		success: false,
+		code: "legacy_stored_card_payment_route_retired",
+		error: "This legacy stored-card payment flow has been retired.",
+	});
 
 router.post("/janat-website/:documentId", createUpdateDocument);
 router.get("/janat-website-document", list);
@@ -235,7 +246,7 @@ router.post(
 	requireSignin,
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
-	sendEmailForTriggeringPayment
+	retiredLegacyStoredCardPayment
 );
 
 router.post(
@@ -251,15 +262,15 @@ router.post(
 	requireSignin,
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
-	triggeringSpecificTokenizedIdToCharge
+	retiredLegacyStoredCardPayment
 );
 
-router.post("/create-payment-client", triggeringSpecificTokenizedIdToCharge);
+router.post("/create-payment-client", retiredLegacyStoredCardPayment);
 router.post("/compile-customer-list", compileCustomerList);
 
 router.put(
 	"/update-reservation-client/:reservationId",
-	updateReservationDetails
+	retiredReservationClientUpdate
 );
 
 router.get("/hotels/active-with-deals", listOfAllActiveHotelsMonthlyAndOffers);

@@ -2,6 +2,11 @@
 
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Schema;
+const {
+	RECONCILIATION_BREAKDOWN_ROOT,
+	planPaymentReconciliationInvalidationForModifiedPaths,
+	withPaymentReconciliationInvalidation,
+} = require("../services/paymentReconciliationInvalidation");
 
 const reservationsSchema = new mongoose.Schema(
 	{
@@ -347,6 +352,22 @@ const reservationsSchema = new mongoose.Schema(
 			},
 		},
 
+		// Server-managed, per-payment-category payout reconciliation snapshots.
+		// An absent category (including on legacy reservations) means waiting.
+		// Entries are only effective while their amountCents still matches the
+		// current paid_amount_breakdown value, preventing stale reconciliations
+		// after a payment correction.
+		payment_reconciliation: {
+			type: Object,
+			select: false,
+			default: () => ({
+				breakdown: {},
+				lastUpdatedAt: null,
+				lastUpdatedBy: null,
+				lastBatchId: "",
+			}),
+		},
+
 		commission: {
 			type: Number,
 			default: 0,
@@ -661,6 +682,59 @@ const reservationsSchema = new mongoose.Schema(
 	},
 	{ timestamps: true, strictQuery: false },
 );
+
+// Payment reconciliation is a snapshot of the corresponding paid breakdown
+// amount. Invalidate it atomically whenever an existing reservation's money is
+// corrected so an amount cannot change away and back while remaining marked
+// reconciled. payment_comments is deliberately not treated as money.
+reservationsSchema.pre("save", function invalidateReconciliationOnSave(next) {
+	try {
+		if (this.isNew) return next();
+		const directlyModifiedPaths =
+			typeof this.directModifiedPaths === "function"
+				? this.directModifiedPaths()
+				: [];
+		const plan = planPaymentReconciliationInvalidationForModifiedPaths(
+			directlyModifiedPaths
+		);
+		if (plan.invalidateAll) {
+			this.set(RECONCILIATION_BREAKDOWN_ROOT, {});
+			this.markModified(RECONCILIATION_BREAKDOWN_ROOT);
+		} else {
+			for (const key of plan.keys) {
+				const path = `${RECONCILIATION_BREAKDOWN_ROOT}.${key}`;
+				this.set(path, undefined);
+				this.markModified(path);
+			}
+		}
+		return next();
+	} catch (error) {
+		return next(error);
+	}
+});
+
+const invalidateReconciliationOnQueryUpdate = function (next) {
+	try {
+		const update = this.getUpdate();
+		if (!update) return next();
+		const invalidatedUpdate = withPaymentReconciliationInvalidation(update, {
+			replacement: this.op === "replaceOne",
+		});
+		if (invalidatedUpdate !== update) this.setUpdate(invalidatedUpdate);
+		return next();
+	} catch (error) {
+		return next(error);
+	}
+};
+
+for (const operation of [
+	"updateOne",
+	"updateMany",
+	"findOneAndUpdate",
+	"replaceOne",
+]) {
+	reservationsSchema.pre(operation, invalidateReconciliationOnQueryUpdate);
+}
 
 reservationsSchema.index({ reservation_id: 1 }, { sparse: true });
 reservationsSchema.index(
