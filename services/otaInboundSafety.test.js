@@ -6667,6 +6667,166 @@ test("direct Agoda MIME consensus accepts an exact sell rate split across a plai
 	);
 });
 
+test("production Agoda wrapped plain-text labels agree with unwrapped HTML and preserve two-room cents", () => {
+	const fixture = {
+		bookingId: "6900000467",
+		guestFirstName: "SYNTHETIC WRAPPED",
+		guestLastName: "GUEST",
+		checkin: "August 14, 2026",
+		checkout: "August 15, 2026",
+		roomName: "Comfort Double - Non-Smoking (Comfort Double Room-)",
+		roomCount: 2,
+		adults: 4,
+		nightlyRows: ["August 14, 2026 SAR 75.20"],
+		gross: "121.52",
+		payout: "75.20",
+		specialRequests: "TwinBeds",
+		phone: "",
+		commission: "18.22",
+		growthProgram: "12.16",
+		taxOnCommission: "4.56",
+	};
+	const email = productionAgodaQuantityEmail(fixture);
+	const unwrappedGuestStayBlock = [
+		"Customer First Name SYNTHETIC WRAPPED",
+		"Customer Last Name GUEST",
+		"Country of Residence Saudi Arabia",
+		"Check-in August 14, 2026",
+		"Check-out August 15, 2026",
+		"Other Guests [RmNo.1] Guest A [RmNo.1] Guest B",
+	].join("\n");
+	const wrappedGuestStayBlock = [
+		"Customer First Name SYNTHETIC WRAPPED Customer Last Name GUEST Country of",
+		"Residence Saudi Arabia Check-in August 14, 2026 Check-out August 15, 2026 Other",
+		"Guests [RmNo.1] Guest A [RmNo.1] Guest B",
+	].join("\n");
+	const wrappedText = email.text.replace(
+		unwrappedGuestStayBlock,
+		wrappedGuestStayBlock
+	);
+	assert.notEqual(wrappedText, email.text);
+	assert.match(wrappedText, /Country of\nResidence Saudi Arabia/);
+	assert.match(wrappedText, /Other\nGuests \[RmNo\.1\]/);
+
+	const normalized = extractNormalizedReservation({
+		...email,
+		text: wrappedText,
+	});
+	assert.deepEqual(normalized.agodaMimeConflictFields, []);
+	assert.deepEqual(normalized.genericRepeatedFactConflictFields, []);
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(normalized.blocksUnmappedReservationCreation, false);
+	assert.equal(normalized.confirmationNumber, "6900000467");
+	assert.equal(normalized.guestName, "SYNTHETIC WRAPPED GUEST");
+	assert.equal(normalized.nationality, "Saudi Arabia");
+	assert.equal(normalized.checkinDate, "2026-08-14");
+	assert.equal(normalized.checkoutDate, "2026-08-15");
+	assert.equal(
+		normalized.roomName,
+		"Comfort Double - Non-Smoking (Comfort Double Room-)"
+	);
+	assert.equal(normalized.roomCount, 2);
+	assert.equal(normalized.adults, 4);
+	assert.equal(normalized.totalGuests, 4);
+	assert.equal(normalized.totalAmountSar, 121.52);
+	assert.equal(normalized.totalPayoutSar, 75.2);
+	assert.equal(normalized.otaCommissionSar, 18.22);
+
+	const room = {
+		_id: "double-wrapped-label",
+		roomType: "doubleRooms",
+		displayName: fixture.roomName,
+		activeRoom: true,
+		pricingRate: [{ calendarDate: "2026-08-14", rootPrice: 75 }],
+	};
+	const built = buildReservationDocument(
+		normalized,
+		{
+			_id: "6a40b6a1a6efe70450536038",
+			belongsTo: "68b74714fb50e159d48c714d",
+			currency: "SAR",
+			roomCountDetails: [room],
+		},
+		{
+			roomMatch: {
+				roomDetails: room,
+				score: 1,
+				matchType: "exact_display",
+			},
+		}
+	);
+	assert.equal(built.ok, true, JSON.stringify(built));
+	assert.equal(built.document.total_rooms, 2);
+	assert.deepEqual(
+		built.document.pickedRoomsPricing.map((entry) => entry.count),
+		[1, 1]
+	);
+	const roomNights = built.document.pickedRoomsPricing.flatMap(
+		(entry) => entry.pricingByDay
+	);
+	assert.deepEqual(
+		roomNights.map((day) => ({
+			client: day.clientPrice,
+			payout: day.netAfterExpenses,
+			expense: day.otaExpenseAmount,
+		})),
+		[
+			{ client: 60.76, payout: 37.6, expense: 23.16 },
+			{ client: 60.76, payout: 37.6, expense: 23.16 },
+		]
+	);
+	assert.equal(
+		roomNights.reduce((sum, day) => sum + decimalMoneyCents(day.clientPrice), 0),
+		decimalMoneyCents(121.52)
+	);
+	assert.equal(
+		roomNights.reduce(
+			(sum, day) => sum + decimalMoneyCents(day.netAfterExpenses),
+			0
+		),
+		decimalMoneyCents(75.2)
+	);
+	assert.equal(
+		roomNights.reduce(
+			(sum, day) => sum + decimalMoneyCents(day.otaExpenseAmount),
+			0
+		),
+		decimalMoneyCents(46.32)
+	);
+
+	const bodyOnlyLifecycleText = wrappedText
+		.replace("Booking ID 6900000467", "Booking\nID\n6900000467")
+		.replace("Customer First Name", "Customer\tFirst\tName")
+		.replace("Customer Last Name", "Customer\tLast\tName");
+	for (const expected of [
+		{
+			subject: "Agoda reservation CANCELLED",
+			eventType: "cancelled",
+			intent: "reservation_status",
+			statusToApply: "cancelled",
+		},
+		{
+			subject: "Agoda reservation MODIFIED",
+			eventType: "modified",
+			intent: "reservation_update",
+			statusToApply: "",
+		},
+	]) {
+		const lifecycle = extractNormalizedReservation({
+			...email,
+			subject: expected.subject,
+			text: bodyOnlyLifecycleText,
+			html: "",
+		});
+		assert.equal(lifecycle.eventType, expected.eventType);
+		assert.equal(lifecycle.intent, expected.intent);
+		assert.equal(lifecycle.statusToApply, expected.statusToApply);
+		assert.equal(lifecycle.confirmationNumber, "6900000467");
+		assert.deepEqual(lifecycle.agodaMimeConflictFields, []);
+		assert.equal(lifecycle.requiresManualReview, false);
+	}
+});
+
 test("trusted direct Agoda parser input budgets stop text and HTML before FX, AI, lookup, or writes", async () => {
 	const normal = productionAgodaQuantityEmail(productionAgodaQuantityFixtures[0]);
 	assert.equal(
@@ -6875,8 +7035,17 @@ test("Agoda critical commercial, guest, stay, and nightly facts require MIME con
 				),
 		],
 		[
+			"nationality",
+			(html) =>
+				html.replace("Country of Residence Saudi Arabia", "Country of Residence Egypt"),
+		],
+		[
 			"checkinDate",
 			(html) => html.replaceAll("August 20, 2026", "August 19, 2026"),
+		],
+		[
+			"checkoutDate",
+			(html) => html.replace("August 22, 2026", "August 23, 2026"),
 		],
 		[
 			"nightlyPricing",

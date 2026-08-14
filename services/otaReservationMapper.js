@@ -1666,6 +1666,18 @@ function escapeRegExp(value) {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function flexibleLabelPattern(value = "") {
+	// `escapeRegExp` leaves ordinary spaces unchanged. Split labels into escaped
+	// tokens so legitimate MIME wrapping inside a multiword label remains
+	// equivalent while token order and every non-whitespace character stay exact.
+	return String(value || "")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean)
+		.map(escapeRegExp)
+		.join("\\s+");
+}
+
 function findField(text, labels) {
 	const source = String(text || "").replace(/\r/g, "");
 	const lines = source
@@ -1674,7 +1686,8 @@ function findField(text, labels) {
 		.filter(Boolean);
 
 	for (const label of labels) {
-		const labelPattern = escapeRegExp(label).replace(/\\ /g, "\\s+");
+		const labelPattern = flexibleLabelPattern(label);
+		if (!labelPattern) continue;
 		const inline = new RegExp(
 			`(?:^|\\n|\\b)${labelPattern}(?=$|\\s|[:#\\-])\\s*(?:[:#\\-]|is)?\\s*([^\\n]{1,180})`,
 			"i"
@@ -2318,9 +2331,10 @@ function extractHotelRunnerArabicRoomBlocks(text = "") {
 }
 
 function arabicLabelValue(source = "", startLabel = "", endLabels = []) {
-	const start = escapeRegExp(startLabel).replace(/\\ /g, "\\s+");
+	const start = flexibleLabelPattern(startLabel);
 	const ends = endLabels
-		.map((label) => escapeRegExp(label).replace(/\\ /g, "\\s+"))
+		.map(flexibleLabelPattern)
+		.filter(Boolean)
 		.join("|");
 	if (!start || !ends) return "";
 	const match = String(source || "").match(
@@ -2721,10 +2735,11 @@ function extractAgodaValueBetweenLabels(
 	startLabel = "",
 	endLabels = []
 ) {
-	const start = escapeRegExp(startLabel).replace(/\\ /g, "\\s+");
+	const start = flexibleLabelPattern(startLabel);
 	const ends = (Array.isArray(endLabels) ? endLabels : [endLabels])
 		.filter(Boolean)
-		.map((label) => escapeRegExp(label).replace(/\\ /g, "\\s+"));
+		.map(flexibleLabelPattern)
+		.filter(Boolean);
 	if (!start || !ends.length) return "";
 	const match = String(text || "").match(
 		new RegExp(
@@ -3093,7 +3108,15 @@ function distinctAgodaReferenceSellRates(text = "") {
 
 function extractAgodaDeductionByLabel(text = "", label = "") {
 	const source = String(text || "");
-	const escapedLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
+	const escapedLabel = flexibleLabelPattern(label);
+	if (!escapedLabel) {
+		return {
+			matched: false,
+			conflict: false,
+			amount: 0,
+			currency: "",
+		};
+	}
 	const pattern = new RegExp(
 		`${escapedLabel}\\s*[:#-]?\\s*(${moneyValuePattern()})`,
 		"gi"
@@ -3974,7 +3997,8 @@ function extractAirbnbMoneyAfterLabel(text = "", label = "") {
 	if (parseMoneyCandidates(labelValue).length) {
 		return { ...parsed, matched: true };
 	}
-	const patternLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
+	const patternLabel = flexibleLabelPattern(label);
+	if (!patternLabel) return { amount: 0, currency: "", matched: false };
 	const match = String(text || "").match(
 		new RegExp(
 			`${patternLabel}[ \\t]*(?:\\n[ \\t]*|[ \\t]+)((?:SR|SAR|USD|US\\$|\\$)\\s*[0-9][0-9,.]*)`,
@@ -6014,9 +6038,9 @@ function findGuestNoteField(text = "") {
 	if (direct) return direct;
 
 	const source = String(text || "").replace(/\r/g, "");
-	const labelPattern = OTA_GUEST_NOTE_LABELS.map((label) =>
-		escapeRegExp(label).replace(/\\ /g, "\\s+")
-	).join("|");
+	const labelPattern = OTA_GUEST_NOTE_LABELS.map(flexibleLabelPattern)
+		.filter(Boolean)
+		.join("|");
 	const blockMatch = source.match(
 		new RegExp(
 			`(?:^|\\n)\\s*(?:${labelPattern})\\s*(?:[:#\\-]|is)?\\s*([\\s\\S]{1,700})`,

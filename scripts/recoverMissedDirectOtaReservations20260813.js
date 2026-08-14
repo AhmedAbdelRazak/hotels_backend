@@ -3,9 +3,10 @@
 "use strict";
 
 // Dated, closed-scope recovery for three authenticated direct OTA archives.
-// This command is dry-run only unless an unexpired dry-run proof and the exact
-// repair ID are supplied. It deliberately does not import any HotelRunner
-// client, adapter, worker, controller, route, or configuration module.
+// The default CLI retains that exact scope; later one-target wrappers may call
+// the exported scoped engine with their own frozen manifest and policy. Every
+// command is dry-run only unless an unexpired proof and exact repair ID are
+// supplied. This module deliberately imports no HotelRunner runtime module.
 
 require("dotenv").config();
 
@@ -275,7 +276,47 @@ function fail(code, message, details = {}) {
 	throw new RecoverySafetyError(code, message, details);
 }
 
-function parseArguments(argv = process.argv.slice(2)) {
+function recoveryPolicyForTarget(target = {}) {
+	const repairId = lower(target.repairId || REPAIR_ID);
+	const policyDate = clean(target.policyDate || POLICY_DATE);
+	if (!/^[a-z0-9][a-z0-9-]{7,127}$/.test(repairId)) {
+		fail("RECOVERY_POLICY_INVALID", "Recovery repair ID is invalid.");
+	}
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(policyDate)) {
+		fail("RECOVERY_POLICY_INVALID", "Recovery policy date is invalid.");
+	}
+	return { repairId, policyDate };
+}
+
+function recoveryPolicyForTargets(targets = []) {
+	if (!Array.isArray(targets) || targets.length === 0) {
+		fail("RECOVERY_TARGET_SCOPE_EMPTY", "Recovery requires a non-empty closed target scope.");
+	}
+	const identities = targets.map((target) => {
+		const provider = lower(target?.provider);
+		const confirmationNumber = normalizeConfirmation(target?.confirmationNumber);
+		if (!provider || !confirmationNumber) {
+			fail("RECOVERY_TARGET_SCOPE_INVALID", "Recovery target identities must be complete and unique.");
+		}
+		return `${provider}:${confirmationNumber}`;
+	});
+	if (new Set(identities).size !== targets.length) {
+		fail("RECOVERY_TARGET_SCOPE_INVALID", "Recovery target identities must be complete and unique.");
+	}
+	const auditIds = targets.map((target) => lower(target?.auditId));
+	if (new Set(auditIds).size !== targets.length || auditIds.some((value) => !/^[a-f0-9]{24}$/.test(value))) {
+		fail("RECOVERY_TARGET_SCOPE_INVALID", "Recovery archive IDs must be complete and unique.");
+	}
+	const policies = targets.map(recoveryPolicyForTarget);
+	const policy = policies[0];
+	if (policies.some((candidate) => !isDeepStrictEqual(candidate, policy))) {
+		fail("RECOVERY_TARGET_POLICY_MIXED", "All targets in one proof-gated run must use one recovery policy.");
+	}
+	return policy;
+}
+
+function parseArgumentsForRepair(argv = process.argv.slice(2), expectedRepairId = REPAIR_ID) {
+	const requiredRepairId = lower(expectedRepairId);
 	const options = { apply: false, repairId: "", proof: "" };
 	for (let index = 0; index < argv.length; index += 1) {
 		const item = String(argv[index] || "");
@@ -289,13 +330,17 @@ function parseArguments(argv = process.argv.slice(2)) {
 	if (!options.apply && (options.repairId || options.proof)) {
 		fail("RECOVERY_DRY_RUN_ARGUMENT", "--repair-id and --proof are accepted only with --apply.");
 	}
-	if (options.apply && options.repairId !== REPAIR_ID) {
-		fail("RECOVERY_REPAIR_ID_REQUIRED", `--apply requires --repair-id=${REPAIR_ID}.`);
+	if (options.apply && options.repairId !== requiredRepairId) {
+		fail("RECOVERY_REPAIR_ID_REQUIRED", `--apply requires --repair-id=${requiredRepairId}.`);
 	}
 	if (options.apply && !/^\d{13}\.[a-f0-9]{64}$/.test(options.proof)) {
 		fail("RECOVERY_PROOF_REQUIRED", "--apply requires the exact unexpired dry-run proof.");
 	}
 	return options;
+}
+
+function parseArguments(argv = process.argv.slice(2)) {
+	return parseArgumentsForRepair(argv, REPAIR_ID);
 }
 
 function parseProof(proof, now = new Date()) {
@@ -403,9 +448,10 @@ function assertOriginalAuditState(target, audit) {
 }
 
 function assertAppliedAuditState(target, audit) {
+	const { repairId, policyDate } = recoveryPolicyForTarget(target);
 	const reconciliation = audit.reconciliation || {};
-	assert.equal(lower(reconciliation.repairId), REPAIR_ID, "Applied archive repair marker changed.");
-	assert.equal(reconciliation.policyDate, POLICY_DATE, "Applied archive recovery policy date changed.");
+	assert.equal(lower(reconciliation.repairId), repairId, "Applied archive repair marker changed.");
+	assert.equal(reconciliation.policyDate, policyDate, "Applied archive recovery policy date changed.");
 	assert.equal(id(audit.reservationMongoId).length, 24, "Applied archive lacks a reservation link.");
 	assert.equal(audit.hasReservationConnection, true, "Applied archive lost its reservation connection.");
 	assert.equal(lower(audit.processingStatus), "created", "Applied archive processing state changed.");
@@ -440,8 +486,8 @@ function assertAppliedAuditState(target, audit) {
 	assert.equal(audit.orchestratorDecision?.usedAI, false, "Applied audit reports AI use.");
 	assert.equal(audit.orchestratorDecision?.skipped, true, "Applied audit orchestrator marker changed.");
 	assert.equal(audit.orchestratorDecision?.skipReason, "dated_authenticated_archive_recovery", "Applied audit orchestrator reason changed.");
-	assert.equal(lower(audit.orchestratorDecision?.repairId), REPAIR_ID, "Applied audit orchestrator repair ID changed.");
-	assert.equal(audit.orchestratorDecision?.policyDate, POLICY_DATE, "Applied audit orchestrator policy date changed.");
+	assert.equal(lower(audit.orchestratorDecision?.repairId), repairId, "Applied audit orchestrator repair ID changed.");
+	assert.equal(audit.orchestratorDecision?.policyDate, policyDate, "Applied audit orchestrator policy date changed.");
 	assert.ok(dateIso(audit.processedAt), "Applied audit processing timestamp is missing.");
 	const normalized = audit.normalizedReservation || {};
 	assert.equal(lower(normalized.provider), target.provider, "Applied normalized provider changed.");
@@ -480,7 +526,7 @@ function assertAppliedAuditState(target, audit) {
 function historicalArchiveConversionTuple(target, audit) {
 	if (target.sourceCurrency === "SAR") return null;
 	const stored = audit.normalizedReservation || {};
-	if (lower(audit.reconciliation?.repairId) === REPAIR_ID) {
+	if (lower(audit.reconciliation?.repairId) === recoveryPolicyForTarget(target).repairId) {
 		// A completed recovery intentionally promotes the audit's display totals to
 		// the exact-decimal SAR result. On later idempotence checks, recover the
 		// immutable pre-recovery inputs only from the complete, hash-pinned dated
@@ -600,11 +646,12 @@ function matrix(document, field) {
 
 function expectedTripDatedRecoveryEvidence(target) {
 	assert.equal(target?.provider, "trip", "Trip dated recovery evidence requires the Trip target.");
+	const { repairId, policyDate } = recoveryPolicyForTarget(target);
 	return {
 		version: 1,
 		evidenceType: "dated_recovery_historical_archive_tuple",
-		repairId: REPAIR_ID,
-		policyDate: POLICY_DATE,
+		repairId,
+		policyDate,
 		provider: target.provider,
 		confirmationNumber: target.confirmationNumber,
 		inboundEmailId: target.auditId,
@@ -677,6 +724,7 @@ function assertNoPhysicalRoomAssignments(document = {}) {
 }
 
 function assertExpectedReservationShape(target, document, { persisted = false } = {}) {
+	const { repairId, policyDate } = recoveryPolicyForTarget(target);
 	assert.ok(document, "Expected reservation document is missing.");
 	assert.equal(id(document.hotelId), HOTEL_ID, "Hotel mapping changed.");
 	assert.equal(id(document.belongsTo), OWNER_ID, "Hotel owner mapping changed.");
@@ -815,8 +863,8 @@ function assertExpectedReservationShape(target, document, { persisted = false } 
 	}
 	if (persisted) {
 		const recovery = document.supplierData?.directOtaArchiveRecovery || {};
-		assert.equal(lower(recovery.repairId), REPAIR_ID, "Reservation recovery provenance is missing.");
-		assert.equal(recovery.policyDate, POLICY_DATE, "Reservation recovery policy date changed.");
+		assert.equal(lower(recovery.repairId), repairId, "Reservation recovery provenance is missing.");
+		assert.equal(recovery.policyDate, policyDate, "Reservation recovery policy date changed.");
 		assert.equal(id(recovery.inboundEmailId), target.auditId, "Reservation recovery provenance points at another archive.");
 		assert.equal(lower(recovery.provider), target.provider, "Reservation recovery provider changed.");
 		assert.equal(normalizeConfirmation(recovery.confirmationNumber), target.confirmationNumber, "Reservation recovery confirmation changed.");
@@ -826,7 +874,7 @@ function assertExpectedReservationShape(target, document, { persisted = false } 
 		assert.equal(recovery.orderTakerNormalizationUsed, false, "Reservation recovery reports OrderTaker normalization.");
 		assert.ok(dateIso(recovery.appliedAt), "Reservation recovery application timestamp is missing.");
 		const recoveryAuditEntries = (document.reservationAuditLog || []).filter(
-			(entry) => lower(entry?.repairId) === REPAIR_ID && id(entry?.inboundEmailId) === target.auditId
+			(entry) => lower(entry?.repairId) === repairId && id(entry?.inboundEmailId) === target.auditId
 		);
 		assert.equal(recoveryAuditEntries.length, 1, "Reservation recovery audit entry is not unique.");
 		assert.equal(lower(recoveryAuditEntries[0].provider), target.provider, "Reservation recovery audit provider changed.");
@@ -972,7 +1020,7 @@ function plausibleManualCandidates(target, reservations = []) {
 
 function recoveryMarkerMatches(target, reservation = {}) {
 	const marker = reservation.supplierData?.directOtaArchiveRecovery || {};
-	return lower(marker.repairId) === REPAIR_ID && id(marker.inboundEmailId) === target.auditId && lower(marker.provider) === target.provider && normalizeConfirmation(marker.confirmationNumber) === target.confirmationNumber && marker.emailHash === target.emailHash && marker.textHash === target.textHash;
+	return lower(marker.repairId) === recoveryPolicyForTarget(target).repairId && id(marker.inboundEmailId) === target.auditId && lower(marker.provider) === target.provider && normalizeConfirmation(marker.confirmationNumber) === target.confirmationNumber && marker.emailHash === target.emailHash && marker.textHash === target.textHash;
 }
 
 function uniqueReservations(reservations = []) {
@@ -1379,6 +1427,7 @@ function scopeBasis(scope) {
 }
 
 async function loadTargetScope(target, dependencies = {}) {
+	const { repairId } = recoveryPolicyForTarget(target);
 	const InboundModel = dependencies.InboundEmail || InboundEmail;
 	const audit = await InboundModel.findById(target.auditId).lean().exec();
 	assertArchiveImmutable(target, audit);
@@ -1396,7 +1445,7 @@ async function loadTargetScope(target, dependencies = {}) {
 	if (reservationEvidence.plausible.length) {
 		fail("RECOVERY_PLAUSIBLE_MANUAL_DUPLICATE", "A plausible manual/OrderTaker reservation exists; recovery stopped for review.", { auditId: target.auditId, candidates: reservationEvidence.plausible });
 	}
-	const appliedAudit = lower(audit.reconciliation?.repairId) === REPAIR_ID;
+	const appliedAudit = lower(audit.reconciliation?.repairId) === repairId;
 	let action = "create_via_ordinary_ota_reconciler";
 	if (appliedAudit) {
 		assertAppliedAuditState(target, audit);
@@ -1419,7 +1468,8 @@ async function loadTargetScope(target, dependencies = {}) {
 	return { target, audit, normalized, resolved, reservationEvidence, laterAuditEvidence, dormantHotelRunnerState, action };
 }
 
-async function buildPlan(plannedAt = new Date(), dependencies = {}) {
+async function buildPlanForTargets(targets, plannedAt = new Date(), dependencies = {}) {
+	const { repairId, policyDate } = recoveryPolicyForTargets(targets);
 	assertHotelRunnerDisabled(dependencies.env || process.env);
 	assertNoForbiddenHotelRunnerRuntimeModules();
 	const ReservationModel = dependencies.Reservations || Reservations;
@@ -1430,12 +1480,12 @@ async function buildPlan(plannedAt = new Date(), dependencies = {}) {
 	]);
 	assertRequiredIndexes(reservationIndexes, inboundIndexes);
 	const scopes = [];
-	for (const target of TARGETS) scopes.push(await loadTargetScope(target, dependencies));
+	for (const target of targets) scopes.push(await loadTargetScope(target, dependencies));
 	const basis = {
-		policyDate: POLICY_DATE,
-		repairId: REPAIR_ID,
+		policyDate,
+		repairId,
 		plannedAt: dateIso(plannedAt),
-		targetCount: TARGETS.length,
+		targetCount: targets.length,
 		targets: scopes.map(scopeBasis),
 		indexProof: {
 			reservation: reservationIndexes.find((item) => item.name === "uniq_ota_identity_key"),
@@ -1447,16 +1497,21 @@ async function buildPlan(plannedAt = new Date(), dependencies = {}) {
 	return { plannedAt: new Date(plannedAt), planHash: hashObject(basis), basis, scopes };
 }
 
+async function buildPlan(plannedAt = new Date(), dependencies = {}) {
+	return buildPlanForTargets(TARGETS, plannedAt, dependencies);
+}
+
 function proofToken(plan) {
 	return `${new Date(plan.plannedAt).getTime()}.${plan.planHash}`;
 }
 
 function stampRecoveryProvenance(target, reservationData, plannedAt) {
+	const { repairId, policyDate } = recoveryPolicyForTarget(target);
 	reservationData.supplierData = {
 		...(reservationData.supplierData || {}),
 		directOtaArchiveRecovery: {
-			repairId: REPAIR_ID,
-			policyDate: POLICY_DATE,
+			repairId,
+			policyDate,
 			inboundEmailId: target.auditId,
 			provider: target.provider,
 			confirmationNumber: target.confirmationNumber,
@@ -1468,11 +1523,11 @@ function stampRecoveryProvenance(target, reservationData, plannedAt) {
 		},
 	};
 	const existing = Array.isArray(reservationData.reservationAuditLog) ? reservationData.reservationAuditLog : [];
-	if (!existing.some((entry) => lower(entry?.repairId) === REPAIR_ID && id(entry?.inboundEmailId) === target.auditId)) {
+	if (!existing.some((entry) => lower(entry?.repairId) === repairId && id(entry?.inboundEmailId) === target.auditId)) {
 		reservationData.reservationAuditLog = [...existing, {
 			at: new Date(plannedAt),
 			action: "recovered-authenticated-direct-ota-archive",
-			repairId: REPAIR_ID,
+			repairId,
 			inboundEmailId: target.auditId,
 			provider: target.provider,
 			confirmationNumber: target.confirmationNumber,
@@ -1595,6 +1650,7 @@ function tripRoundingCorrection(target) {
 
 function auditRecoveryUpdate(scope, reconciliation, reservation) {
 	const { target, normalized } = scope;
+	const { repairId, policyDate } = recoveryPolicyForTarget(target);
 	return {
 		provider: target.provider,
 		providerLabel: normalized.providerLabel || (target.provider === "agoda" ? "Agoda" : "Trip.com"),
@@ -1623,8 +1679,8 @@ function auditRecoveryUpdate(scope, reconciliation, reservation) {
 			usedAI: false,
 			skipped: true,
 			skipReason: "dated_authenticated_archive_recovery",
-			repairId: REPAIR_ID,
-			policyDate: POLICY_DATE,
+			repairId,
+			policyDate,
 		},
 		reconciliation: {
 			status: reconciliation?.status || "lost_ack_recovered",
@@ -1632,8 +1688,8 @@ function auditRecoveryUpdate(scope, reconciliation, reservation) {
 			reservationId: id(reservation._id),
 			hotelId: id(reservation.hotelId),
 			pmsConfirmationNumber: reservation.confirmation_number || "",
-			repairId: REPAIR_ID,
-			policyDate: POLICY_DATE,
+			repairId,
+			policyDate,
 			recoveredFromInboundAudit: true,
 			ordinaryOtaReconciler: true,
 			orderTakerNormalizationUsed: false,
@@ -1651,6 +1707,7 @@ function auditRecoveryUpdate(scope, reconciliation, reservation) {
 async function finalizeDirectAudit(scope, reconciliation, reservation, dependencies = {}) {
 	const Model = dependencies.InboundEmail || InboundEmail;
 	const { target, audit } = scope;
+	const { repairId } = recoveryPolicyForTarget(target);
 	const result = await Model.updateOne(
 		{
 			_id: target.auditId,
@@ -1677,7 +1734,7 @@ async function finalizeDirectAudit(scope, reconciliation, reservation, dependenc
 	);
 	if (result.matchedCount !== 1 || result.modifiedCount !== 1) {
 		const observed = await Model.findById(target.auditId).lean().exec();
-		if (lower(observed?.reconciliation?.repairId) !== REPAIR_ID || id(observed?.reservationMongoId) !== id(reservation._id)) {
+		if (lower(observed?.reconciliation?.repairId) !== repairId || id(observed?.reservationMongoId) !== id(reservation._id)) {
 			fail("RECOVERY_AUDIT_CAS_LOST", "The authoritative direct audit changed before finalization.", { auditId: target.auditId });
 		}
 	}
@@ -1745,11 +1802,11 @@ async function applyTarget(scope, plan, dependencies = {}) {
 function safePlanOutput(plan, mode) {
 	return {
 		mode,
-		policyDate: POLICY_DATE,
-		repairId: REPAIR_ID,
+		policyDate: plan.basis.policyDate,
+		repairId: plan.basis.repairId,
 		plannedAt: dateIso(plan.plannedAt),
 		planHash: plan.planHash,
-		targetCount: TARGETS.length,
+		targetCount: plan.basis.targetCount,
 		targets: plan.basis.targets.map((target) => ({
 			provider: target.provider,
 			confirmationNumber: target.confirmationNumber,
@@ -1772,14 +1829,18 @@ function safePlanOutput(plan, mode) {
 	};
 }
 
-async function run(options = parseArguments(), dependencies = {}) {
+async function runForTargets(targets, options = { apply: false, repairId: "", proof: "" }, dependencies = {}, settings = {}) {
+	const { repairId } = recoveryPolicyForTargets(targets);
+	if (options?.apply && clean(options.repairId) !== repairId) {
+		fail("RECOVERY_REPAIR_ID_REQUIRED", `--apply requires --repair-id=${repairId}.`);
+	}
 	assertHotelRunnerDisabled(dependencies.env || process.env);
 	assertNoForbiddenHotelRunnerRuntimeModules();
 	const database = dependencies.database || process.env.DATABASE || process.env.MONGO_URI || process.env.MONGODB_URI;
 	assert.ok(database || dependencies.skipConnect, "Missing DATABASE/MONGO connection string.");
 	if (!dependencies.skipConnect) await mongoose.connect(database, { autoIndex: false });
 	const proof = options.apply ? parseProof(options.proof, dependencies.now?.() || new Date()) : null;
-	const plan = await buildPlan(proof?.plannedAt || dependencies.now?.() || new Date(), dependencies);
+	const plan = await buildPlanForTargets(targets, proof?.plannedAt || dependencies.now?.() || new Date(), dependencies);
 	if (options.apply && (proof.planHash !== plan.planHash || proofToken(plan) !== options.proof)) {
 		fail("RECOVERY_PLAN_CHANGED", "The live recovery plan no longer matches the dry-run proof.");
 	}
@@ -1787,7 +1848,11 @@ async function run(options = parseArguments(), dependencies = {}) {
 	if (!options.apply) {
 		output.proof = proofToken(plan);
 		output.proofExpiresInMinutes = PROOF_MAX_AGE_MS / 60000;
-		output.applyCommand = `npm run ota:recover-missed-direct-20260813 -- --apply --repair-id=${REPAIR_ID} --proof=${output.proof}`;
+		const npmScript = clean(settings.npmScript || "ota:recover-missed-direct-20260813");
+		if (!/^[a-z0-9][a-z0-9:_-]*$/.test(npmScript)) {
+			fail("RECOVERY_NPM_SCRIPT_INVALID", "Recovery npm script name is invalid.");
+		}
+		output.applyCommand = `npm run ${npmScript} -- --apply --repair-id=${repairId} --proof=${output.proof}`;
 		console.log(JSON.stringify(output, null, 2));
 		return output;
 	}
@@ -1796,6 +1861,12 @@ async function run(options = parseArguments(), dependencies = {}) {
 	const final = { ...output, success: true, results, hotelRunnerApiCalls: 0, outboundHttpAllowed: false };
 	console.log(JSON.stringify(final, null, 2));
 	return final;
+}
+
+async function run(options = parseArguments(), dependencies = {}) {
+	return runForTargets(TARGETS, options, dependencies, {
+		npmScript: "ota:recover-missed-direct-20260813",
+	});
 }
 
 if (require.main === module) {
@@ -1831,6 +1902,7 @@ module.exports = {
 	assertRequiredIndexes,
 	broadConfirmationLookup,
 	buildPlan,
+	buildPlanForTargets,
 	canonicalize,
 	dateOnly,
 	emailFromAudit,
@@ -1849,11 +1921,15 @@ module.exports = {
 	noNetworkSarConversionOptions,
 	plausibleManualCandidates,
 	parseArguments,
+	parseArgumentsForRepair,
 	parseProof,
 	proofToken,
 	recoveryMarkerMatches,
+	recoveryPolicyForTarget,
+	recoveryPolicyForTargets,
 	resolveExpectedDocument,
 	run,
+	runForTargets,
 	stampRecoveryProvenance,
 	stripArchivedSubject,
 	terminalLifecycle,
