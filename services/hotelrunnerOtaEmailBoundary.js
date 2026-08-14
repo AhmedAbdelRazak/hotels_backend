@@ -37,12 +37,14 @@ function hasDirectHotelRunnerProjection(reservation = {}) {
  */
 function hasActiveHotelRunnerLifecycleAuthority(
 	reservation = {},
-	config = require("./hotelrunnerConfig").getHotelRunnerConfig()
+	config
 ) {
-	return (
-		config?.integrationEnabled === true &&
-		hasDirectHotelRunnerProjection(reservation)
-	);
+	if (!hasDirectHotelRunnerProjection(reservation)) return false;
+	const resolvedConfig =
+		config === undefined
+			? require("./hotelrunnerConfig").getHotelRunnerConfig()
+			: config;
+	return resolvedConfig?.integrationEnabled === true;
 }
 
 module.exports = {

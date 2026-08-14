@@ -11765,19 +11765,31 @@ function supplierDataHasProtectedState(existing = {}) {
 
 function authoritativeExistingRefreshProtectedStateGuard(existing = {}) {
 	const reject = (reason) => ({ ok: false, reason });
+	const pristineUnresolvedOtaCollect =
+		isPristineMachineGeneratedUnresolvedOtaCollectBaseline(existing);
 	if (
-		paymentDetailsHaveProtectedActivity(existing.payment_details) ||
-		hasCaptureOrSettlementActivity(existing)
+		!pristineUnresolvedOtaCollect &&
+		(paymentDetailsHaveProtectedActivity(existing.payment_details) ||
+			hasCaptureOrSettlementActivity(existing))
 	) {
 		return reject("capture_or_settlement");
 	}
-	if (paidAmountBreakdownHasProtectedState(existing)) {
+	if (
+		!pristineUnresolvedOtaCollect &&
+		paidAmountBreakdownHasProtectedState(existing)
+	) {
 		return reject("payment_breakdown");
 	}
-	if (topLevelPaymentStateHasProtectedDrift(existing)) {
+	if (
+		!pristineUnresolvedOtaCollect &&
+		topLevelPaymentStateHasProtectedDrift(existing)
+	) {
 		return reject("payment_state");
 	}
-	if (financialCycleHasProtectedState(existing)) {
+	if (
+		!pristineUnresolvedOtaCollect &&
+		financialCycleHasProtectedState(existing)
+	) {
 		return reject("financial_cycle");
 	}
 	if (adminPricingHasProtectedState(existing)) {
@@ -14135,6 +14147,108 @@ function hasVerifiedSourceBackedDirectHotelId(normalized = {}, hotelDetails = {}
 			hasSourceField(normalized, "airbnbListingTitle") ||
 			containsConfiguredZadAjyadAlias(normalized.hotelIdMatchedValue))
 	);
+}
+
+function isPristineMachineGeneratedUnresolvedOtaCollectBaseline(existing = {}) {
+	const supplier = existing.supplierData || {};
+	const rawProviderMarkers = [
+		supplier.otaProvider,
+		supplier.supplierName,
+		existing?.otaPlatformReview?.provider,
+		existing.booking_source,
+		existing?.customer_details?.booking_source,
+	].filter((value) => normalizeWhitespace(value));
+	const providerMarkers = rawProviderMarkers.map(normalizeStoredCanonicalProvider);
+	const provider = providerMarkers[0] || "";
+	const rawCollectionModels = [
+		supplier.otaPaymentCollectionModel,
+		existing.paymentCollectionModel,
+	].filter((value) => normalizeWhitespace(value));
+	const collectionModels = rawCollectionModels.map(
+		normalizeStoredPaymentCollectionModel
+	);
+	if (
+		!provider ||
+		providerMarkers.some((value) => !value || value !== provider) ||
+		!collectionModels.length ||
+		collectionModels.some((value) => value !== "ota_collect") ||
+		existing.total_amount !== null ||
+		existing.paid_amount !== null ||
+		typeof existing.sub_total !== "number" ||
+		!Number.isFinite(existing.sub_total) ||
+		typeof existing.commission !== "number" ||
+		!Number.isFinite(existing.commission)
+	) {
+		return false;
+	}
+
+	const breakdown = existing.paid_amount_breakdown;
+	const comment = normalizeWhitespace(breakdown?.payment_comments || "");
+	const commentMatch = comment.match(
+		/^(.+?) collection model reported; property-currency amount unavailable$/i
+	);
+	if (
+		!commentMatch ||
+		knownBookingSourceProvider(commentMatch[1]) !== provider
+	) {
+		return false;
+	}
+
+	const expected = resolvePaymentMapping(
+		{
+			paymentCollectionModel: "ota_collect",
+			bookingSource: commentMatch[1],
+		},
+		null,
+		existing.sub_total,
+		existing.commission
+	);
+	if (
+		existing.payment !== expected.payment ||
+		existing.financeStatus !== expected.financeStatus ||
+		existing.paid_amount !== expected.paidAmount ||
+		!protectedValuesEqual(breakdown, expected.paidAmountBreakdown)
+	) {
+		return false;
+	}
+
+	const cycle = existing.financial_cycle;
+	if (
+		!cycle ||
+		typeof cycle !== "object" ||
+		Array.isArray(cycle) ||
+		!validOtaEventDate(cycle.lastUpdatedAt) ||
+		!protectedValuesEqual(
+			withoutObjectKeys(cycle, ["lastUpdatedAt"]),
+			withoutObjectKeys(expected.financialCycle, ["lastUpdatedAt"])
+		)
+	) {
+		return false;
+	}
+
+	const details = existing.payment_details;
+	if (
+		!details ||
+		typeof details !== "object" ||
+		Array.isArray(details) ||
+		details.captured !== false ||
+		typeof details.onsite_paid_amount !== "number" ||
+		!Number.isFinite(details.onsite_paid_amount) ||
+		details.onsite_paid_amount !== 0 ||
+		Object.keys(details).some(
+			(key) => !["captured", "onsite_paid_amount"].includes(key)
+		)
+	) {
+		return false;
+	}
+
+	// Normalize only the mapper's own review placeholder before invoking the
+	// ordinary capture detector. Every processor, transfer, commission,
+	// callback, employee, or settlement signal remains a hard blocker.
+	return !hasCaptureOrSettlementActivity({
+		...existing,
+		financial_cycle: { ...cycle, status: "open" },
+	});
 }
 
 function authoritativeExistingRefreshGuard({

@@ -51,6 +51,52 @@ test("direct HotelRunner ownership requires a reservation-level projection marke
 	);
 });
 
+test("ordinary email reservations do not load dormant HotelRunner configuration", () => {
+	const configPath = require.resolve("./hotelrunnerConfig");
+	const cached = require.cache[configPath];
+	delete require.cache[configPath];
+	try {
+		assert.equal(
+			hasActiveHotelRunnerLifecycleAuthority({
+				supplierData: {
+					otaAutomationPipeline: "ota-email-orchestrator",
+					otaSourceAuthority: 1,
+				},
+			}),
+			false
+		);
+		assert.equal(require.cache[configPath], undefined);
+	} finally {
+		if (cached) require.cache[configPath] = cached;
+		else delete require.cache[configPath];
+	}
+});
+
+test("a proven direct projection still consults the default runtime flag", () => {
+	const key = "HOTELRUNNER_INTEGRATION_ENABLED";
+	const originalValue = process.env[key];
+	const configPath = require.resolve("./hotelrunnerConfig");
+	const cached = require.cache[configPath];
+	delete require.cache[configPath];
+	try {
+		process.env[key] = "false";
+		assert.equal(
+			hasActiveHotelRunnerLifecycleAuthority(projectedReservation),
+			false
+		);
+		process.env[key] = "true";
+		assert.equal(
+			hasActiveHotelRunnerLifecycleAuthority(projectedReservation),
+			true
+		);
+	} finally {
+		if (originalValue === undefined) delete process.env[key];
+		else process.env[key] = originalValue;
+		delete require.cache[configPath];
+		if (cached) require.cache[configPath] = cached;
+	}
+});
+
 test("direct ownership requires the complete atomic HotelRunner projection stamp", () => {
 	assert.equal(
 		hasDirectHotelRunnerProjection({

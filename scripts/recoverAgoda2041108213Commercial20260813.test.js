@@ -6,6 +6,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const ReservationModel = require("../models/reservations");
+const HotelDetailsModel = require("../models/hotel_details");
 
 const {
 	PROOF_MAX_AGE_MS,
@@ -29,7 +31,10 @@ const {
 	scopeHashes,
 	withOutboundHttpBlocked,
 } = require("./recoverAgoda2041108213Commercial20260813");
-const { hashText } = require("../services/otaReservationMapper");
+const {
+	hashText,
+	reconcileOtaReservation,
+} = require("../services/otaReservationMapper");
 
 const PLANNED_AT = new Date("2026-08-14T01:20:00.000Z");
 const disabledEnv = () => ({
@@ -231,12 +236,35 @@ function fixtureReservation(target) {
 		commission: 0,
 		commission_ota: null,
 		currency: "SAR",
-		payment: "paid online",
-		financeStatus: "paid online",
+		payment: "ota collect - amount unavailable",
+		financeStatus: "commercial review required",
 		paid_amount: null,
-		paid_amount_breakdown: {},
+		paid_amount_breakdown: {
+			paid_online_via_link: 0,
+			paid_at_hotel_cash: 0,
+			paid_at_hotel_card: 0,
+			paid_to_hotel: 0,
+			paid_online_jannatbooking: 0,
+			paid_online_other_platforms: null,
+			paid_online_via_instapay: 0,
+			paid_no_show: 0,
+			payment_comments:
+				"Agoda collection model reported; property-currency amount unavailable",
+		},
 		payment_details: { captured: false, onsite_paid_amount: 0 },
-		financial_cycle: { collectionModel: "pending", status: "open" },
+		financial_cycle: {
+			collectionModel: "provider_collected_unresolved",
+			status: "review_required",
+			commissionType: "amount",
+			commissionValue: 0,
+			commissionAmount: 0,
+			commissionAssigned: false,
+			pmsCollectedAmount: null,
+			hotelCollectedAmount: 0,
+			hotelPayoutDue: null,
+			commissionDueToPms: 0,
+			lastUpdatedAt: new Date("2026-08-14T01:09:03.903Z"),
+		},
 		moneyTransferredToHotel: false,
 		commissionPaid: false,
 		roomId: [],
@@ -279,6 +307,8 @@ function fixtureReservation(target) {
 			otaSourceAmount: target.payoutSar,
 			otaLastSourceReceivedAt: new Date(target.relayLastSourceReceivedAt),
 			otaLastEventType: "new",
+			otaHotelRoomConfigId: target.roomConfigId,
+			otaMatchedRoomName: target.roomDisplayName,
 			otaRoomMatchType: target.originalRoomMatchType,
 			otaRoomMatchScore: target.originalRoomMatchScore,
 			otaPaymentCollectionModel: "ota_collect",
@@ -619,6 +649,75 @@ test("normal apply completes the guarded Reservation refresh and direct-audit fi
 	assert.equal(fixture.store.direct.reconciliation.repairId, REPAIR_ID);
 	assert.equal(fixture.store.direct.reservationMongoId, fixture.target.reservationId);
 	assert.deepEqual(relayTruthSnapshot(fixture.target, fixture.store.relay), relayBefore);
+});
+
+test("the real ordinary reconciler upgrades the exact mapper-generated unresolved OTA-collect baseline", async () => {
+	const fixture = makeFixtureDependencies();
+	const originals = {
+		reservationFindById: ReservationModel.findById,
+		reservationFind: ReservationModel.find,
+		reservationUpdateOne: ReservationModel.updateOne,
+		hotelFindById: HotelDetailsModel.findById,
+		hotelFind: HotelDetailsModel.find,
+	};
+	ReservationModel.findById = (documentId) => {
+		assert.equal(String(documentId), fixture.target.reservationId);
+		return query(fixture.store.reservation);
+	};
+	ReservationModel.find = () => ({
+		limit() {
+			return this;
+		},
+		select() {
+			return this;
+		},
+		exec: async () => [fixture.store.reservation],
+	});
+	ReservationModel.updateOne = async (filter, update) => {
+		fixture.writes.reservation += 1;
+		fixture.writes.lastReservationFilter = filter;
+		fixture.store.reservation = applyUpdateForProof(
+			fixture.store.reservation,
+			update
+		);
+		return { matchedCount: 1, modifiedCount: 1 };
+	};
+	HotelDetailsModel.findById = (documentId) => {
+		assert.equal(String(documentId), fixture.target.hotelId);
+		return query(fixture.store.hotel);
+	};
+	HotelDetailsModel.find = () => ({
+		select() {
+			return this;
+		},
+		lean: async () => [fixture.store.hotel],
+		exec: async () => [fixture.store.hotel],
+	});
+
+	try {
+		const dependencies = {
+			...fixture.dependencies,
+			Reservations: ReservationModel,
+			HotelDetails: HotelDetailsModel,
+			reconcileOtaReservation,
+		};
+		const scope = await loadScope(fixture.target, dependencies);
+		const result = await applyRecovery(planForScope(scope), dependencies);
+		assert.equal(result.action, "refresh_via_ordinary_ota_reconciler");
+		assert.equal(fixture.writes.reservation, 1);
+		assert.equal(fixture.writes.direct, 1);
+		assert.equal(fixture.writes.relay, 0);
+		assert.equal(
+			assertAppliedReservation(fixture.target, fixture.store.reservation),
+			true
+		);
+	} finally {
+		ReservationModel.findById = originals.reservationFindById;
+		ReservationModel.find = originals.reservationFind;
+		ReservationModel.updateOne = originals.reservationUpdateOne;
+		HotelDetailsModel.findById = originals.hotelFindById;
+		HotelDetailsModel.find = originals.hotelFind;
+	}
 });
 
 test("post-read commercial assertions fail closed on report or evidence alias tampering", async () => {
