@@ -1745,6 +1745,7 @@ const wrappedDirectTripRoomEmail = ({
 	guestGross = "16.83",
 	hotelPayout = "15.89",
 	newReservation = false,
+	guestName = "Synthetic Guest",
 } = {}) => ({
 	from: "Trip.com <ebooking@trip.com>",
 	to: "ota@example.com",
@@ -1760,7 +1761,7 @@ const wrappedDirectTripRoomEmail = ({
 		`Booking no. # ${confirmationNumber} #`,
 		"Zad Ajyad Hotel",
 		"Guest Name:",
-		"Synthetic Guest",
+		guestName,
 		"Staying period: Aug 10, 2026 - Aug 11, 2026 | 1 night",
 		"Room Type:Comfort Quadruple Room - Zad Ajyad Hotel - Bus to Haram",
 		"Flexible-before the day of arrival-Room Only-Prepay | 1 room(s)AllotmentBed",
@@ -1792,6 +1793,74 @@ test("production-shaped wrapped Trip room labels remain one source-backed room",
 	assert.equal(normalized.sourceAmount, 16.83);
 	assert.equal(normalized.sourceCurrency, "USD");
 	assert.equal(normalized.paymentSummary.sourceTotalPayoutAmount, 15.89);
+});
+
+test("direct Trip surname/given guest names display in given-name order only for the dedicated template", () => {
+	for (const [sourceName, expectedName] of [
+		["FAMILY/GIVEN", "Given FAMILY"],
+		["Family/Given Middle", "Given Middle Family"],
+		["FAMILY/GIVEN-MIDDLE", "Given-Middle FAMILY"],
+		["ABDALLA/SALAH", "Salah ABDALLA"],
+		["Sadiyah/Maulina Ummatus", "Maulina Ummatus Sadiyah"],
+		["Magdy/Hesham", "Hesham Magdy"],
+	]) {
+		const email = wrappedDirectTripRoomEmail({ guestName: sourceName });
+		const normalized = extractNormalizedReservation({
+			...email,
+			html: email.text
+				.split("\n")
+				.map((line) => `<div>${line}</div>`)
+				.join(""),
+		});
+
+		assert.equal(normalized.directTripTemplateMatched, true, sourceName);
+		assert.deepEqual(normalized.directTripMimeConflictFields, [], sourceName);
+		assert.equal(normalized.guestName, expectedName, sourceName);
+		assert.equal(normalized.sourcePresence.guestName, true, sourceName);
+	}
+
+	for (const unchangedName of [
+		"Single Guest",
+		"/Given",
+		"Family/",
+		"Family/Given/Extra",
+		"123/456",
+	]) {
+		const normalized = extractNormalizedReservation(
+			wrappedDirectTripRoomEmail({ guestName: unchangedName })
+		);
+		assert.equal(normalized.guestName, unchangedName, unchangedName);
+	}
+
+	const normalized = extractNormalizedReservation(
+		wrappedDirectTripRoomEmail({ guestName: "FAMILY/GIVEN" })
+	);
+	const built = buildReservationDocument(normalized, {
+		_id: "trip-name-hotel",
+		belongsTo: "trip-name-owner",
+		roomCountDetails: [
+			{
+				_id: "trip-name-room",
+				roomType: "quadRooms",
+				displayName: normalized.roomName,
+				activeRoom: true,
+				price: { basePrice: 75 },
+			},
+		],
+	});
+	assert.equal(built.ok, true, JSON.stringify(built));
+	assert.equal(built.document.customer_details.name, "Given FAMILY");
+
+	const nonTemplateEmail = wrappedDirectTripRoomEmail({
+		guestName: "Family/Given",
+	});
+	nonTemplateEmail.text = nonTemplateEmail.text.replace(
+		/Your payout[^\n]+\n/,
+		""
+	);
+	const nonTemplate = extractNormalizedReservation(nonTemplateEmail);
+	assert.equal(nonTemplate.directTripTemplateMatched, false);
+	assert.equal(nonTemplate.guestName, "Family/Given");
 });
 
 const productionTripTwoRoomEmail = ({

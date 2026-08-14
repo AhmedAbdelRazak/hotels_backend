@@ -556,59 +556,73 @@ test("compact admin rows show provider-collected OTA money as captured without a
   assert.equal(result.body.scorecards.capturedReservations, 1);
 });
 
-test("compact admin rows reflect an already-saved OTA pricing breakdown", async () => {
+test("compact admin rows display saved Trip pricing despite source-only USD evidence", async () => {
   const otaReservation = baseReservation({
     id: "65e000000000000000000005",
     hotelId: HOTEL_A,
     hotelName: "Hotel Alpha",
-    confirmation: "ota-saved-breakdown-1",
+	confirmation: "trip-saved-source-only-1",
     name: "Saved Breakdown Guest",
     createdAt: now,
   });
-  otaReservation.booking_source = "channel-partner";
-  otaReservation.customer_details.booking_source = "channel-partner";
+  otaReservation.booking_source = "trip.com";
+  otaReservation.customer_details.booking_source = "trip.com";
   otaReservation.currency = "sar";
-  otaReservation.total_amount = 65.03;
+  otaReservation.total_amount = 372.83;
   otaReservation.adminPricing = {
     mode: "ota_review",
-    clientTotal: 65.03,
-    rootTotal: 75,
-    netAfterExpensesTotal: 52.02,
-    otaExpenseTotal: 13.01,
-    platformMarginTotal: -22.98,
+    propertyCurrency: "SAR",
+    clientTotal: 372.83,
+    rootTotal: 306,
+    netAfterExpensesTotal: 352.13,
+    otaExpenseTotal: 20.7,
+    platformMarginTotal: 46.13,
   };
   otaReservation.adminPricingVisibility = {
     rootOnlyForHotelManagement: true,
   };
   otaReservation.ota_financial_summary = {
     currency: "SAR",
-    clientTotal: 65.03,
-    netAfterExpenses: 52.02,
-    netAfterOtaExpenses: 52.02,
-    otaExpenseTotal: 13.01,
+    clientTotal: 372.83,
+    netAfterExpenses: 352.13,
+    netAfterOtaExpenses: 352.13,
+    otaExpenseTotal: 20.7,
   };
   otaReservation.supplierData = {
-    hotelRunner: {
-      transport: "hotelrunner_api",
-      reservationId: "channel-reservation-1",
-    },
+    otaProvider: "trip",
+    otaCommercialEvidence: buildAuthenticatedProviderCommercialEvidence({
+      provider: "trip",
+      authenticatedProvider: "trip",
+      sourceAuthenticated: true,
+      sourceTrusted: true,
+      sourceType: "authenticated_ota_email",
+      sourceCurrency: "USD",
+      propertyCurrency: "SAR",
+      bookingBasis: "reservation_total",
+      sourceHash: "c".repeat(64),
+      sourceTimestamp: "2026-08-14T05:00:00.000Z",
+      sourceId: "trip-1567953939695657",
+      guestGross: { verified: true, amount: 99.42 },
+      hotelPayout: { verified: true, amount: 93.9 },
+    }),
   };
 
   const result = await runHandler({
     honorProjection: true,
-    query: { searchQuery: "ota-saved-breakdown-1" },
+	query: { searchQuery: "trip-saved-source-only-1" },
     profile: { _id: ADMIN_ID, role: 1000, roleDescription: "super admin" },
     sourceDocuments: [otaReservation],
   });
 
   assert.equal(result.body.data.length, 1);
-  assert.equal(result.body.data[0].gross_total_amount, 65.03);
-  assert.equal(result.body.data[0].net_total_amount, 52.02);
+  assert.equal(result.body.data[0].gross_total_amount, 372.83);
+  assert.equal(result.body.data[0].net_total_amount, 352.13);
   assert.equal(result.body.data[0].financial_totals_currency, "SAR");
   assert.equal(result.body.data[0].gross_total_available, true);
   assert.equal(result.body.data[0].net_total_available, true);
-  assert.equal(result.body.data[0].adminPricing.clientTotal, 65.03);
-  assert.equal(result.body.data[0].adminPricing.netAfterExpensesTotal, 52.02);
+  assert.equal(result.body.data[0].adminPricing.clientTotal, 372.83);
+  assert.equal(result.body.data[0].adminPricing.netAfterExpensesTotal, 352.13);
+  assert.equal(result.body.data[0].supplierData.otaCommercialEvidence, undefined);
 });
 
 test("financial totals resolve from the persisted OTA summary before the display summary is derived", async () => {

@@ -92,6 +92,51 @@ const savedHotelRunnerPricing = () => ({
 	},
 });
 
+const productionShapedTripSavedPricing = () => ({
+	booking_source: "trip.com",
+	currency: "sar",
+	total_amount: 372.83,
+	paid_amount: 372.83,
+	sub_total: 306,
+	adminPricing: {
+		mode: "ota_review",
+		propertyCurrency: "SAR",
+		clientTotal: 372.83,
+		rootTotal: 306,
+		netAfterExpensesTotal: 352.13,
+		otaExpenseTotal: 20.7,
+		platformMarginTotal: 46.13,
+		clientTotalOverrideActive: false,
+	},
+	ota_financial_summary: {
+		propertyCurrency: "SAR",
+		clientTotal: 372.83,
+		hotelVisibleAmount: 450,
+		netAfterExpenses: 352.13,
+		netAfterOtaExpenses: 352.13,
+		otaExpenseTotal: 20.7,
+	},
+	supplierData: {
+		otaProvider: "trip",
+		otaCommercialEvidenceStaleReason: "",
+		otaCommercialEvidence: buildAuthenticatedProviderCommercialEvidence({
+			provider: "trip",
+			authenticatedProvider: "trip",
+			sourceAuthenticated: true,
+			sourceTrusted: true,
+			sourceType: "authenticated_ota_email",
+			sourceCurrency: "USD",
+			propertyCurrency: "SAR",
+			bookingBasis: "reservation_total",
+			sourceHash: HASH,
+			sourceTimestamp: "2026-08-14T05:00:00.000Z",
+			sourceId: "trip-1567953939695657",
+			guestGross: { verified: true, amount: 99.42 },
+			hotelPayout: { verified: true, amount: 93.9 },
+		}),
+	},
+});
+
 const auditedOtaPricingOverride = () => {
 	const actorId = "64a000000000000000000001";
 	const reviewedAt = "2026-08-13T19:35:15.199Z";
@@ -253,6 +298,141 @@ test("calculated admin pricing preserves gross, net, and a genuine zero payout",
 	assert.equal(negative.netAvailable, true);
 });
 
+test("production Trip saved pricing stays visible when source-only USD evidence has no property roles", () => {
+	const totals = resolveAdminReservationFinancialTotals(
+		productionShapedTripSavedPricing()
+	);
+	assert.deepEqual(
+		{
+			gross: totals.grossTotalAmount,
+			net: totals.netTotalAmount,
+			currency: totals.currency,
+			grossSource: totals.grossSource,
+			netSource: totals.netSource,
+		},
+		{
+			gross: 372.83,
+			net: 352.13,
+			currency: "SAR",
+			grossSource: "persisted_admin_pricing",
+			netSource: "persisted_admin_pricing",
+		}
+	);
+});
+
+test("persisted summary payment roles and complete legacy nightly roles remain displayable", () => {
+	const summaryOnly = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		adminPricing: { mode: "" },
+		ota_financial_summary: {
+			paymentSummary: {
+				currency: "SAR",
+				totalGuestPaymentAmount: 30,
+				totalPayoutAmount: 24,
+			},
+		},
+	});
+	assert.equal(summaryOnly.grossTotalAmount, 30);
+	assert.equal(summaryOnly.netTotalAmount, 24);
+
+	const nightlyOnly = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		paid_amount: 999,
+		sub_total: 888,
+		adminPricing: { mode: "" },
+		pickedRoomsType: [
+			{
+				count: 2,
+				pricingByDay: [
+					{
+						price: 15,
+						rootPrice: 444,
+						netAfterExpenses: 12,
+					},
+				],
+			},
+		],
+	});
+	assert.equal(nightlyOnly.grossTotalAmount, 30);
+	assert.equal(nightlyOnly.netTotalAmount, 24);
+	assert.equal(nightlyOnly.grossSource, "persisted_nightly_pricing");
+	assert.equal(nightlyOnly.netSource, "persisted_nightly_pricing");
+});
+
+test("persisted role selection never mixes currencies and prefers real nightly gross over schema zero", () => {
+	const mixedWithSarPayout = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		adminPricing: {
+			mode: "ota_review",
+			propertyCurrency: "SAR",
+			clientTotal: 100,
+		},
+		ota_financial_summary: {
+			currency: "USD",
+			netAfterExpenses: 20,
+		},
+		supplierData: { otaTotalPayoutSar: 75 },
+	});
+	assert.equal(mixedWithSarPayout.grossTotalAmount, 100);
+	assert.equal(mixedWithSarPayout.netTotalAmount, 75);
+	assert.equal(mixedWithSarPayout.currency, "SAR");
+	assert.equal(mixedWithSarPayout.netSource, "persisted_supplier_pricing");
+
+	const mixedWithoutSarPayout = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		adminPricing: {
+			mode: "ota_review",
+			propertyCurrency: "SAR",
+			clientTotal: 100,
+		},
+		ota_financial_summary: {
+			currency: "USD",
+			netAfterExpenses: 20,
+		},
+	});
+	assert.equal(mixedWithoutSarPayout.grossTotalAmount, 100);
+	assert.equal(mixedWithoutSarPayout.netTotalAmount, null);
+	assert.equal(mixedWithoutSarPayout.netAvailable, false);
+
+	const nightlyBeatsSchemaZero = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		total_amount: 0,
+		adminPricing: {
+			mode: "ota_review",
+			clientTotal: 0,
+			netAfterExpensesTotal: 70,
+		},
+		pickedRoomsPricing: [
+			{
+				count: 1,
+				pricingByDay: [
+					{ clientPrice: 75, netAfterExpenses: 70 },
+				],
+			},
+		],
+	});
+	assert.equal(nightlyBeatsSchemaZero.grossTotalAmount, 75);
+	assert.equal(nightlyBeatsSchemaZero.netTotalAmount, 70);
+
+	const explicitSummaryZero = resolveAdminReservationFinancialTotals({
+		booking_source: "trip.com",
+		currency: "SAR",
+		total_amount: 50,
+		adminPricing: { mode: "ota_review" },
+		ota_financial_summary: {
+			currency: "SAR",
+			netAfterExpenses: 0,
+		},
+	});
+	assert.equal(explicitSummaryZero.netTotalAmount, 0);
+	assert.equal(explicitSummaryZero.netAvailable, true);
+});
+
 test("a fully reconciled audited OTA review override supersedes immutable source evidence for display", () => {
 	const totals = resolveAdminReservationFinancialTotals(
 		auditedOtaPricingOverride()
@@ -270,7 +450,7 @@ test("a fully reconciled audited OTA review override supersedes immutable source
 	});
 });
 
-test("audited OTA overrides fail closed when any server stamp or pricing invariant is broken", () => {
+test("invalid audited override claims fall back to the separately persisted display roles", () => {
 	const variants = [
 		(reservation) => {
 			reservation.adminPricing.clientTotalOverrideActive = false;
@@ -377,8 +557,10 @@ test("audited OTA overrides fail closed when any server stamp or pricing invaria
 		const reservation = auditedOtaPricingOverride();
 		mutate(reservation);
 		const totals = resolveAdminReservationFinancialTotals(reservation);
-		assert.equal(totals.grossTotalAmount, null);
-		assert.equal(totals.netTotalAmount, null);
+		assert.equal(totals.grossAvailable, true);
+		assert.equal(totals.netAvailable, true);
+		assert.equal(totals.grossSource, "persisted_admin_pricing");
+		assert.equal(totals.netSource, "persisted_admin_pricing");
 	}
 });
 
@@ -411,22 +593,22 @@ test("stored calculated pricing roles feed HotelRunner rows for any OTA provider
 		assert.equal(totals.currency, "SAR");
 		assert.equal(totals.grossAvailable, true);
 		assert.equal(totals.netAvailable, true);
-		assert.equal(totals.grossSource, "saved_pricing_breakdown");
-		assert.equal(totals.netSource, "saved_pricing_breakdown");
+		assert.equal(totals.grossSource, "persisted_admin_pricing");
+		assert.equal(totals.netSource, "persisted_admin_pricing");
 	}
 });
 
-test("raw HotelRunner API totals remain unavailable without commercial evidence", () => {
+test("saved HotelRunner API role values display without commercial evidence", () => {
 	const reservation = savedHotelRunnerPricing();
 	reservation.adminPricing.mode = "hotelrunner_api";
 	const totals = resolveAdminReservationFinancialTotals(reservation);
-	assert.equal(totals.grossTotalAmount, null);
-	assert.equal(totals.netTotalAmount, null);
-	assert.equal(totals.grossAvailable, false);
-	assert.equal(totals.netAvailable, false);
+	assert.equal(totals.grossTotalAmount, 65.03);
+	assert.equal(totals.netTotalAmount, 52.02);
+	assert.equal(totals.grossAvailable, true);
+	assert.equal(totals.netAvailable, true);
 });
 
-test("saved HotelRunner pricing rejects schema zero, incomplete roles, and missing currency", () => {
+test("saved pricing displays explicit role values without requiring expense reconciliation", () => {
 	const schemaZero = savedHotelRunnerPricing();
 	Object.assign(schemaZero.adminPricing, {
 		clientTotal: 0,
@@ -440,11 +622,11 @@ test("saved HotelRunner pricing rejects schema zero, incomplete roles, and missi
 	const missingCurrency = savedHotelRunnerPricing();
 	delete missingCurrency.currency;
 
-	for (const reservation of [schemaZero, incomplete, missingCurrency]) {
-		const totals = resolveAdminReservationFinancialTotals(reservation);
-		assert.equal(totals.grossTotalAmount, null);
-		assert.equal(totals.netTotalAmount, null);
-	}
+	assert.equal(resolveAdminReservationFinancialTotals(schemaZero).grossTotalAmount, 65.03);
+	assert.equal(resolveAdminReservationFinancialTotals(schemaZero).netTotalAmount, 0);
+	assert.equal(resolveAdminReservationFinancialTotals(incomplete).grossTotalAmount, 65.03);
+	assert.equal(resolveAdminReservationFinancialTotals(incomplete).netTotalAmount, 52.02);
+	assert.equal(resolveAdminReservationFinancialTotals(missingCurrency).currency, "SAR");
 });
 
 test("saved HotelRunner pricing permits zero and negative net roles when the paired breakdown reconciles", () => {
@@ -461,7 +643,7 @@ test("saved HotelRunner pricing permits zero and negative net roles when the pai
 	}
 });
 
-test("saved HotelRunner pricing uses the 0.50 reconciliation and summary boundary", () => {
+test("persisted admin roles are not hidden by expense or duplicate-summary drift", () => {
 	const reconciliationBoundary = savedHotelRunnerPricing();
 	reconciliationBoundary.adminPricing.otaExpenseTotal = 12.51;
 	assert.equal(
@@ -475,7 +657,7 @@ test("saved HotelRunner pricing uses the 0.50 reconciliation and summary boundar
 	assert.equal(
 		resolveAdminReservationFinancialTotals(reconciliationConflict)
 			.grossTotalAmount,
-		null
+		65.03
 	);
 
 	const summaryBoundary = savedHotelRunnerPricing();
@@ -497,11 +679,11 @@ test("saved HotelRunner pricing uses the 0.50 reconciliation and summary boundar
 	};
 	assert.equal(
 		resolveAdminReservationFinancialTotals(summaryConflict).netTotalAmount,
-		null
+		52.02
 	);
 });
 
-test("present invalid, stale, or conflicting evidence never falls back to saved pricing", () => {
+test("present invalid, stale, or conflicting evidence does not hide saved display pricing", () => {
 	const invalid = savedHotelRunnerPricing();
 	invalid.supplierData.otaCommercialEvidence = { invalid: true };
 
@@ -520,12 +702,12 @@ test("present invalid, stale, or conflicting evidence never falls back to saved 
 
 	for (const reservation of [invalid, stale, conflicting]) {
 		const totals = resolveAdminReservationFinancialTotals(reservation);
-		assert.equal(totals.grossTotalAmount, null);
-		assert.equal(totals.netTotalAmount, null);
+		assert.equal(totals.grossTotalAmount, 65.03);
+		assert.equal(totals.netTotalAmount, 52.02);
 	}
 });
 
-test("malformed or explicitly present evidence markers block the saved-pricing fallback", () => {
+test("malformed evidence markers do not hide finite persisted role values", () => {
 	for (const marker of [
 		{ otaCommercialEvidence: "tampered" },
 		{ otaCommercialEvidence: [] },
@@ -546,8 +728,8 @@ test("malformed or explicitly present evidence markers block the saved-pricing f
 			otaExpenseTotal: 13.01,
 		};
 		const totals = resolveAdminReservationFinancialTotals(reservation);
-		assert.equal(totals.grossTotalAmount, null);
-		assert.equal(totals.netTotalAmount, null);
+		assert.equal(totals.grossTotalAmount, 65.03);
+		assert.equal(totals.netTotalAmount, 52.02);
 	}
 });
 
@@ -569,23 +751,25 @@ test("validated OTA evidence remains authoritative when legacy verification flag
 	}
 });
 
-test("tampered or conflicting OTA evidence fails closed instead of using paid or root amounts", () => {
+test("unavailable evidence roles use saved same-role pricing, never paid or root amounts", () => {
 	const reservation = hotelRunnerReservation();
 	reservation.paid_amount = 75;
 	reservation.sub_total = 75;
 	reservation.adminPricing.netAfterExpensesTotal = 46;
 	const totals = resolveAdminReservationFinancialTotals(reservation);
 	assert.equal(totals.grossTotalAmount, 77);
-	assert.equal(totals.netTotalAmount, null);
-	assert.equal(totals.netAvailable, false);
+	assert.equal(totals.netTotalAmount, 46);
+	assert.equal(totals.netAvailable, true);
 
 	reservation.supplierData.otaCommercialEvidence = JSON.parse(
 		JSON.stringify(reservation.supplierData.otaCommercialEvidence)
 	);
 	reservation.supplierData.otaCommercialEvidence.roles.hotelPayout.propertyAmount = 999;
 	const tampered = resolveAdminReservationFinancialTotals(reservation);
-	assert.equal(tampered.grossTotalAmount, null);
-	assert.equal(tampered.netTotalAmount, null);
+	assert.equal(tampered.grossTotalAmount, 77);
+	assert.equal(tampered.netTotalAmount, 46);
+	assert.notEqual(tampered.grossTotalAmount, reservation.paid_amount);
+	assert.notEqual(tampered.grossTotalAmount, reservation.sub_total);
 });
 
 test("source-only foreign currency evidence is never relabelled as a SAR total", () => {

@@ -28,6 +28,7 @@ const ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION = Object.freeze([
   "supplierData.otaCommissionSar",
   "supplierData.otaCommissionSource",
   "supplierData.otaCommissionSourceBacked",
+  "supplierData.otaAmountSar",
   "supplierData.otaTotalPayoutSar",
   "supplierData.otaExpenseTotalSar",
   "supplierData.otaPayoutFallbackReason",
@@ -37,6 +38,7 @@ const ADMIN_REPORT_FINANCIAL_AMOUNT_PROJECTION = Object.freeze([
   "otaIdentityKey",
   "otaCrossTransportIdentityKey",
   "pickedRoomsPricing",
+  "pickedRoomsType",
   "commission_ota",
 ]).join(" ");
 

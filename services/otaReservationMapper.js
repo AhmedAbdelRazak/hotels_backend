@@ -5323,6 +5323,29 @@ function extractDirectTripConfirmationNumbers(value = "") {
 	);
 }
 
+function normalizeDirectTripGuestName(value = "") {
+	const candidate = cleanFieldValue(value);
+	const parts = candidate.split("/").map(normalizeWhitespace);
+	if (
+		parts.length !== 2 ||
+		parts.some((part) => !part || !/\p{L}/u.test(part))
+	) {
+		return candidate;
+	}
+
+	const [surname, givenNames] = parts;
+	const uppercaseGivenNames =
+		givenNames === givenNames.toUpperCase() &&
+		givenNames !== givenNames.toLowerCase();
+	const displayedGivenNames = uppercaseGivenNames
+		? givenNames
+				.toLowerCase()
+				.replace(/(^|[\s'\u2019.-])\p{L}/gu, (letter) => letter.toUpperCase())
+		: givenNames;
+
+	return normalizeWhitespace(`${displayedGivenNames} ${surname}`);
+}
+
 function extractDirectTripMimeRepresentationFacts(value = "") {
 	const source = String(value || "").replace(/\r/g, "");
 	const datePattern = dateTextPattern();
@@ -5453,7 +5476,7 @@ function extractDirectTripMimeRepresentationFacts(value = "") {
 			/(?:^|\n)\s*([^\n]{2,120}\bHotel)\s*\n\s*Guest\s+Name\s*:/i,
 		])
 	);
-	const guestName = cleanFieldValue(
+	const guestName = normalizeDirectTripGuestName(
 		findNextLineAfterExactLabel(source, "Guest Name", 3)
 	);
 	const internalConflictFields = [];
@@ -5894,7 +5917,7 @@ function extractDirectTripFields(email = {}, text = "", provider = "") {
 			/(?:^|\n)\s*([^\n]{2,120}\bHotel)\s*\n\s*Guest\s+Name\s*:/i,
 		])
 	);
-	const guestName = cleanFieldValue(
+	const guestName = normalizeDirectTripGuestName(
 		findNextLineAfterExactLabel(text, "Guest Name", 3)
 	);
 

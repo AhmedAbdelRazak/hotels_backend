@@ -687,7 +687,7 @@ exports.reservationExecutiveSummary = async (req, res) => {
 					"supplierData.hotelRunner.transport supplierData.hotelRunner.reservationId",
 					"supplierData.hotelRunner.hrNumber supplierData.hotelRunner.pricing",
 					"supplierData.otaCommissionSar supplierData.otaCommissionSource",
-					"supplierData.otaCommissionSourceBacked supplierData.otaTotalPayoutSar",
+					"supplierData.otaCommissionSourceBacked supplierData.otaAmountSar supplierData.otaTotalPayoutSar",
 					"supplierData.otaExpenseTotalSar supplierData.otaPayoutFallbackReason",
 					"supplierData.otaPaymentSummary",
 				].join(" ")
