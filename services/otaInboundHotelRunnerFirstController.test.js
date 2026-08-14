@@ -103,23 +103,50 @@ const makeHotelRunnerRelayNormalized = (overrides = {}) => ({
 	...overrides,
 });
 
-test("master-disabled mode returns authenticated HotelRunner relays to inline email processing", () => {
-	const result = hotelRunnerFirstPreliminaryGate({
-		normalized: makeHotelRunnerRelayNormalized(),
-		inboundRecord: makeInboundRecord({
-			senderAuthentication: hotelRunnerAuthentication,
-		}),
-		config: {
-			...config,
-			integrationEnabled: false,
-			configured: false,
-			projectionEnabled: false,
-		},
-	});
-	assert.deepEqual(result, {
-		eligible: false,
-		reason: "hotelrunner_integration_disabled",
-	});
+test("master-disabled mode keeps every authenticated HotelRunner lifecycle audit-only", () => {
+	for (const [name, lifecycle] of [
+		["new", {}],
+		["not reservation", { intent: "not_reservation", eventType: "unknown" }],
+		[
+			"cancelled",
+			{
+				intent: "reservation_status",
+				eventType: "cancelled",
+				statusToApply: "cancelled",
+			},
+		],
+		[
+			"status",
+			{
+				intent: "reservation_status",
+				eventType: "status",
+				statusToApply: "confirmed",
+			},
+		],
+	]) {
+		const normalized = makeHotelRunnerRelayNormalized(lifecycle);
+		const result = hotelRunnerFirstPreliminaryGate({
+			normalized,
+			inboundRecord: makeInboundRecord({
+				senderAuthentication: hotelRunnerAuthentication,
+			}),
+			config: {
+				...config,
+				integrationEnabled: false,
+				configured: false,
+				projectionEnabled: false,
+			},
+		});
+		assert.equal(result.eligible, true, name);
+		assert.equal(result.provider, "agoda", name);
+		assert.equal(
+			result.handlingMode,
+			"hotelrunner_relay_audit_only",
+			name
+		);
+		assert.equal(result.queueAvailable, false, name);
+		assert.equal(result.normalizedReservation, normalized, name);
+	}
 });
 
 const activeHotel = Object.freeze({
@@ -242,7 +269,10 @@ test("authenticated HotelRunner relay is archived for review without mapper or c
 		result.reconciliation.skipReason,
 		"hotelrunner_relay_audit_only"
 	);
-	assert.equal(archived.processingStatus, "needs_review");
+	assert.equal(
+		archived.processingStatus,
+		"hotelrunner_relay_audit_only"
+	);
 	assert.equal(
 		archived.hotelRunnerFirstFallback.status,
 		"hotelrunner_relay_audit_only"
@@ -306,12 +336,13 @@ test("relay and direct OTA arrival order cannot collide because only direct mail
 	}
 });
 
-test("unauthenticated, generic, ambiguous, or conflicting HotelRunner relay stays ineligible", () => {
-	for (const [name, normalized, authentication] of [
+test("only authentication failure makes HotelRunner transport ineligible; incomplete relay facts stay audit-only", () => {
+	for (const [name, normalized, authentication, expectedEligible] of [
 		[
 			"unauthenticated",
 			makeHotelRunnerRelayNormalized({ sourceSenderAuthenticated: false }),
 			hotelRunnerAuthentication,
+			false,
 		],
 		[
 			"generic",
@@ -320,6 +351,7 @@ test("unauthenticated, generic, ambiguous, or conflicting HotelRunner relay stay
 				hotelRunnerCommercialSourceProviders: [],
 			}),
 			hotelRunnerAuthentication,
+			true,
 		],
 		[
 			"ambiguous provider",
@@ -327,16 +359,19 @@ test("unauthenticated, generic, ambiguous, or conflicting HotelRunner relay stay
 				hotelRunnerCommercialSourceProviders: ["agoda", "booking"],
 			}),
 			hotelRunnerAuthentication,
+			true,
 		],
 		[
 			"conflicting source",
 			makeHotelRunnerRelayNormalized({ hotelRunnerBookingSourceConflict: true }),
 			hotelRunnerAuthentication,
+			true,
 		],
 		[
 			"wrong authenticated provider",
 			makeHotelRunnerRelayNormalized(),
 			senderAuthentication,
+			false,
 		],
 	]) {
 		const result = hotelRunnerFirstPreliminaryGate({
@@ -346,7 +381,11 @@ test("unauthenticated, generic, ambiguous, or conflicting HotelRunner relay stay
 			}),
 			config,
 		});
-		assert.equal(result.eligible, false, name);
+		assert.equal(result.eligible, expectedEligible, name);
+		if (expectedEligible) {
+			assert.equal(result.provider, "hotelrunner", name);
+			assert.equal(result.handlingMode, "hotelrunner_relay_audit_only", name);
+		}
 	}
 });
 

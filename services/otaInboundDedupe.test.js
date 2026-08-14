@@ -216,7 +216,12 @@ test("failed, unlinked review, mapping, or stale in-flight claims can be reclaim
 			`${processingStatus} reconciliation link`,
 		);
 	}
-	for (const processingStatus of ["created", "updated", "duplicate_reservation"]) {
+	for (const processingStatus of [
+		"created",
+		"updated",
+		"duplicate_reservation",
+		"hotelrunner_relay_audit_only",
+	]) {
 		assert.equal(
 			isReclaimableInboundClaim({ processingStatus }, { now }),
 			false,

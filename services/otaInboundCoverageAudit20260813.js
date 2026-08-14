@@ -6,7 +6,11 @@ const crypto = require("crypto");
 const { INBOUND_CLAIM_LEASE_MS } = require("./otaInboundDedupe");
 
 const POLICY_DATE = "2026-08-13";
-const REPORT_VERSION = 3;
+// Version 4 adds represented-reservation financial completeness to the
+// identity/pipeline coverage contract.  Keep this distinct from v3 so stored
+// monitor evidence is not mistaken for having run the new materialization
+// check.
+const REPORT_VERSION = 4;
 const ARCHIVE_START = new Date("2026-05-12T00:00:00.000Z");
 const TRANSPORT_PROVIDERS = Object.freeze([
 	"agoda",
@@ -26,6 +30,23 @@ const TERMINAL_STATUSES = new Set([
 	"no_show",
 	"no-show",
 	"noshow",
+]);
+const RESERVATION_TERMINAL_STATUSES = new Set([
+	...TERMINAL_STATUSES,
+	"checked_out",
+	"checked-out",
+	"checkedout",
+	"refunded",
+]);
+const ACTIVE_OR_PENDING_RESERVATION_STATUSES = new Set([
+	"confirmed",
+	"inhouse",
+	"in_house",
+	"in-house",
+	"ota_platform_review",
+	"pending",
+	"pending_confirmation",
+	"reserved",
 ]);
 const DEFAULT_MAX_ARCHIVES = 10000;
 const DEFAULT_MAX_RESERVATIONS = 20000;
@@ -710,6 +731,112 @@ function integrityFlags(group, indexes) {
 	return sortedUnique(Array.from(flags));
 }
 
+function normalizedLifecycleStatus(value) {
+	return lower(value).replace(/[\s-]+/g, "_");
+}
+
+function positiveMoney(value) {
+	const amount = Number(value);
+	return Number.isFinite(amount) && amount > 0;
+}
+
+function samePositiveMoney(left, right) {
+	if (!positiveMoney(left) || !positiveMoney(right)) return false;
+	return Math.round(Number(left) * 100) === Math.round(Number(right) * 100);
+}
+
+function authenticatedDirectCommercialEvidence(group = {}) {
+	return group.archives.find((archive) => {
+		if (!isAuthenticatedNewArchive(archive)) return false;
+		const transportProvider = archiveTransportProvider(archive);
+		if (
+			transportProvider === "hotelrunner" ||
+			transportProvider !== group.provider
+		) {
+			return false;
+		}
+		const normalized = archive.normalizedReservation || {};
+		const summary = normalized.paymentSummary || {};
+		return Boolean(
+			normalized?.sourcePresence?.amount === true &&
+			normalized.propertyConversionVerified === true &&
+			clean(normalized.propertyCurrency).toUpperCase() === "SAR" &&
+			positiveMoney(normalized.sourceAmount) &&
+			clean(normalized.sourceCurrency) &&
+			positiveMoney(normalized.sourcePayoutAmount) &&
+			clean(normalized.sourcePayoutCurrency) &&
+			positiveMoney(normalized.totalAmountSar) &&
+			positiveMoney(normalized.totalPayoutSar) &&
+			samePositiveMoney(
+				summary.totalGuestPaymentAmount,
+				normalized.totalAmountSar
+			) &&
+			samePositiveMoney(
+				summary.totalPayoutAmount,
+				normalized.totalPayoutSar
+			) &&
+			clean(summary.currency).toUpperCase() === "SAR"
+		);
+	});
+}
+
+function isActiveOtaEmailCreatedReservation(reservation = {}) {
+	if (
+		lower(reservation?.supplierData?.otaAutomationPipeline) !==
+		"ota-email-orchestrator"
+	) {
+		return false;
+	}
+	const creationSources = [
+		reservation?.adminPricing?.source,
+		reservation?.ota_financial_summary?.source,
+	]
+		.map(lower)
+		.filter(Boolean);
+	if (!creationSources.includes("ota_email_create")) return false;
+	const statuses = sortedUnique(
+		[reservation.state, reservation.reservation_status]
+			.map(normalizedLifecycleStatus)
+			.filter(Boolean)
+	);
+	if (!statuses.length) return false;
+	if (
+		statuses.some((status) => RESERVATION_TERMINAL_STATUSES.has(status))
+	) {
+		return false;
+	}
+	return statuses.some((status) =>
+		ACTIVE_OR_PENDING_RESERVATION_STATUSES.has(status)
+	);
+}
+
+function representedFinancialIntegrityReason(
+	group = {},
+	represented = null,
+	lifecycle = []
+) {
+	if (!represented?.reservation) return "";
+	if (latestLaterTerminal(group, lifecycle)) return "";
+	if (!authenticatedDirectCommercialEvidence(group)) return "";
+	const reservation = represented.reservation;
+	if (!isActiveOtaEmailCreatedReservation(reservation)) return "";
+	const hasGross = Boolean(
+		positiveMoney(reservation.total_amount) ||
+		positiveMoney(reservation?.adminPricing?.clientTotal)
+	);
+	const hasPayout = Boolean(
+		positiveMoney(reservation?.adminPricing?.netAfterExpensesTotal) ||
+		positiveMoney(reservation?.ota_financial_summary?.netAfterExpenses) ||
+		positiveMoney(reservation?.supplierData?.otaTotalPayoutSar)
+	);
+	if (!hasGross && !hasPayout) {
+		return "authenticated_direct_gross_and_payout_not_materialized";
+	}
+	if (!hasGross) return "authenticated_direct_gross_not_materialized";
+	if (!hasPayout) return "authenticated_direct_payout_not_materialized";
+	return "";
+}
+
 function pipelineAnomalyReason(archive = {}, asOf = new Date(), leaseMs = INBOUND_CLAIM_LEASE_MS) {
 	if (!isAlignedTrustedTransportArchive(archive)) return "";
 	if (isAuthenticatedNewArchive(archive)) return "";
@@ -782,7 +909,11 @@ function pipelineAnomalyIssueKeys(
 	);
 }
 
-function buildAlertFingerprint(missingIdentities = [], pipelineIssueKeys = []) {
+function buildAlertFingerprint(
+	missingIdentities = [],
+	pipelineIssueKeys = [],
+	financialIntegrityIssueKeys = []
+) {
 	const activeIdentityKeys = sortedUnique(
 		missingIdentities
 			.filter((item) => item.status === "active_nonterminal")
@@ -794,6 +925,9 @@ function buildAlertFingerprint(missingIdentities = [], pipelineIssueKeys = []) {
 			JSON.stringify({
 				activeIdentityKeys,
 				pipelineIssueKeys: sortedUnique(pipelineIssueKeys),
+				financialIntegrityIssueKeys: sortedUnique(
+					financialIntegrityIssueKeys
+				),
 			})
 		)
 		.digest("hex");
@@ -842,6 +976,8 @@ function buildCoverageReport({
 	const creatingProcessingStatusCounts = {};
 	const integrityFlagCounts = {};
 	const missingIdentities = [];
+	const financialIntegrityIssues = [];
+	const financialIntegrityIssueKeys = [];
 	let representedIdentityCount = 0;
 	let integrityFlagIdentityCount = 0;
 
@@ -853,14 +989,36 @@ function buildCoverageReport({
 	)) {
 		increment(transportDispositionCounts, transportDisposition(group));
 		const flags = integrityFlags(group, reservationIndexes);
-		if (flags.length) integrityFlagIdentityCount += 1;
-		for (const flag of flags) increment(integrityFlagCounts, flag);
 		const represented = representedGroup(group, reservationIndexes);
 		if (represented) {
 			representedIdentityCount += 1;
 			increment(classificationCounts, "represented");
+			const lifecycle = lifecycleGroups.get(group.key) || group.archives;
+			const financialReason = representedFinancialIntegrityReason(
+				group,
+				represented,
+				lifecycle
+			);
+			if (financialReason) {
+				flags.push(financialReason);
+				financialIntegrityIssueKeys.push(group.key);
+				financialIntegrityIssues.push({
+					provider: group.provider,
+					confirmationNumber: group.confirmationNumber,
+					status: "represented_financial_integrity",
+					reason: financialReason,
+					matchMethod: represented.method,
+					transportDisposition: transportDisposition(group),
+				});
+			}
+			const uniqueFlags = sortedUnique(flags);
+			if (uniqueFlags.length) integrityFlagIdentityCount += 1;
+			for (const flag of uniqueFlags) increment(integrityFlagCounts, flag);
 			continue;
 		}
+		const uniqueFlags = sortedUnique(flags);
+		if (uniqueFlags.length) integrityFlagIdentityCount += 1;
+		for (const flag of uniqueFlags) increment(integrityFlagCounts, flag);
 		const lifecycle = lifecycleGroups.get(group.key) || group.archives;
 		const classification = missingClassification(group, lifecycle, asOfDate);
 		const item = sanitizedMissingIdentity(
@@ -868,7 +1026,7 @@ function buildCoverageReport({
 			classification,
 			lifecycle,
 			asOfDate,
-			flags
+			uniqueFlags
 		);
 		missingIdentities.push(item);
 		increment(classificationCounts, classification.classification);
@@ -879,6 +1037,11 @@ function buildCoverageReport({
 	missingIdentities.sort((left, right) =>
 		`${left.status}:${left.provider}:${left.confirmationNumber}`.localeCompare(
 			`${right.status}:${right.provider}:${right.confirmationNumber}`
+		)
+	);
+	financialIntegrityIssues.sort((left, right) =>
+		`${left.provider}:${left.confirmationNumber}`.localeCompare(
+			`${right.provider}:${right.confirmationNumber}`
 		)
 	);
 	const activeNonterminalMissingCount = missingIdentities.filter(
@@ -899,8 +1062,10 @@ function buildCoverageReport({
 		pipelineAnomalyIssueKeys(pipelineArchives, {
 			asOf: asOfDate,
 			leaseMs,
-		})
+		}),
+		financialIntegrityIssueKeys
 	);
+	const financialIntegrityIssueCount = financialIntegrityIssues.length;
 	const summary = {
 		authenticatedNewArchiveCount: eligible.length,
 		canonicalIdentityCount: groups.size,
@@ -922,6 +1087,7 @@ function buildCoverageReport({
 			pipelineAnomalies.transportProviderCounts,
 		integrityFlagIdentityCount,
 		integrityFlagCounts: sortedCounts(integrityFlagCounts),
+		financialIntegrityIssueCount,
 	};
 	const report = {
 		report: "ota_inbound_email_reservation_coverage",
@@ -935,16 +1101,25 @@ function buildCoverageReport({
 		},
 		summary,
 		missingIdentities,
+		financialIntegrityIssues,
 		alertFingerprint,
 		alert: {
 			active:
-				activeNonterminalMissingCount > 0 || pipelineAnomalies.count > 0,
-			activeIdentityCount: activeNonterminalMissingCount,
+				activeNonterminalMissingCount > 0 ||
+				pipelineAnomalies.count > 0 ||
+				financialIntegrityIssueCount > 0,
+			activeIdentityCount:
+				activeNonterminalMissingCount + financialIntegrityIssueCount,
 			incompletePipelineArchiveCount: pipelineAnomalies.count,
+			financialIntegrityIssueCount,
 			activeIssueCount:
-				activeNonterminalMissingCount + pipelineAnomalies.count,
+				activeNonterminalMissingCount +
+				pipelineAnomalies.count +
+				financialIntegrityIssueCount,
 			exitCode:
-				activeNonterminalMissingCount > 0 || pipelineAnomalies.count > 0
+				activeNonterminalMissingCount > 0 ||
+				pipelineAnomalies.count > 0 ||
+				financialIntegrityIssueCount > 0
 					? 2
 					: 0,
 			fingerprint: alertFingerprint,
@@ -986,6 +1161,18 @@ const ARCHIVE_PROJECTION = [
 	"normalizedReservation.reservationId",
 	"normalizedReservation.bookingSource",
 	"normalizedReservation.checkoutDate",
+	"normalizedReservation.propertyCurrency",
+	"normalizedReservation.propertyConversionVerified",
+	"normalizedReservation.sourceAmount",
+	"normalizedReservation.sourceCurrency",
+	"normalizedReservation.sourcePayoutAmount",
+	"normalizedReservation.sourcePayoutCurrency",
+	"normalizedReservation.totalAmountSar",
+	"normalizedReservation.totalPayoutSar",
+	"normalizedReservation.paymentSummary.totalGuestPaymentAmount",
+	"normalizedReservation.paymentSummary.totalPayoutAmount",
+	"normalizedReservation.paymentSummary.currency",
+	"normalizedReservation.sourcePresence.amount",
 	"normalizedReservation.eventType",
 	"normalizedReservation.statusToApply",
 	"normalizedReservation.hotelRunnerCommercialSourceProviders",
@@ -997,11 +1184,21 @@ const RESERVATION_PROJECTION = [
 	"otaCrossTransportIdentityKey",
 	"reservation_id",
 	"booking_source",
+	"state",
+	"reservation_status",
+	"total_amount",
+	"adminPricing.source",
+	"adminPricing.clientTotal",
+	"adminPricing.netAfterExpensesTotal",
+	"ota_financial_summary.source",
+	"ota_financial_summary.netAfterExpenses",
 	"customer_details.confirmation_number2",
 	"supplierData.suppliedBookingNo",
 	"supplierData.otaConfirmationNumber",
 	"supplierData.platformConfirmationNumber",
 	"supplierData.otaProvider",
+	"supplierData.otaAutomationPipeline",
+	"supplierData.otaTotalPayoutSar",
 	"supplierData.hotelRunner.providerNumber",
 	"supplierData.hotelRunner.channel",
 	"otaPlatformReview.confirmationNumber",
@@ -1301,6 +1498,7 @@ module.exports = {
 	normalizedTerminalStatus,
 	parseIdentityKey,
 	pipelineAnomalyReason,
+	representedFinancialIntegrityReason,
 	reservationMatchMethod,
 	summarizePipelineAnomalies,
 	transportDisposition,
