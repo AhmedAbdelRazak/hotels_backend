@@ -541,24 +541,42 @@ const sanitizeReservationAuditLogsForViewer = (
 ) => {
 	if (!reservation) return reservation;
 	if (isSuperAdminViewer(viewer)) {
-		if (!shouldMaskHotelManagementReservationSource(viewer)) return reservation;
-		const plain = toPlain(reservation);
-		const hotelManagementReservation =
-			!options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
-				? sanitizeReservationPricingForHotelViewer(plain)
-				: plain;
-		return sanitizeHotelManagementInternalWorkflowText(
-			maskReservationSourceForHotelManagement(hotelManagementReservation)
-		);
+		let privilegedReservation = reservation;
+		if (shouldMaskHotelManagementReservationSource(viewer)) {
+			const plain = toPlain(reservation);
+			const hotelManagementReservation =
+				!options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
+					? sanitizeReservationPricingForHotelViewer(plain)
+					: plain;
+			privilegedReservation = sanitizeHotelManagementInternalWorkflowText(
+				maskReservationSourceForHotelManagement(hotelManagementReservation)
+			);
+		}
+		if (isConfiguredSuperAdmin(viewer)) return privilegedReservation;
+		const withoutReconciliation = { ...toPlain(privilegedReservation) };
+		delete withoutReconciliation.payment_reconciliation;
+		["adminChangeLog", "reservationAuditLog"].forEach((field) => {
+			if (!Array.isArray(withoutReconciliation[field])) return;
+			withoutReconciliation[field] = withoutReconciliation[field].filter(
+				(entry) =>
+					entry?.field !== "payment_reconciliation" &&
+					entry?.type !== "payment_reconciliation_status_update"
+			);
+		});
+		return withoutReconciliation;
 	}
 
 	const plain = toPlain(reservation);
 	const sanitized = redactOtaEmailAuditFieldsForHotelViewer(plain);
+	delete sanitized.payment_reconciliation;
 
 	["adminChangeLog", "reservationAuditLog"].forEach((field) => {
 		if (!Array.isArray(plain?.[field])) return;
 		sanitized[field] = plain[field].filter(
-			(entry) => !shouldHideAuditEntry(entry, viewer)
+			(entry) =>
+				entry?.field !== "payment_reconciliation" &&
+				entry?.type !== "payment_reconciliation_status_update" &&
+				!shouldHideAuditEntry(entry, viewer)
 		);
 	});
 

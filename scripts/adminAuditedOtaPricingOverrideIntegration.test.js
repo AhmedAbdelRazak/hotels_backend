@@ -194,6 +194,7 @@ test("paid report uses audited gross/net scorecards through its declared project
 	Reservations.countDocuments = async () => 1;
 	Reservations.find = () => {
 		let selectedProjection = null;
+		let includesReconciliation = false;
 		return {
 			sort() {
 				return this;
@@ -208,15 +209,25 @@ test("paid report uses audited gross/net scorecards through its declared project
 				return this;
 			},
 			select(projection) {
+				if (projection === "+payment_reconciliation") {
+					includesReconciliation = true;
+					return this;
+				}
 				selectedProjection = projection;
 				financialProjections.push(projection);
 				return this;
 			},
-			lean: async () => [
-				selectedProjection
+			lean: async () => {
+				const projected = selectedProjection
 					? applyInclusiveProjection(source, selectedProjection)
-					: clone(source),
-			],
+					: clone(source);
+				if (includesReconciliation && source.payment_reconciliation) {
+					projected.payment_reconciliation = clone(
+						source.payment_reconciliation
+					);
+				}
+				return [projected];
+			},
 		};
 	};
 	Reservations.aggregate = async () => [{ ...paidAggregate }];

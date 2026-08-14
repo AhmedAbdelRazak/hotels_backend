@@ -12,6 +12,9 @@ const {
 	serializePaidBreakdownDateRanges,
 } = require("../services/paidBreakdownDateFilter");
 const { paidBreakdownReportAdmin } = require("../controllers/adminreports");
+const {
+	paymentAmountCentsExpression,
+} = require("../services/paymentReconciliation");
 
 const HOTEL_ID = "68b74714fb50e159d48c714d";
 
@@ -83,7 +86,7 @@ const withReservationReadMocks = async (
 		return count;
 	};
 	Reservations.find = (filter) => {
-		const call = { filter, projection: null };
+		const call = { filter, projection: null, includesReconciliation: false };
 		observed.findCalls.push(call);
 		const chain = {
 			sort() {
@@ -99,7 +102,11 @@ const withReservationReadMocks = async (
 				return this;
 			},
 			select(projection) {
-				call.projection = projection;
+				if (projection === "+payment_reconciliation") {
+					call.includesReconciliation = true;
+				} else {
+					call.projection = projection;
+				}
 				return this;
 			},
 			lean: async () =>
@@ -522,6 +529,182 @@ test("invalid admin date queries return 400 before reservation reads", async () 
 			);
 			assert.equal(res.statusCode, 400);
 			assert.match(res.payload?.error || "", /dateBy|dateFrom/);
+		}
+		assert.equal(readCount, 0);
+	} finally {
+		Reservations.countDocuments = originals.countDocuments;
+		Reservations.find = originals.find;
+		Reservations.aggregate = originals.aggregate;
+	}
+});
+
+test("paid report category and reconciliation filters affect rows while existing scorecard scope stays intact", async () => {
+	const row = {
+		_id: "68b74714fb50e159d48c714e",
+		hotelId: HOTEL_ID,
+		currency: "SAR",
+		total_amount: 200,
+		paid_amount_breakdown: {
+			paid_at_hotel_cash: 100,
+			paid_at_hotel_card: 25,
+			paid_online_other_platforms: 75,
+		},
+		payment_reconciliation: {
+			breakdown: {
+				paid_at_hotel_cash: {
+					status: "reconciled",
+					amountCents: 10000,
+				},
+			},
+		},
+		adminChangeLog: [
+			{ field: "safe_field", note: "safe audit" },
+			{
+				field: "payment_reconciliation",
+				batchId: "private-batch",
+				note: "private note",
+			},
+		],
+		reservationAuditLog: [
+			{ type: "safe_type", note: "safe audit" },
+			{
+				type: "payment_reconciliation_status_update",
+				batchId: "private-batch",
+				note: "private note",
+			},
+		],
+	};
+	await withReservationReadMocks(
+		async (observed) => {
+			const res = makeResponse();
+			await paidBreakdownReportAdmin(
+				{
+					query: {
+						hotelId: HOTEL_ID,
+						searchQuery: "guest-123",
+						dateBy: "createdAt",
+						dateFrom: "2026-07-01",
+						paymentBreakdownKeys:
+							"paid_at_hotel_cash,paid_at_hotel_card",
+						reconciliationStatus: "waiting",
+					},
+					profile: { role: 8000 },
+				},
+				res
+			);
+
+			assert.equal(res.statusCode, 200);
+			assert.deepEqual(res.payload.selectedPaymentBreakdownKeys, [
+				"paid_at_hotel_cash",
+				"paid_at_hotel_card",
+			]);
+			assert.equal(res.payload.reconciliationStatus, "waiting");
+			assert.equal(res.payload.data[0].selected_breakdown_total_cents, 12500);
+			assert.equal(res.payload.data[0].reconciliation_status, "waiting");
+			assert.equal(res.payload.data[0].payment_reconciliation, undefined);
+			assert.deepEqual(res.payload.data[0].adminChangeLog, [
+				{ field: "safe_field", note: "safe audit" },
+			]);
+			assert.deepEqual(res.payload.data[0].reservationAuditLog, [
+				{ type: "safe_type", note: "safe audit" },
+			]);
+			assert.deepEqual(
+				Object.keys(
+					res.payload.data[0].reconciliation_by_breakdown
+						.paid_at_hotel_cash
+				).sort(),
+				["amount", "amountCents", "reconciled", "stale", "status"].sort()
+			);
+			assert.equal(res.payload.reconciliationSummary.totalAmountCents, 12500);
+			assert.equal(
+				res.payload.reconciliationSummary.reconciledAmountCents,
+				10000
+			);
+
+			const rowClauses = clausesFor(observed.countFilter);
+			const rowCategoryClause = rowClauses.find(
+				(clause) =>
+					Array.isArray(clause?.$expr?.$or) &&
+					clause.$expr.$or.some(
+						(condition) =>
+							JSON.stringify(condition?.$gt?.[0]) ===
+							JSON.stringify(
+								paymentAmountCentsExpression("paid_at_hotel_cash")
+							)
+					)
+			);
+			assert.equal(rowCategoryClause.$expr.$or.length, 2);
+			assert.ok(rowClauses.some((clause) => clause?.$expr));
+			assert.equal(hasSearchClause(observed.countFilter), true);
+			assert.ok(dateClauseFor(observed.countFilter, "createdAt"));
+
+			const scorecardClauses = clausesFor(observed.aggregateMatch);
+			const scorecardCategoryClause = scorecardClauses.find(
+				(clause) =>
+					Array.isArray(clause?.$or) &&
+					clause.$or.some(
+						(condition) =>
+							condition?.["paid_amount_breakdown.paid_online_via_link"]
+					)
+			);
+			assert.equal(scorecardCategoryClause.$or.length, 8);
+			assert.equal(scorecardClauses.some((clause) => clause?.$expr), false);
+			assert.equal(hasSearchClause(observed.aggregateMatch), false);
+			assert.deepEqual(
+				dateClauseFor(observed.aggregateMatch, "createdAt"),
+				dateClauseFor(observed.countFilter, "createdAt")
+			);
+		},
+		{
+			rowReservations: [row],
+			financialReservations: [row],
+			aggregateResult: [
+				{
+					totalAmount: 200,
+					paidAmount: 200,
+					reconciliationTotalCents: 12500,
+					reconciliationReconciledCents: 10000,
+					reconciliationReservationsCount: 1,
+					reconciliationReconciledReservationsCount: 0,
+				},
+			],
+			count: 1,
+		}
+	);
+});
+
+test("paid report rejects injected category keys and invalid reconciliation statuses before reads", async () => {
+	const originals = {
+		countDocuments: Reservations.countDocuments,
+		find: Reservations.find,
+		aggregate: Reservations.aggregate,
+	};
+	let readCount = 0;
+	Reservations.countDocuments = async () => {
+		readCount += 1;
+		return 0;
+	};
+	Reservations.find = () => {
+		readCount += 1;
+		throw new Error("Unexpected reservation read");
+	};
+	Reservations.aggregate = async () => {
+		readCount += 1;
+		return [];
+	};
+
+	try {
+		for (const query of [
+			{ hotelId: HOTEL_ID, paymentBreakdownKeys: "$where" },
+			{ hotelId: HOTEL_ID, reconciliationStatus: "partial" },
+		]) {
+			const res = makeResponse();
+			await paidBreakdownReportAdmin(
+				{ query, profile: { role: 8000 } },
+				res
+			);
+			assert.equal(res.statusCode, 400);
+			assert.match(res.payload?.error || "", /payment|reconciliation/i);
 		}
 		assert.equal(readCount, 0);
 	} finally {

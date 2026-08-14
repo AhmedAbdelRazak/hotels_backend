@@ -61,6 +61,7 @@ const {
 const {
 	validateReservationInventoryForCreate,
 	captureReservationAvailabilitySnapshot,
+	stripClientSuppliedPaymentReconciliation,
 } = require("./reservations");
 const {
 	sanitizeReservationAdminWorkflowForPublicViewer,
@@ -1616,7 +1617,9 @@ const sendEmailWithInvoice = async (
 
 exports.createNewReservationClient = async (req, res) => {
 	try {
-		req.body = preparePublicDirectReservationPayload(req.body || {});
+		req.body = preparePublicDirectReservationPayload(
+			stripClientSuppliedPaymentReconciliation({ ...(req.body || {}) }),
+		);
 		const {
 			hotelId,
 			customerDetails,
@@ -2146,9 +2149,12 @@ exports.verifyReservationToken = async (req, res) => {
 		}
 
 		// Token is valid, extract the reservation data
-		let reservationData = preparePublicDirectReservationPayload(decoded, {
-			canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
-		});
+		let reservationData = preparePublicDirectReservationPayload(
+			stripClientSuppliedPaymentReconciliation({ ...(decoded || {}) }),
+			{
+				canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
+			},
+		);
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			reservationData,
@@ -6097,6 +6103,7 @@ exports.getRoomByIds = async (req, res) => {
 
 exports.createNewReservationClient2 = async (req, res) => {
 	try {
+		req.body = stripClientSuppliedPaymentReconciliation({ ...(req.body || {}) });
 		const {
 			sentFrom,
 			hotelId,
@@ -6960,7 +6967,9 @@ async function processPaymentFromLink({
 // Function to update reservation details
 exports.updateReservationDetails = async (req, res) => {
 	const reservationId = req.params.reservationId;
-	const updateData = req.body;
+	const updateData = stripClientSuppliedPaymentReconciliation({
+		...(req.body || {}),
+	});
 
 	try {
 		const reservation = await Reservations.findById(reservationId).exec();

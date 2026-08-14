@@ -54,6 +54,16 @@ const {
 	normalizeAdminReportFinancialMode,
 	resolveAdminReportFinancialAmount,
 } = require("../services/adminReportFinancialAmount");
+const {
+	PaymentReconciliationError,
+	buildPaymentBreakdownSelectionFilter,
+	buildReconciliationStatusFilter,
+	effectivelyReconciledExpression,
+	normalizePaymentBreakdownKeys,
+	normalizeReconciliationStatus,
+	paymentAmountCentsExpression,
+	summarizeReservationReconciliation,
+} = require("../services/paymentReconciliation");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -394,6 +404,40 @@ const computePaidBreakdownTotal = (breakdown = {}) =>
 		(sum, key) => sum + safeNumber(breakdown?.[key]),
 		0,
 	);
+
+const reconciliationBreakdownForReportResponse = (byBreakdown = {}) =>
+	Object.fromEntries(
+		Object.entries(byBreakdown).map(([key, entry = {}]) => [
+			key,
+			{
+				amount: entry.amount,
+				amountCents: entry.amountCents,
+				status: entry.status,
+				reconciled: entry.reconciled === true,
+				stale: entry.stale === true,
+			},
+		])
+	);
+
+const stripReconciliationAuditEntriesForPaidReport = (
+	reservation = {},
+	actor = {}
+) => {
+	const {
+		payment_reconciliation: _privatePaymentReconciliation,
+		...safeReservation
+	} = reservation;
+	if (isConfiguredSuperAdmin(actor)) return safeReservation;
+	for (const field of ["adminChangeLog", "reservationAuditLog"]) {
+		if (!Array.isArray(safeReservation[field])) continue;
+		safeReservation[field] = safeReservation[field].filter(
+			(entry) =>
+				entry?.field !== "payment_reconciliation" &&
+				entry?.type !== "payment_reconciliation_status_update"
+		);
+	}
+	return safeReservation;
+};
 
 /* ------------------------------------------------------------------
    3) Commission Calculation
@@ -4993,13 +5037,19 @@ const buildPaidBreakdownFilter = ({
 	dateFrom,
 	dateTo,
 	dateRanges,
+	paymentBreakdownKeys,
+	reconciliationStatus = "all",
 }) => {
 	const filters = [];
 	if (hotelId) {
 		filters.push({ hotelId: new ObjectId(hotelId) });
 	}
 	filters.push(buildExcludePendingOtaReviewFilter());
-	filters.push(buildPaidBreakdownNonZeroFilter());
+	filters.push(
+		paymentBreakdownKeys
+			? buildPaymentBreakdownSelectionFilter(paymentBreakdownKeys)
+			: buildPaidBreakdownNonZeroFilter()
+	);
 	const dateFilter = buildPaidBreakdownDateFilter({
 		dateBy,
 		dateFrom,
@@ -5009,6 +5059,11 @@ const buildPaidBreakdownFilter = ({
 	if (dateFilter) filters.push(dateFilter);
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
+	const reconciliationFilter = buildReconciliationStatusFilter(
+		paymentBreakdownKeys || PAID_BREAKDOWN_TOTAL_KEYS,
+		reconciliationStatus
+	);
+	if (reconciliationFilter) filters.push(reconciliationFilter);
 	const filter = filters.length > 1 ? { $and: filters } : filters[0];
 	addHotelManagementReservationVisibilityToFilter(filter, actor);
 	return filter;
@@ -5016,10 +5071,43 @@ const buildPaidBreakdownFilter = ({
 
 const buildPaidBreakdownScorecards = async (
 	filter,
-	{ hotelVisible = false, totalMode: requestedTotalMode = "gross" } = {}
+	{
+		hotelVisible = false,
+		totalMode: requestedTotalMode = "gross",
+		reconciliationKeys = PAID_BREAKDOWN_TOTAL_KEYS,
+	} = {}
 ) => {
 	const totalMode = normalizeAdminReportFinancialMode(requestedTotalMode);
+	const selectedReconciliationKeys = normalizePaymentBreakdownKeys(
+		reconciliationKeys,
+		{ defaultKeys: PAID_BREAKDOWN_TOTAL_KEYS }
+	);
 	const breakdownSum = paidBreakdownTotalExpression();
+	const selectedReconciliationTotalCents = {
+		$add: selectedReconciliationKeys.map(paymentAmountCentsExpression),
+	};
+	const selectedReconciledAmountCents = {
+		$add: selectedReconciliationKeys.map((key) => ({
+			$cond: [
+				effectivelyReconciledExpression(key),
+				paymentAmountCentsExpression(key),
+				0,
+			],
+		})),
+	};
+	const selectedAnyPositive = {
+		$or: selectedReconciliationKeys.map((key) => ({
+			$gt: [paymentAmountCentsExpression(key), 0],
+		})),
+	};
+	const selectedEveryPositiveReconciled = {
+		$and: selectedReconciliationKeys.map((key) => ({
+			$or: [
+				{ $lte: [paymentAmountCentsExpression(key), 0] },
+				effectivelyReconciledExpression(key),
+			],
+		})),
+	};
 	const breakdownTotalsGroup = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
 		acc[key] = {
 			$sum: hotelVisible
@@ -5040,6 +5128,17 @@ const buildPaidBreakdownScorecards = async (
 					total_amount_safe: hotelVisible
 						? hotelVisibleAmountExpression()
 						: { $ifNull: ["$total_amount", 0] },
+					reconciliation_total_cents:
+						selectedReconciliationTotalCents,
+					reconciliation_reconciled_cents:
+						selectedReconciledAmountCents,
+					reconciliation_has_positive: selectedAnyPositive,
+					reconciliation_row_reconciled: {
+						$and: [
+							selectedAnyPositive,
+							selectedEveryPositiveReconciled,
+						],
+					},
 				},
 			},
 			{
@@ -5047,6 +5146,18 @@ const buildPaidBreakdownScorecards = async (
 					_id: null,
 					totalAmount: { $sum: "$total_amount_safe" },
 					paidAmount: { $sum: "$paid_amount_safe" },
+					reconciliationTotalCents: {
+						$sum: "$reconciliation_total_cents",
+					},
+					reconciliationReconciledCents: {
+						$sum: "$reconciliation_reconciled_cents",
+					},
+					reconciliationReservationsCount: {
+						$sum: { $cond: ["$reconciliation_has_positive", 1, 0] },
+					},
+					reconciliationReconciledReservationsCount: {
+						$sum: { $cond: ["$reconciliation_row_reconciled", 1, 0] },
+					},
 					...breakdownTotalsGroup,
 				},
 			},
@@ -5065,6 +5176,22 @@ const buildPaidBreakdownScorecards = async (
 		acc[key] = safeNumber(summary[key]);
 		return acc;
 	}, {});
+	const reconciliationTotalCents = Math.round(
+		safeNumber(summary.reconciliationTotalCents)
+	);
+	const reconciliationReconciledCents = Math.round(
+		safeNumber(summary.reconciliationReconciledCents)
+	);
+	const reconciliationWaitingCents = Math.max(
+		reconciliationTotalCents - reconciliationReconciledCents,
+		0
+	);
+	const reconciliationReservationsCount = Math.round(
+		safeNumber(summary.reconciliationReservationsCount)
+	);
+	const reconciliationReconciledReservationsCount = Math.round(
+		safeNumber(summary.reconciliationReconciledReservationsCount)
+	);
 	return {
 		totalAmount: financialSummary
 			? financialSummary.totalAmount
@@ -5074,6 +5201,24 @@ const buildPaidBreakdownScorecards = async (
 		totalMode,
 		financialMetadata: financialSummary?.metadata || null,
 		financialIncludedCount: financialSummary?.includedCount ?? null,
+		reconciliation: {
+			currency: "SAR",
+			totalAmount: reconciliationTotalCents / 100,
+			totalAmountCents: reconciliationTotalCents,
+			reconciledAmount: reconciliationReconciledCents / 100,
+			reconciledAmountCents: reconciliationReconciledCents,
+			waitingAmount: reconciliationWaitingCents / 100,
+			waitingAmountCents: reconciliationWaitingCents,
+			reservationsCount: reconciliationReservationsCount,
+			reconciledReservationsCount:
+				reconciliationReconciledReservationsCount,
+			waitingReservationsCount: Math.max(
+				reconciliationReservationsCount -
+					reconciliationReconciledReservationsCount,
+				0
+			),
+			paymentBreakdownKeys: selectedReconciliationKeys,
+		},
 	};
 };
 
@@ -5089,6 +5234,16 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 
 		const { page, limit, skip } = parseReportPagination(req);
 		const searchQuery = req.query.searchQuery || "";
+		const requestedPaymentBreakdownKeys =
+			req.query.paymentBreakdownKeys ??
+			req.query["paymentBreakdownKeys[]"];
+		const selectedPaymentBreakdownKeys = normalizePaymentBreakdownKeys(
+			requestedPaymentBreakdownKeys,
+			{ defaultKeys: PAID_BREAKDOWN_TOTAL_KEYS }
+		);
+		const reconciliationStatus = normalizeReconciliationStatus(
+			req.query.reconciliationStatus
+		);
 		const dateFilterOptions = {
 			dateBy: req.query.dateBy,
 			dateFrom: req.query.dateFrom,
@@ -5109,11 +5264,14 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			hotelId,
 			searchQuery,
 			actor: req.profile,
+			paymentBreakdownKeys: selectedPaymentBreakdownKeys,
+			reconciliationStatus,
 			...dateFilterOptions,
 		});
 
 		const totalDocuments = await Reservations.countDocuments(finalFilter);
 		const reservations = await Reservations.find(finalFilter)
+			.select("+payment_reconciliation")
 			.sort({ checkin_date: -1, createdAt: -1, _id: -1 })
 			.skip(skip)
 			.limit(limit)
@@ -5125,9 +5283,17 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 		);
 
 		const scorecards = includeScorecards
-			? await buildPaidBreakdownScorecards(baseFilter, { totalMode })
+			? await buildPaidBreakdownScorecards(baseFilter, {
+					totalMode,
+					reconciliationKeys: selectedPaymentBreakdownKeys,
+			  })
 			: null;
 		const data = reservationsWithRoomDetails.map((reservation) => {
+			const reservationWithoutRawReconciliation =
+				stripReconciliationAuditEntriesForPaidReport(
+					reservation,
+					req.profile
+				);
 			const breakdown = reservation.paid_amount_breakdown || {};
 			const paidTotal = computePaidBreakdownTotal(breakdown);
 			const paidTotalCents = Math.round(paidTotal * 100);
@@ -5142,8 +5308,12 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			const reportTotalAmount = reportTotalAvailable
 				? selectedFinancialAmount.amount
 				: null;
+			const reconciliation = summarizeReservationReconciliation(
+				reservation,
+				selectedPaymentBreakdownKeys
+			);
 			return {
-				...reservation,
+				...reservationWithoutRawReconciliation,
 				paid_breakdown_total: paidTotal,
 				gross_total_amount: financialTotals.grossTotalAmount,
 				net_total_amount: financialTotals.netTotalAmount,
@@ -5161,6 +5331,15 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 							0
 					  ) / 100
 					: null,
+				selected_breakdown_total: reconciliation.totalAmount,
+				selected_breakdown_total_cents: reconciliation.totalAmountCents,
+				reconciliation_status: reconciliation.reconciliationStatus,
+				reconciliation_by_breakdown:
+					reconciliationBreakdownForReportResponse(
+						reconciliation.byBreakdown
+					),
+				selected_positive_payment_breakdown_keys:
+					reconciliation.selectedPositiveKeys,
 			};
 		});
 
@@ -5171,9 +5350,15 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			limit,
 			totalMode,
 			scorecards,
+			selectedPaymentBreakdownKeys,
+			reconciliationStatus,
+			reconciliationSummary: scorecards?.reconciliation || null,
 		});
 	} catch (err) {
-		if (err instanceof PaidBreakdownDateFilterError) {
+		if (
+			err instanceof PaidBreakdownDateFilterError ||
+			err instanceof PaymentReconciliationError
+		) {
 			return res.status(err.statusCode).json({ error: err.message });
 		}
 		console.error("Error in paidBreakdownReportAdmin:", err);
