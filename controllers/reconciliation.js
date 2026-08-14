@@ -1376,7 +1376,10 @@ exports.closestReconciliationMatch = async (req, res) => {
 			dateBy: body.dateBy,
 			dateFrom: body.dateFrom,
 			dateTo: body.dateTo,
-			dateRanges: body.dateRanges,
+			dateRanges:
+				Array.isArray(body.dateRanges) && body.dateRanges.length === 0
+					? undefined
+					: body.dateRanges,
 		});
 		const candidatesRows = await Reservations.find(filter)
 			.select(closestMatchCandidateProjection(paymentBreakdownKey))
