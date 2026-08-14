@@ -22,6 +22,7 @@ const {
 	MAX_OTA_INBOUND_ROOM_COUNT,
 	MAX_OTA_INBOUND_ROOM_NIGHT_SLOTS,
 	buildExistingReservationUpdateSet,
+	applyExistingReservationEmailUpdate,
 	buildHotelRunnerEmailCommercialEvidence,
 	buildDirectHotelRunnerCommercialPricing,
 	buildLegacyRedactedTripConflictLookup,
@@ -36,6 +37,8 @@ const {
 	authoritativeExistingRefreshProtectedStateGuard,
 	canCreateUnmappedOtaReviewReservation,
 	canUseDirectAfterRelaySourceSkew,
+	assertPmsConfirmationDistinctFromExternal,
+	assertReservationPmsConfirmationDistinct,
 	detectConfirmationMatchFields,
 	directAfterRelayInventoryConflict,
 	directAfterRelayUnmappedReviewGuard,
@@ -51,6 +54,7 @@ const {
 	applyLiveSarConversion,
 	findConfidentFuzzyHotelMatch,
 	findReservationByOtaConfirmation,
+	generateUniquePmsConfirmationNumber,
 	generateDateRange,
 	getManualOtaHotelAssignmentReason,
 	hasAmbiguousMultiRoomEvidence,
@@ -5412,6 +5416,118 @@ test("OTA identities are provider-namespaced and never query PMS confirmation nu
 	);
 });
 
+test("PMS confirmation generation excludes every current OTA identity before querying uniqueness", async () => {
+	const originalRandom = Math.random;
+	const originalExists = Reservations.exists;
+	const queriedCandidates = [];
+	const randomForConfirmation = (value) =>
+		(Number(value) - 1000000000 + 0.25) / 9000000000;
+	const randomValues = [
+		randomForConfirmation("2041108213"),
+		randomForConfirmation("2207032113"),
+	];
+
+	Math.random = () => randomValues.shift();
+	Reservations.exists = async ({ confirmation_number: candidate }) => {
+		queriedCandidates.push(String(candidate));
+		return false;
+	};
+
+	try {
+		const generated = await generateUniquePmsConfirmationNumber(2, [
+			"2041108213",
+			"agoda:2041108213",
+		]);
+		assert.equal(generated, "2207032113");
+		assert.deepEqual(
+			queriedCandidates,
+			["2207032113"],
+			"an OTA-equal random candidate must be rejected before any database lookup"
+		);
+	} finally {
+		Math.random = originalRandom;
+		Reservations.exists = originalExists;
+	}
+});
+
+test("PMS timestamp fallback skips an OTA equality and final reservation shape fails closed", async () => {
+	const originalNow = Date.now;
+	const originalExists = Reservations.exists;
+	let existsCalls = 0;
+	Date.now = () => 172041108213;
+	Reservations.exists = async () => {
+		existsCalls += 1;
+		return false;
+	};
+
+	try {
+		assert.equal(
+			await generateUniquePmsConfirmationNumber(0, ["agoda:2041108213"]),
+			"2041108214"
+		);
+		assert.equal(
+			existsCalls,
+			1,
+			"an OTA-equal fallback must be skipped before querying the next candidate"
+		);
+	} finally {
+		Date.now = originalNow;
+		Reservations.exists = originalExists;
+	}
+
+	const productionShape = {
+		confirmation_number: "2207032113",
+		pms_number: "",
+		reservation_id: "2041108213",
+		otaIdentityKey: "agoda:2041108213",
+		customer_details: { confirmation_number2: "2041108213" },
+		supplierData: {
+			pmsConfirmationNumber: "2207032113",
+			otaConfirmationNumber: "2041108213",
+			platformConfirmationNumber: "2041108213",
+			otaNormalizedSnapshot: {
+				confirmationNumber: "2041108213",
+				reservationId: "2041108213",
+			},
+		},
+	};
+	assert.equal(assertReservationPmsConfirmationDistinct(productionShape), "2207032113");
+	assert.throws(
+		() =>
+			assertReservationPmsConfirmationDistinct({
+				...productionShape,
+				confirmation_number: "2041108213",
+				supplierData: {
+					...productionShape.supplierData,
+					pmsConfirmationNumber: "2041108213",
+				},
+			}),
+		(error) => error?.code === "pms_confirmation_matches_external_ota"
+	);
+	assert.throws(
+		() =>
+			assertPmsConfirmationDistinctFromExternal("2041108213", [
+				"agoda:2041108213",
+			]),
+		(error) => error?.code === "pms_confirmation_matches_external_ota"
+	);
+	for (const mismatched of [
+		{ ...productionShape, pms_number: "9999999999" },
+		{
+			...productionShape,
+			supplierData: {
+				...productionShape.supplierData,
+				pmsConfirmationNumber: "9999999999",
+			},
+		},
+	]) {
+		assert.throws(
+			() => assertReservationPmsConfirmationDistinct(mismatched),
+			(error) => error?.code === "pms_confirmation_mirror_mismatch"
+		);
+	}
+});
+
 test("OTA identity lookup projections never contain parent-child path collisions", async () => {
 	const originalFind = Reservations.find;
 	let selectedProjection = "";
@@ -8517,7 +8633,9 @@ test("new inbound reservations keep an exact hotel selected while incompatible s
 	const originalReservationExists = Reservations.exists;
 	const originalReservationCreate = Reservations.create;
 	const originalHotelFind = HotelDetails.find;
+	const originalRandom = Math.random;
 	let createdDocument = null;
+	let createCalls = 0;
 	const hotel = {
 		_id: "6a40b6a1a6efe70450536038",
 		belongsTo: "68b74714fb50e159d48c714d",
@@ -8561,6 +8679,12 @@ test("new inbound reservations keep an exact hotel selected while incompatible s
 	});
 	Reservations.exists = async () => false;
 	Reservations.create = async (document) => {
+		createCalls += 1;
+		if (createCalls === 1) {
+			const error = new Error("simulated PMS confirmation collision");
+			error.code = 11000;
+			throw error;
+		}
 		createdDocument = document;
 		return { ...document, _id: "created-exact-hotel-review" };
 	};
@@ -8574,6 +8698,16 @@ test("new inbound reservations keep an exact hotel selected while incompatible s
 	});
 
 	try {
+		const randomForConfirmation = (value) =>
+			(Number(value) - 1000000000 + 0.25) / 9000000000;
+		const generatedCandidates = [
+			"2038704202",
+			"2207032113",
+			"2038704202",
+			"2307032113",
+		];
+		Math.random = () =>
+			randomForConfirmation(generatedCandidates.shift());
 		const directNormalized = {
 			inboundEmailId: "audit-family-four-no-family-config",
 			provider: "agoda",
@@ -8619,10 +8753,20 @@ test("new inbound reservations keep an exact hotel selected while incompatible s
 		};
 		const result = await reconcileOtaReservation(directNormalized);
 		assert.equal(result.status, "created");
+		assert.equal(createCalls, 2);
 		assert.equal(result.actionTaken, "created_unmapped_ota_review");
 		assert.equal(String(result.hotelId), hotel._id);
 		assert.equal(String(createdDocument.hotelId), hotel._id);
 		assert.equal(String(createdDocument.belongsTo), hotel.belongsTo);
+		assert.equal(createdDocument.confirmation_number, "2307032113");
+		assert.notEqual(
+			createdDocument.confirmation_number,
+			directNormalized.confirmationNumber
+		);
+		assert.equal(
+			createdDocument.supplierData.pmsConfirmationNumber,
+			createdDocument.confirmation_number
+		);
 		assert.deepEqual(createdDocument.roomId, []);
 		assert.equal(createdDocument.sub_total, 0);
 		assert.equal(createdDocument.otaPlatformReview.status, "pending");
@@ -8648,6 +8792,7 @@ test("new inbound reservations keep an exact hotel selected while incompatible s
 		Reservations.exists = originalReservationExists;
 		Reservations.create = originalReservationCreate;
 		HotelDetails.find = originalHotelFind;
+		Math.random = originalRandom;
 	}
 });
 
@@ -9623,6 +9768,7 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 		hotelId: managedHotelId,
 	});
 	let writes = 0;
+	let createAttempts = 0;
 
 	process.env.HOTELRUNNER_API_TOKEN = "synthetic-hotelrunner-token";
 	process.env.HOTELRUNNER_API_HR_ID = "synthetic-hotelrunner-property";
@@ -9652,6 +9798,12 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 	Reservations.exists = async () => false;
 	Reservations.create = async (document) => {
 		writes += 1;
+		createAttempts += 1;
+		if (createAttempts === 1) {
+			const error = new Error("simulated mapped PMS confirmation collision");
+			error.code = 11000;
+			throw error;
+		}
 		createdDocument = document;
 		return { ...document, _id: "managed-email-fallback-reservation" };
 	};
@@ -9731,13 +9883,27 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 				};
 			},
 		});
-		const managedCreation = await reconcileOtaReservation({
+		const mappedExternalConfirmation = "2041108213";
+		const originalRandom = Math.random;
+		const randomForConfirmation = (value) =>
+			(Number(value) - 1000000000 + 0.25) / 9000000000;
+		const generatedCandidates = [
+			mappedExternalConfirmation,
+			"2207032113",
+			mappedExternalConfirmation,
+			"2307032113",
+		];
+		Math.random = () =>
+			randomForConfirmation(generatedCandidates.shift());
+		let managedCreation;
+		try {
+			managedCreation = await reconcileOtaReservation({
 			inboundEmailId: "managed-hotel-new-email",
 			provider: "booking",
 			providerLabel: "Booking.com",
 			bookingSource: "Booking.com",
-			confirmationNumber: "MANAGED-NEW-1001",
-			reservationId: "MANAGED-NEW-1001",
+			confirmationNumber: mappedExternalConfirmation,
+			reservationId: mappedExternalConfirmation,
 			intent: "new_reservation",
 			eventType: "new",
 			guestName: "Managed Hotel Guest",
@@ -9794,15 +9960,24 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 				textHash: immutableFixtureTextHash(
 					"Booking.com authenticated commercial email",
 					"managed-hotel-new-email-message",
-					"MANAGED-NEW-1001",
+					mappedExternalConfirmation,
 					100,
 					80
 				),
 			},
-		});
+			});
+		} finally {
+			Math.random = originalRandom;
+		}
 		assert.equal(managedCreation.status, "created");
 		assert.equal(managedCreation.hotelId, managedHotelId);
 		assert.equal(String(createdDocument.hotelId), managedHotelId);
+		assert.equal(createAttempts, 2);
+		assert.equal(createdDocument.confirmation_number, "2307032113");
+		assert.notEqual(
+			createdDocument.confirmation_number,
+			mappedExternalConfirmation
+		);
 		assert.equal(createdDocument.total_amount, 100);
 		assert.equal(createdDocument.total_rooms, 1);
 		assert.equal(createdDocument.pickedRoomsType[0].room_type, "doubleRooms");
@@ -9819,7 +9994,7 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 			commercialEvidence.roles.hotelPayout.propertyAmount,
 			80
 		);
-		assert.equal(writes, 2);
+		assert.equal(writes, 3);
 
 		existing = makeCancellationOverrideExisting("confirmed", {
 			hotelId: ordinaryHotelId,
@@ -9840,7 +10015,7 @@ test("HotelRunner-managed properties retain OTA email fallback until a reservati
 			})
 		);
 		assert.equal(ordinaryLifecycle.status, "cancelled");
-		assert.equal(writes, 3);
+		assert.equal(writes, 4);
 	} finally {
 		if (originalToken === undefined) {
 			delete process.env.HOTELRUNNER_API_TOKEN;
@@ -15471,6 +15646,33 @@ const PRODUCTION_UNMAPPED_DIRECT_CASES = [
 		directSourceAt: "2026-08-05T09:30:48.000Z",
 	},
 ];
+
+test("an OTA refresh cannot attach a provider alias equal to the PMS confirmation", async () => {
+	const fixture = directUnmappedCase(PRODUCTION_UNMAPPED_DIRECT_CASES[0]);
+	fixture.existing.reservation_id = "";
+	fixture.normalized.reservationId = fixture.existing.confirmation_number;
+	let updateCalls = 0;
+	const originalUpdateOne = Reservations.updateOne;
+	Reservations.updateOne = async () => {
+		updateCalls += 1;
+		throw new Error("unexpected reservation mutation");
+	};
+	try {
+		await assert.rejects(
+			() =>
+				applyExistingReservationEmailUpdate({
+					normalized: fixture.normalized,
+					existing: fixture.existing,
+					statusToApply: "confirmed",
+					warnings: [],
+				}),
+			(error) => error?.code === "ota_pms_identity_collision"
+		);
+		assert.equal(updateCalls, 0);
+	} finally {
+		Reservations.updateOne = originalUpdateOne;
+	}
+});
 
 test("authoritative relay refresh protects employee, finance, payment, room, and supplier state for mapped and unmapped reviews", () => {
 	const clone = (value) => JSON.parse(JSON.stringify(value));

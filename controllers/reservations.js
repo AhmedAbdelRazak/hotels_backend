@@ -108,6 +108,23 @@ const {
 	canPlatformStaffOverrideReservationInventory,
 } = require("../services/reservationInventoryOverridePolicy");
 const {
+	createLegacyOtaImportReservation,
+	findLegacyOtaImportReservation,
+	stripLegacyOtaImportIdentityFields,
+} = require("../services/legacyOtaImportIdentity");
+const {
+	findManualOtaCreateConflict,
+	prepareManualOtaCreateDocument,
+} = require("../services/manualOtaReservationIdentity");
+const {
+	assertReservationPmsConfirmationDistinct,
+} = require("../services/pmsConfirmationAllocator");
+const {
+	isEstablishedOtaReservation,
+	protectEstablishedOtaReservationIdentityUpdate,
+	validateEstablishedOtaReservationIdentityUpdate,
+} = require("../services/otaReservationIdentityUpdatePolicy");
+const {
 	assignedHotelIds: assignedHotelIdsForReservationUpdate,
 	canEditHotelReservation,
 	sanitizeHotelReservationUpdate,
@@ -5458,6 +5475,39 @@ exports.create = async (req, res) => {
 	req.body.createdByUserId = createActor._id;
 	req.body.orderTakeId = createActor._id;
 
+	let manualOtaCreateIdentity = null;
+	try {
+		const preparedIdentity = await prepareManualOtaCreateDocument({
+			document: req.body,
+		});
+		req.body = preparedIdentity.document;
+		manualOtaCreateIdentity = preparedIdentity.identity;
+		if (manualOtaCreateIdentity) {
+			const conflict = await findManualOtaCreateConflict({
+				document: req.body,
+				identity: manualOtaCreateIdentity,
+			});
+			if (conflict) {
+				return res.status(409).json({
+					error: "An OTA reservation with this provider confirmation already exists.",
+					code: "manual_ota_identity_conflict",
+				});
+			}
+		}
+	} catch (error) {
+		if (
+			error?.statusCode ||
+			/^manual_ota_|^legacy_ota_/.test(error?.code || "")
+		) {
+			return res.status(error.statusCode || 400).json({
+				error: error.message,
+				code: error.code || "manual_ota_identity_invalid",
+				fields: Array.isArray(error.fields) ? error.fields : [],
+			});
+		}
+		throw error;
+	}
+
 	const resolveCreatedBy = async () => {
 		const actorId =
 			req.auth?._id ||
@@ -5690,45 +5740,42 @@ exports.create = async (req, res) => {
 			throw error;
 		}
 
-		const finalStatusText = String(
-			reservationPayload.reservation_status || reservationPayload.state || ""
-		).toLowerCase();
-		const shouldDirtySelectedRooms =
-			/in[-_\s]?house|checked[-_\s]?in/.test(finalStatusText);
-
-		// Check if roomId array is present and has length more than 0
-		if (
-			shouldDirtySelectedRooms &&
-			reservationData.roomId &&
-			reservationData.roomId.length > 0
-		) {
-			try {
-				// Update cleanRoom field for all rooms in the roomId array
-				await Rooms.updateMany(
-					{ _id: { $in: reservationData.roomId } },
-					{
-						$set: {
-							cleanRoom: false,
-							housekeepingLastCleanedAt: null,
-							housekeepingLastDirtyAt: new Date(),
-							housekeepingDirtyReason: "reservation_created",
-						},
-					}
-				);
-			} catch (err) {
-				console.error("Error updating Rooms cleanRoom status", err);
-				// Optionally, handle the error, for example, by returning a response
-				// return res.status(500).json({ error: "Error updating room status" });
-			}
-		}
-
 		reservationPayload.reservationAuditLog = [
 			...existingAuditLog,
 			buildReservationCreatedAuditEntry(reservationPayload, reservationActorFields),
 		];
-		const reservations = new Reservations(reservationPayload);
 		try {
+			if (manualOtaCreateIdentity) {
+				assertReservationPmsConfirmationDistinct(reservationPayload);
+			}
+			const reservations = new Reservations(reservationPayload);
 			const data = await reservations.save();
+			const finalStatusText = String(
+				reservationPayload.reservation_status || reservationPayload.state || ""
+			).toLowerCase();
+			const shouldDirtySelectedRooms =
+				/in[-_\s]?house|checked[-_\s]?in/.test(finalStatusText);
+			if (
+				shouldDirtySelectedRooms &&
+				Array.isArray(reservationPayload.roomId) &&
+				reservationPayload.roomId.length > 0
+			) {
+				try {
+					await Rooms.updateMany(
+						{ _id: { $in: reservationPayload.roomId } },
+						{
+							$set: {
+								cleanRoom: false,
+								housekeepingLastCleanedAt: null,
+								housekeepingLastDirtyAt: new Date(),
+								housekeepingDirtyReason: "reservation_created",
+							},
+						}
+					);
+				} catch (err) {
+					console.error("Error updating Rooms cleanRoom status", err);
+				}
+			}
 			res.json({ data, warnings: reservationWarnings });
 			emitHotelNotificationRefresh(req, data.hotelId, {
 				type: requiresPendingConfirmationCycle
@@ -5744,6 +5791,12 @@ exports.create = async (req, res) => {
 			}
 		} catch (err) {
 			console.log(err, "err");
+			if (manualOtaCreateIdentity && err?.code === 11000) {
+				return res.status(409).json({
+					error: "The OTA or PMS confirmation identity conflicts with an existing reservation.",
+					code: "manual_ota_identity_conflict",
+				});
+			}
 			return res.status(400).json({
 				error: "Cannot Create reservations",
 			});
@@ -5761,11 +5814,11 @@ exports.create = async (req, res) => {
 						.json({ error: "Error checking for unique number" });
 				}
 				req.body.confirmation_number = uniqueNumber;
-				saveReservation(req.body);
+				return saveReservation(req.body);
 			}
 		);
 	} else {
-		saveReservation(req.body);
+		return saveReservation(req.body);
 	}
 };
 
@@ -8059,6 +8112,16 @@ exports.updateReservation = async (req, res) => {
 		if (!existingReservation) {
 			return res.status(404).json({ error: "Reservation not found" });
 		}
+		const otaIdentityProtection =
+			protectEstablishedOtaReservationIdentityUpdate(
+				normalizedUpdateData,
+				existingReservation
+			);
+		if (!otaIdentityProtection.allowed) {
+			return res
+				.status(otaIdentityProtection.status || 409)
+				.json(otaIdentityProtection);
+		}
 		const housingUpdateProtection = protectExistingReservationHousingUpdate({
 			updates: normalizedUpdateData,
 			reservation: existingReservation,
@@ -8647,7 +8710,8 @@ exports.updateReservation = async (req, res) => {
 		if (
 			normalizedUpdateData.hotelId &&
 			existingReservation.hotelId.toString() !==
-				normalizedUpdateData.hotelId.toString()
+				normalizedUpdateData.hotelId.toString() &&
+			!isEstablishedOtaReservation(existingReservation)
 		) {
 			const relocatePattern = /_relocate(\d*)$/;
 			const match =
@@ -9120,6 +9184,16 @@ exports.updateReservation = async (req, res) => {
 				...protectedCustomerDetails,
 			};
 		}
+		const finalOtaIdentityProtection =
+			validateEstablishedOtaReservationIdentityUpdate(
+				updatePayload,
+				existingReservation
+			);
+		if (!finalOtaIdentityProtection.allowed) {
+			return res
+				.status(finalOtaIdentityProtection.status || 409)
+				.json(finalOtaIdentityProtection);
+		}
 
 		// 7️⃣ Update reservation
 		const syncedAgentWalletSnapshot = syncExistingAgentWalletSnapshotForUpdates(
@@ -9543,10 +9617,15 @@ exports.agodaDataDump = async (req, res) => {
 						: 0,
 			};
 
-			const existingReservation = await Reservations.findOne({
-				confirmation_number: itemNumber,
-				booking_source: "agoda",
-			});
+			const identityOptions = {
+				provider: "agoda",
+				externalConfirmationNumber: itemNumber,
+				hotelId: accountId,
+				bookingSources: ["agoda"],
+			};
+			const existingReservation = await findLegacyOtaImportReservation(
+				identityOptions
+			);
 
 			if (existingReservation) {
 				const payment_details = existingReservation.payment_details;
@@ -9561,10 +9640,12 @@ exports.agodaDataDump = async (req, res) => {
 					...documentWithoutCustomerDetails
 				} = document;
 				await Reservations.updateOne(
-					{ confirmation_number: itemNumber },
+					{ _id: existingReservation._id },
 					{
 						$set: {
-							...documentWithoutCustomerDetails,
+							...stripLegacyOtaImportIdentityFields(
+								documentWithoutCustomerDetails
+							),
 							reservation_status:
 								document.reservation_status === "cancelled"
 									? "cancelled"
@@ -9579,22 +9660,19 @@ exports.agodaDataDump = async (req, res) => {
 					}
 				);
 			} else {
-				try {
-					await createReservationWithAvailabilitySnapshot(
-						document,
-						"agoda_import"
-					);
-				} catch (error) {
-					if (error.code === 11000) {
-						// Check for duplicate key error
-						// console.log(
-						// 	`Skipping duplicate document for confirmation_number: ${itemNumber}`
-						// );
-						continue; // Skip to the next item
-					} else {
-						throw error; // Rethrow if it's not a duplicate key error
-					}
-				}
+				await createLegacyOtaImportReservation({
+					document,
+					provider: "agoda",
+					externalConfirmationNumber: itemNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"agoda_import",
+							options
+						),
+				});
 			}
 		}
 
@@ -9722,12 +9800,14 @@ exports.expediaDataDump = async (req, res) => {
 						: 0,
 			};
 
-			const existingReservation = await Reservations.findOne(
-				{
-					confirmation_number: itemNumber,
-					booking_source: "expedia",
-				},
-				{ upsert: true, new: true }
+			const identityOptions = {
+				provider: "expedia",
+				externalConfirmationNumber: itemNumber,
+				hotelId: accountId,
+				bookingSources: ["expedia"],
+			};
+			const existingReservation = await findLegacyOtaImportReservation(
+				identityOptions
 			);
 
 			if (existingReservation) {
@@ -9743,10 +9823,12 @@ exports.expediaDataDump = async (req, res) => {
 					...documentWithoutCustomerDetails
 				} = document;
 				await Reservations.updateOne(
-					{ confirmation_number: itemNumber },
+					{ _id: existingReservation._id },
 					{
 						$set: {
-							...documentWithoutCustomerDetails,
+							...stripLegacyOtaImportIdentityFields(
+								documentWithoutCustomerDetails
+							),
 							reservation_status:
 								document.reservation_status === "cancelled"
 									? "cancelled"
@@ -9761,22 +9843,19 @@ exports.expediaDataDump = async (req, res) => {
 					}
 				);
 			} else {
-				try {
-					await createReservationWithAvailabilitySnapshot(
-						document,
-						"expedia_import"
-					);
-				} catch (error) {
-					if (error.code === 11000) {
-						// Check for duplicate key error
-						// console.log(
-						// 	`Skipping duplicate document for confirmation_number: ${itemNumber}`
-						// );
-						continue; // Skip to the next item
-					} else {
-						throw error; // Rethrow if it's not a duplicate key error
-					}
-				}
+				await createLegacyOtaImportReservation({
+					document,
+					provider: "expedia",
+					externalConfirmationNumber: itemNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"expedia_import",
+							options
+						),
+				});
 			}
 		}
 		res.status(200).json({
@@ -9904,10 +9983,15 @@ exports.airbnb = async (req, res) => {
 				paid_amount: parseEarnings(item.Earnings),
 			};
 
-			const existingReservation = await Reservations.findOne({
-				confirmation_number: itemNumber,
-				booking_source: "airbnb",
-			});
+			const identityOptions = {
+				provider: "airbnb",
+				externalConfirmationNumber: itemNumber,
+				hotelId: accountId,
+				bookingSources: ["airbnb"],
+			};
+			const existingReservation = await findLegacyOtaImportReservation(
+				identityOptions
+			);
 
 			if (existingReservation) {
 				const payment_details = existingReservation.payment_details;
@@ -9922,10 +10006,12 @@ exports.airbnb = async (req, res) => {
 					...documentWithoutCustomerDetails
 				} = document;
 				await Reservations.updateOne(
-					{ confirmation_number: itemNumber },
+					{ _id: existingReservation._id },
 					{
 						$set: {
-							...documentWithoutCustomerDetails,
+							...stripLegacyOtaImportIdentityFields(
+								documentWithoutCustomerDetails
+							),
 							reservation_status:
 								document.reservation_status === "cancelled"
 									? "cancelled"
@@ -9940,22 +10026,19 @@ exports.airbnb = async (req, res) => {
 					}
 				);
 			} else {
-				try {
-					await createReservationWithAvailabilitySnapshot(
-						document,
-						"airbnb_import"
-					);
-				} catch (error) {
-					if (error.code === 11000) {
-						// Check for duplicate key error
-						// console.log(
-						// 	`Skipping duplicate document for confirmation_number: ${itemNumber}`
-						// );
-						continue; // Skip to the next item
-					} else {
-						throw error; // Rethrow if it's not a duplicate key error
-					}
-				}
+				await createLegacyOtaImportReservation({
+					document,
+					provider: "airbnb",
+					externalConfirmationNumber: itemNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"airbnb_import",
+							options
+						),
+				});
 			}
 		}
 		res.status(200).json({
@@ -10125,10 +10208,15 @@ exports.bookingDataDump = async (req, res) => {
 				belongsTo: userId,
 			};
 
-			const existingReservation = await Reservations.findOne({
-				confirmation_number: itemNumber,
-				booking_source: "booking.com",
-			});
+			const identityOptions = {
+				provider: "booking",
+				externalConfirmationNumber: itemNumber,
+				hotelId: accountId,
+				bookingSources: ["booking.com"],
+			};
+			const existingReservation = await findLegacyOtaImportReservation(
+				identityOptions
+			);
 
 			if (existingReservation) {
 				const payment_details = existingReservation.payment_details;
@@ -10143,10 +10231,12 @@ exports.bookingDataDump = async (req, res) => {
 					...documentWithoutCustomerDetails
 				} = document;
 				await Reservations.updateOne(
-					{ confirmation_number: itemNumber },
+					{ _id: existingReservation._id },
 					{
 						$set: {
-							...documentWithoutCustomerDetails,
+							...stripLegacyOtaImportIdentityFields(
+								documentWithoutCustomerDetails
+							),
 							reservation_status:
 								document.reservation_status === "cancelled"
 									? "cancelled"
@@ -10161,22 +10251,19 @@ exports.bookingDataDump = async (req, res) => {
 					}
 				);
 			} else {
-				try {
-					await createReservationWithAvailabilitySnapshot(
-						document,
-						"booking_import"
-					);
-				} catch (error) {
-					if (error.code === 11000) {
-						// Check for duplicate key error
-						// console.log(
-						// 	`Skipping duplicate document for confirmation_number: ${itemNumber}`
-						// );
-						continue; // Skip to the next item
-					} else {
-						throw error; // Rethrow if it's not a duplicate key error
-					}
-				}
+				await createLegacyOtaImportReservation({
+					document,
+					provider: "booking",
+					externalConfirmationNumber: itemNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"booking_import",
+							options
+						),
+				});
 			}
 		}
 

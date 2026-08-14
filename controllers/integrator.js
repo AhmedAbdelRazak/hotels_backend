@@ -9,6 +9,11 @@ const dayjs = require("dayjs");
 const {
 	createReservationWithAvailabilitySnapshot,
 } = require("./reservations");
+const {
+	buildLegacyOtaImportUpdateDocument,
+	createLegacyOtaImportReservation,
+	findLegacyOtaImportReservation,
+} = require("../services/legacyOtaImportIdentity");
 
 const calculateDaysOfResidence = (checkIn, checkOut) => {
 	const checkInDate = new Date(new Date(checkIn).setHours(0, 0, 0, 0));
@@ -377,23 +382,42 @@ exports.agodaDataDump = async (req, res) => {
 						: 0,
 			};
 
-			const existingReservation = await Reservations.findOne({
-				confirmation_number: itemNumber,
-				booking_source: "online jannat booking",
-			});
+			const identityOptions = {
+				provider: "agoda",
+				externalConfirmationNumber: itemNumber,
+				hotelId: accountId,
+				bookingSources: ["online jannat booking"],
+				legacyState: "Agoda",
+			};
+			const existingReservation = await findLegacyOtaImportReservation(
+				identityOptions
+			);
 
 			if (existingReservation) {
 				console.log("Updating existing reservation:", itemNumber);
 				await Reservations.updateOne(
-					{ confirmation_number: itemNumber },
-					{ $set: { ...document } }
+					{ _id: existingReservation._id },
+					{
+						$set: buildLegacyOtaImportUpdateDocument(
+							existingReservation,
+							document
+						),
+					}
 				);
 			} else {
-				// console.log("Creating new reservation:", itemNumber);
-				await createReservationWithAvailabilitySnapshot(
+				await createLegacyOtaImportReservation({
 					document,
-					"integrator_agoda_import"
-				);
+					provider: "agoda",
+					externalConfirmationNumber: itemNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"integrator_agoda_import",
+							options
+						),
+				});
 				console.log("Saving to MongoDB:", {
 					checkin_date: checkInDate,
 					checkout_date: checkOutDate,
@@ -807,25 +831,37 @@ exports.expediaDataDump = async (req, res) => {
 				belongsTo: userId,
 			};
 
-			const existing = await Reservations.findOne({
-				confirmation_number: confirmationNumber,
-				booking_source: "online jannat booking",
-			});
+			const identityOptions = {
+				provider: "expedia",
+				externalConfirmationNumber: confirmationNumber,
+				hotelId: accountId,
+				bookingSources: ["online jannat booking"],
+				legacyState: "Expedia",
+			};
+			const existing = await findLegacyOtaImportReservation(identityOptions);
 
 			if (existing) {
 				await Reservations.updateOne(
+					{ _id: existing._id },
 					{
-						confirmation_number: confirmationNumber,
-						booking_source: "online jannat booking",
-					},
-					{ $set: { ...document } }
+						$set: buildLegacyOtaImportUpdateDocument(existing, document),
+					}
 				);
 				console.log("Updated existing reservation:", confirmationNumber);
 			} else {
-				await createReservationWithAvailabilitySnapshot(
+				await createLegacyOtaImportReservation({
 					document,
-					"integrator_expedia_import"
-				);
+					provider: "expedia",
+					externalConfirmationNumber: confirmationNumber,
+					findExisting: () =>
+						findLegacyOtaImportReservation(identityOptions),
+					createReservation: (prepared, options) =>
+						createReservationWithAvailabilitySnapshot(
+							prepared,
+							"integrator_expedia_import",
+							options
+						),
+				});
 				console.log("Created reservation:", confirmationNumber);
 			}
 		}

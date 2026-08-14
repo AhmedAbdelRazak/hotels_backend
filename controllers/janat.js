@@ -15,6 +15,20 @@ const {
 	guestReviewSummaryForHotel,
 	loadActiveGuestReviewSummaryMap,
 } = require("../services/jannatGuestReviewSummary");
+const {
+	assertReservationPmsConfirmationDistinct,
+	generateUniquePmsConfirmationNumber,
+	reservationExternalConfirmationValues,
+} = require("../services/pmsConfirmationAllocator");
+const {
+	protectEstablishedOtaReservationIdentityUpdate,
+	validateEstablishedOtaReservationIdentityCandidate,
+} = require("../services/otaReservationIdentityUpdatePolicy");
+const {
+	CANONICAL_CONFIRMATION_MODES,
+	isPublicDirectReservationIdentityError,
+	preparePublicDirectReservationPayload,
+} = require("../services/publicDirectReservationIdentity");
 
 require("dotenv").config();
 const fetch = require("node-fetch");
@@ -138,6 +152,13 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	code: "inventory_unavailable",
 	inventory: inventoryValidation,
 });
+
+const sendPublicDirectIdentityFailure = (res, error) =>
+	res.status(error.statusCode || 400).json({
+		message: error.message,
+		code: error.code,
+		fields: error.fields || [],
+	});
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 const JANNAT_LOCATION_ALIASES = {
@@ -1595,6 +1616,7 @@ const sendEmailWithInvoice = async (
 
 exports.createNewReservationClient = async (req, res) => {
 	try {
+		req.body = preparePublicDirectReservationPayload(req.body || {});
 		const {
 			hotelId,
 			customerDetails,
@@ -1793,6 +1815,9 @@ exports.createNewReservationClient = async (req, res) => {
 			convertedAmounts,
 		);
 	} catch (error) {
+		if (isPublicDirectReservationIdentityError(error)) {
+			return sendPublicDirectIdentityFailure(res, error);
+		}
 		console.error("Error creating reservation:", error);
 		res
 			.status(500)
@@ -1911,6 +1936,9 @@ async function saveReservation(
 		hazent: req.body.usePassword,
 		availabilitySnapshot: req.body.availabilitySnapshot,
 	};
+	preparePublicDirectReservationPayload(reservationPayload, {
+		canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
+	});
 	markReservationPendingConfirmation(reservationPayload, {
 		source: "public_client_reservation_create",
 		operationalStatus: false,
@@ -2118,7 +2146,9 @@ exports.verifyReservationToken = async (req, res) => {
 		}
 
 		// Token is valid, extract the reservation data
-		let reservationData = decoded;
+		let reservationData = preparePublicDirectReservationPayload(decoded, {
+			canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
+		});
 
 		const inventoryValidation = await validateReservationInventoryForCreate(
 			reservationData,
@@ -2270,6 +2300,9 @@ exports.verifyReservationToken = async (req, res) => {
 			reservationData.convertedAmounts,
 		);
 	} catch (error) {
+		if (isPublicDirectReservationIdentityError(error)) {
+			return sendPublicDirectIdentityFailure(res, error);
+		}
 		console.error("Error verifying reservation token:", error);
 		return res.status(500).json({
 			message: "An error occurred while verifying the reservation token.",
@@ -6320,16 +6353,16 @@ exports.createNewReservationClient2 = async (req, res) => {
 				});
 			}
 
-			const confirmationNumber = await new Promise((resolve, reject) => {
-				ensureUniqueNumber(
-					Reservations,
-					"confirmation_number",
-					(err, unique) => {
-						if (err) reject(new Error("Error generating confirmation number."));
-						else resolve(unique);
-					},
-				);
-			});
+			const externalConfirmationValues =
+				reservationExternalConfirmationValues({
+					...req.body,
+					customer_details: customerDetails,
+					customerDetails,
+				});
+			const confirmationNumber = await generateUniquePmsConfirmationNumber(
+				25,
+				externalConfirmationValues
+			);
 
 			// CHANGED: ensure customer_details contains reservedById while keeping reservedBy untouched
 			const preparedCustomerDetails = {
@@ -6513,6 +6546,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				inventoryValidation,
 				"janat_employee_pending_confirmation_create"
 			);
+			assertReservationPmsConfirmationDistinct(reservationPayload);
 
 			const reservation = new Reservations(reservationPayload);
 
@@ -6940,6 +6974,21 @@ exports.updateReservationDetails = async (req, res) => {
 		}
 		delete updateData.booking_source;
 		delete updateData.bookingSource;
+		const existingIdentitySnapshot =
+			typeof reservation.toObject === "function"
+				? reservation.toObject({ depopulate: true })
+				: { ...reservation };
+		const otaIdentityProtection =
+			protectEstablishedOtaReservationIdentityUpdate(
+				updateData,
+				existingIdentitySnapshot,
+				{ replacementContainers: ["supplierData", "otaPlatformReview"] }
+			);
+		if (!otaIdentityProtection.allowed) {
+			return res
+				.status(otaIdentityProtection.status || 409)
+				.send(otaIdentityProtection);
+		}
 		if (reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true) {
 			[
 				"pickedRoomsType",
@@ -7089,6 +7138,19 @@ exports.updateReservationDetails = async (req, res) => {
 				reservation[key] = updateData[key];
 			}
 		});
+
+		const finalOtaIdentityProtection =
+			validateEstablishedOtaReservationIdentityCandidate(
+				existingIdentitySnapshot,
+				typeof reservation.toObject === "function"
+					? reservation.toObject({ depopulate: true })
+					: reservation
+			);
+		if (!finalOtaIdentityProtection.allowed) {
+			return res
+				.status(finalOtaIdentityProtection.status || 409)
+				.send(finalOtaIdentityProtection);
+		}
 
 		const updatedReservation = await reservation.save();
 

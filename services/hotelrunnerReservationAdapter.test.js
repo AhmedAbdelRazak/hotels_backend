@@ -1795,6 +1795,198 @@ test("HotelRunner create surfaces the durable overbooking snapshot as attention 
 	assert.equal(system.mirror.lastResult.inventorySummary.overbooked, true);
 });
 
+test("HotelRunner creation rejects a PMS confirmation equal to any provider identity before insert", async () => {
+	const system = createInMemoryProjectionSystem();
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-pms-provider-number-collision",
+		provider_number: "2041108213",
+	});
+	let createCalls = 0;
+	let generatorArguments = null;
+	system.dependencies.generateConfirmation = async (...args) => {
+		generatorArguments = args;
+		return "2041108213";
+	};
+	system.dependencies.createWithSnapshot = async () => {
+		createCalls += 1;
+		throw new Error("PMS/provider equality must stop before insertion");
+	};
+
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		(error) => error?.code === "pms_confirmation_matches_external_ota"
+	);
+	assert.equal(createCalls, 0);
+	assert.equal(generatorArguments?.[0], 25);
+	assert.ok(
+		generatorArguments?.[1]?.includes("2041108213"),
+		"the adapter must reserve the provider confirmation during PMS generation"
+	);
+});
+
+test("HotelRunner creation revalidates PMS and OTA distinctness at the final pre-insert boundary", async () => {
+	const system = createInMemoryProjectionSystem();
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-final-pms-provider-collision",
+		provider_number: "2041108213",
+	});
+	let insertCalls = 0;
+	system.dependencies.generateConfirmation = async () => "2207032113";
+	system.dependencies.createWithSnapshot = async (
+		document,
+		_source,
+		options = {}
+	) => {
+		// Simulate an unexpected identity drift after the adapter's initial check but
+		// before the inventory helper reaches its final Mongo insert boundary.
+		document.reservation_id = document.confirmation_number;
+		await options.beforeInsert({ reservationData: document });
+		insertCalls += 1;
+		return { ...document, _id: "must-not-insert" };
+	};
+
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		(error) => error?.code === "pms_confirmation_matches_external_ota"
+	);
+	assert.equal(insertCalls, 0);
+});
+
+test("HotelRunner creation reserves and preserves historical mirror aliases", async () => {
+	const system = createInMemoryProjectionSystem();
+	const historicalProviderAlias = "2041108213";
+	const normalized = normalizedMultiRoom({
+		message_uid: "adapter-historical-provider-alias-collision",
+		provider_number: "CURRENT-OTA-1001",
+	});
+	await system.MirrorModel.create({
+		hotelId: system.hotel._id,
+		hotelRunnerReservationId: normalized.hotelRunnerReservationId,
+		hrIdFingerprint: system.config.hrIdFingerprint,
+		hrNumber: normalized.hrNumber,
+		providerNumber: normalized.providerNumber,
+		hrNumberAliases: [normalized.hrNumber, "R-HISTORICAL-1001"],
+		providerNumberAliases: [
+			normalized.providerNumber,
+			historicalProviderAlias,
+		],
+		observedSourceUpdatedAt: new Date(
+			new Date(normalized.sourceUpdatedAt).getTime() - 1000
+		).toISOString(),
+		observedCanonicalHash: "historical-mirror-hash",
+		projectionStatus: "pending",
+	});
+	const preview = buildCreateReservationDocument({
+		normalized,
+		event: { _id: "adapter-historical-alias-preview" },
+		mirror: system.mirror,
+		hotel: system.hotel,
+		pricing: buildPickedRoomsProjection(
+			normalized,
+			resolvedRooms(normalized)
+		),
+		confirmationNumber: "2207032113",
+		reservationMongoId: "64b000000000000000000091",
+		config: system.config,
+	});
+	assert.ok(
+		preview.supplierData.hotelRunner.providerNumberAliases.includes(
+			historicalProviderAlias
+		)
+	);
+	assert.ok(
+		preview.supplierData.hotelRunner.hrNumberAliases.includes(
+			"R-HISTORICAL-1001"
+		)
+	);
+	let generatorArguments = null;
+	let createCalls = 0;
+	system.dependencies.generateConfirmation = async (...args) => {
+		generatorArguments = args;
+		return historicalProviderAlias;
+	};
+	system.dependencies.createWithSnapshot = async () => {
+		createCalls += 1;
+	};
+
+	await assert.rejects(
+		projectHotelRunnerReservation(
+			{
+				normalized,
+				event: { payload: normalized.storedPayload },
+				hotel: system.hotel,
+				config: system.config,
+			},
+			system.dependencies
+		),
+		(error) => error?.code === "pms_confirmation_matches_external_ota"
+	);
+	assert.equal(createCalls, 0);
+	assert.ok(generatorArguments?.[1]?.flat().includes(historicalProviderAlias));
+	assert.ok(generatorArguments?.[1]?.flat().includes("R-HISTORICAL-1001"));
+});
+
+test("a late HotelRunner alias cannot become equal to an existing PMS confirmation", async () => {
+	const system = createInMemoryProjectionSystem();
+	const pmsConfirmation = "2207032113";
+	system.dependencies.generateConfirmation = async () => pmsConfirmation;
+	const initial = normalizedMultiRoom({
+		message_uid: "adapter-before-late-hr-alias",
+		hr_number: "",
+		provider_number: "BOOKING-DISTINCT-1001",
+		updated_at: "2026-08-06T11:00:00.000Z",
+	});
+	const created = await projectHotelRunnerReservation(
+		{
+			normalized: initial,
+			event: { payload: initial.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+	assert.equal(created.status, "created");
+	assert.equal(system.reservations[0].confirmation_number, pmsConfirmation);
+	const reservationWritesBefore = system.reservationWrites.length;
+
+	const lateAlias = normalizedMultiRoom({
+		message_uid: "adapter-late-hr-alias",
+		hr_number: pmsConfirmation,
+		provider_number: "BOOKING-DISTINCT-1001",
+		updated_at: "2026-08-06T11:05:00.000Z",
+	});
+	const result = await projectHotelRunnerReservation(
+		{
+			normalized: lateAlias,
+			event: { payload: lateAlias.storedPayload },
+			hotel: system.hotel,
+			config: system.config,
+		},
+		system.dependencies
+	);
+
+	assert.equal(result.status, "quarantined");
+	assert.equal(result.code, "hotelrunner_pms_external_identity_collision");
+	assert.equal(system.reservationWrites.length, reservationWritesBefore);
+	assert.equal(system.reservations[0].hr_number, "");
+});
+
 test("automatic creation requires one deterministic identity shared with email ingestion", async () => {
 	for (const overrides of [
 		{
