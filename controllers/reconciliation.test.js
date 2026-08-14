@@ -1336,6 +1336,7 @@ test("closest match is a waiting-only read that returns report rows and CAS snap
 						dateBy: "checkin_date",
 						dateFrom: "2026-08-01",
 						dateTo: "2026-08-31",
+						dateRanges: [],
 					},
 				},
 				res
