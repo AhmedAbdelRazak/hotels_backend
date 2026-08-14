@@ -145,7 +145,7 @@ function canonicalize(value) {
 const hashObject = (value) => sha256(JSON.stringify(canonicalize(value)));
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
-function parseArguments(argv = []) {
+function parseArguments(argv = process.argv.slice(2)) {
 	const options = { apply: false, repairId: "", proof: "" };
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];

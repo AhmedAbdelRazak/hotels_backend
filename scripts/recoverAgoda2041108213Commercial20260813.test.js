@@ -507,6 +507,27 @@ test("dry-run is the default and apply requires the exact repair ID plus an unex
 	);
 });
 
+test("the executable CLI reads its arguments from process.argv", () => {
+	const originalArgv = process.argv;
+	const proof = `${Date.now()}.${"a".repeat(64)}`;
+	try {
+		process.argv = [
+			process.execPath,
+			"scripts/recoverAgoda2041108213Commercial20260813.js",
+			"--apply",
+			`--repair-id=${REPAIR_ID}`,
+			`--proof=${proof}`,
+		];
+		assert.deepEqual(parseArguments(), {
+			apply: true,
+			repairId: REPAIR_ID,
+			proof,
+		});
+	} finally {
+		process.argv = originalArgv;
+	}
+});
+
 test("HotelRunner gates and runtime modules fail closed", () => {
 	assert.equal(assertHotelRunnerDisabled(disabledEnv()), true);
 	assert.throws(
