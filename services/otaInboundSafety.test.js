@@ -14938,7 +14938,121 @@ test("an authenticated direct confirmation refreshes the complete pending pricin
 		);
 
 		const clone = (value) => JSON.parse(JSON.stringify(value));
-		const safeExisting = clone(existing);
+		const resolvedExisting = clone(existing);
+		const unresolvedExisting = clone(resolvedExisting);
+		unresolvedExisting.total_amount = null;
+		unresolvedExisting.payment = "ota collect - amount unavailable";
+		unresolvedExisting.financeStatus = "commercial review required";
+		unresolvedExisting.paid_amount = null;
+		unresolvedExisting.payment_details = {
+			captured: false,
+			onsite_paid_amount: 0,
+		};
+		unresolvedExisting.paid_amount_breakdown = {
+			paid_online_via_link: 0,
+			paid_at_hotel_cash: 0,
+			paid_at_hotel_card: 0,
+			paid_to_hotel: 0,
+			paid_online_jannatbooking: 0,
+			paid_online_other_platforms: null,
+			paid_online_via_instapay: 0,
+			paid_no_show: 0,
+			payment_comments:
+				"Agoda collection model reported; property-currency amount unavailable",
+		};
+		unresolvedExisting.financial_cycle = {
+			collectionModel: "provider_collected_unresolved",
+			status: "review_required",
+			commissionType: "amount",
+			commissionValue: 0,
+			commissionAmount: 0,
+			commissionAssigned: false,
+			pmsCollectedAmount: null,
+			hotelCollectedAmount: 0,
+			hotelPayoutDue: null,
+			commissionDueToPms: 0,
+			lastUpdatedAt: "2026-08-05T10:53:00.000Z",
+		};
+		unresolvedExisting.adminPricing.clientTotal = null;
+		unresolvedExisting.adminPricing.netAfterExpensesTotal = null;
+		unresolvedExisting.adminPricing.otaExpenseTotal = null;
+		unresolvedExisting.adminPricing.platformMarginTotal = null;
+		unresolvedExisting.adminPricing.commercialResolution = "unresolved";
+		unresolvedExisting.supplierData.otaPaymentCollectionModel = "ota_collect";
+
+		existing = clone(unresolvedExisting);
+		capturedUpdate = null;
+		const unresolvedResult = await reconcileOtaReservation(
+			clone(normalizedDirectPricing)
+		);
+		assert.equal(unresolvedResult.status, "updated");
+		assert.ok(capturedUpdate, "exact unresolved baseline must reach one CAS update");
+		assert.equal(capturedUpdate.update.$set.total_amount, 182.28);
+		assert.equal(capturedUpdate.update.$set.paid_amount, 182.28);
+
+		const unresolvedTamperCases = [
+			["captured", (reservation) => {
+				reservation.payment_details.captured = true;
+			}],
+			["processor reference", (reservation) => {
+				reservation.payment_details.processor_reference = "capture-1";
+			}],
+			["unknown false payment marker", (reservation) => {
+				reservation.payment_details.manual_override = false;
+			}],
+			["hotel transfer", (reservation) => {
+				reservation.moneyTransferredToHotel = true;
+			}],
+			["payment label", (reservation) => {
+				reservation.payment = "paid online";
+			}],
+			["finance label", (reservation) => {
+				reservation.financeStatus = "finance hold";
+			}],
+			["payment comment", (reservation) => {
+				reservation.paid_amount_breakdown.payment_comments =
+					"Agoda amount unavailable";
+			}],
+			["other-platform null changed to zero", (reservation) => {
+				reservation.paid_amount_breakdown.paid_online_other_platforms = 0;
+			}],
+			["cycle status", (reservation) => {
+				reservation.financial_cycle.status = "open";
+			}],
+			["cycle model", (reservation) => {
+				reservation.financial_cycle.collectionModel = "pending";
+			}],
+			["cycle note", (reservation) => {
+				reservation.financial_cycle.notes = "Finance reviewed";
+			}],
+			["cycle assignment", (reservation) => {
+				reservation.financial_cycle.commissionAssigned = true;
+			}],
+			["conflicting declared collection model", (reservation) => {
+				reservation.paymentCollectionModel = "hotel_collect";
+			}],
+			["conflicting provider", (reservation) => {
+				reservation.otaPlatformReview.provider = "booking";
+			}],
+			["null root", (reservation) => {
+				reservation.sub_total = null;
+			}],
+			["null commission", (reservation) => {
+				reservation.commission = null;
+			}],
+		];
+		for (const [label, mutate] of unresolvedTamperCases) {
+			existing = clone(unresolvedExisting);
+			mutate(existing);
+			capturedUpdate = null;
+			const guarded = await reconcileOtaReservation(
+				clone(normalizedDirectPricing)
+			);
+			assert.equal(guarded.status, "needs_review", label);
+			assert.equal(capturedUpdate, null, label);
+		}
+
+		const safeExisting = clone(resolvedExisting);
 		const failClosedCases = [
 			{
 				label: "employee cash payment",
