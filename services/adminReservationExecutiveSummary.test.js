@@ -118,7 +118,7 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
 });
 
-test("executive rows expose only role-safe gross and net scalars for Excel", () => {
+test("executive rows expose persisted same-role gross and net scalars for Excel", () => {
 	const window = buildExecutiveDateWindow(
 		"today",
 		new Date("2026-07-19T02:00:00.000Z")
@@ -208,10 +208,10 @@ test("executive rows expose only role-safe gross and net scalars for Excel", () 
 	const unverified = result.reservations.find(
 		(row) => row.id === "unverified-ota"
 	);
-	assert.equal(unverified.grossTotalAmount, null);
-	assert.equal(unverified.netTotalAmount, null);
-	assert.equal(unverified.grossTotalAvailable, false);
-	assert.equal(unverified.netTotalAvailable, false);
+	assert.equal(unverified.grossTotalAmount, 63.11);
+	assert.equal(unverified.netTotalAmount, 59.59);
+	assert.equal(unverified.grossTotalAvailable, true);
+	assert.equal(unverified.netTotalAvailable, true);
 
 	const negative = result.reservations.find((row) => row.id === "negative-net");
 	assert.equal(negative.grossTotalAmount, 100);

@@ -86,6 +86,40 @@ const verifiedOtaReservation = ({
 	};
 };
 
+const savedTripSourceOnlyReservation = () => ({
+	confirmation_number: "TRIP-SAVED-SOURCE-ONLY",
+	booking_source: "trip.com",
+	currency: "SAR",
+	total_amount: 372.83,
+	adminPricing: {
+		mode: "ota_review",
+		propertyCurrency: "SAR",
+		clientTotal: 372.83,
+		rootTotal: 306,
+		netAfterExpensesTotal: 352.13,
+		otaExpenseTotal: 20.7,
+	},
+	supplierData: {
+		otaProvider: "trip",
+		otaCommercialEvidence: buildAuthenticatedProviderCommercialEvidence({
+			provider: "trip",
+			authenticatedProvider: "trip",
+			sourceAuthenticated: true,
+			sourceTrusted: true,
+			sourceType: "authenticated_ota_email",
+			sourceCurrency: "USD",
+			propertyCurrency: "SAR",
+			bookingBasis: "reservation_total",
+			sourceHash: "b".repeat(64),
+			sourceTimestamp: "2026-08-14T05:00:00.000Z",
+			sourceId: "trip-1567953939695657",
+			guestGross: { verified: true, amount: 99.42 },
+			hotelPayout: { verified: true, amount: 93.9 },
+		}),
+	},
+	paid_amount_breakdown: { paid_online_other_platforms: 6 },
+});
+
 const paidReportFixtures = () => [
 	{
 		...verifiedOtaReservation(),
@@ -131,15 +165,7 @@ const paidReportFixtures = () => [
 		},
 		paid_amount_breakdown: { paid_online_jannatbooking: 5 },
 	},
-	{
-		confirmation_number: "UNAVAILABLE",
-		booking_source: "agoda",
-		currency: "SAR",
-		total_amount: 77,
-		adminPricing: { mode: "hotelrunner_api" },
-		supplierData: { hotelRunner: { transport: "hotelrunner_api" } },
-		paid_amount_breakdown: { paid_online_other_platforms: 6 },
-	},
+	savedTripSourceOnlyReservation(),
 	{
 		confirmation_number: "FOREIGN",
 		booking_source: "direct",
@@ -240,18 +266,18 @@ test("paid admin rows and scorecards select canonical gross/net while paid facts
 
 		assert.equal(gross.totalDocuments, reservations.length);
 		assert.equal(net.totalDocuments, reservations.length);
-		assert.equal(gross.scorecards.totalAmount, 432.08);
-		assert.equal(net.scorecards.totalAmount, 165.3);
-		assert.equal(gross.scorecards.financialIncludedCount, 5);
-		assert.equal(net.scorecards.financialIncludedCount, 5);
+		assert.equal(gross.scorecards.totalAmount, 804.91);
+		assert.equal(net.scorecards.totalAmount, 517.43);
+		assert.equal(gross.scorecards.financialIncludedCount, 6);
+		assert.equal(net.scorecards.financialIncludedCount, 6);
 		assert.deepEqual(gross.scorecards.financialMetadata, {
 			netFallback: 0,
-			unavailable: 1,
+			unavailable: 0,
 			foreignCurrency: 1,
 		});
 		assert.deepEqual(net.scorecards.financialMetadata, {
 			netFallback: 1,
-			unavailable: 1,
+			unavailable: 0,
 			foreignCurrency: 1,
 		});
 
@@ -266,9 +292,18 @@ test("paid admin rows and scorecards select canonical gross/net while paid facts
 		assert.equal(netRows.get("NEGATIVE-NET").report_total_amount, -10);
 		assert.equal(netRows.get("NEGATIVE-NET").report_total_available, true);
 		assert.equal(netRows.get("NEGATIVE-NET").paid_breakdown_remaining, 0);
-		assert.equal(grossRows.get("UNAVAILABLE").report_total_amount, null);
-		assert.equal(netRows.get("UNAVAILABLE").report_total_amount, null);
-		assert.equal(netRows.get("UNAVAILABLE").paid_breakdown_remaining, null);
+		assert.equal(
+			grossRows.get("TRIP-SAVED-SOURCE-ONLY").report_total_amount,
+			372.83,
+		);
+		assert.equal(
+			netRows.get("TRIP-SAVED-SOURCE-ONLY").report_total_amount,
+			352.13,
+		);
+		assert.equal(
+			netRows.get("TRIP-SAVED-SOURCE-ONLY").paid_breakdown_remaining,
+			346.13,
+		);
 		assert.equal(grossRows.get("FOREIGN").financial_totals_currency, "USD");
 		assert.equal(grossRows.get("FOREIGN").report_total_available, false);
 		assert.equal(netRows.get("FOREIGN").report_total_amount, null);
@@ -444,18 +479,18 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 		);
 
 		for (const summary of [sourceGross, checkinGross, checkoutGross]) {
-			assertMatrixReconciles(summary, 432.08);
+			assertMatrixReconciles(summary, 804.91);
 			assert.deepEqual(summary.financialMetadata, {
 				netFallback: 0,
-				unavailable: 1,
+				unavailable: 0,
 				foreignCurrency: 1,
 			});
 		}
 		for (const summary of [sourceNet, checkinNet, checkoutNet]) {
-			assertMatrixReconciles(summary, 165.3);
+			assertMatrixReconciles(summary, 517.43);
 			assert.deepEqual(summary.financialMetadata, {
 				netFallback: 1,
-				unavailable: 1,
+				unavailable: 0,
 				foreignCurrency: 1,
 			});
 		}
@@ -463,13 +498,13 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 		assert.deepEqual(rowTotalsBy(sourceGross, "booking_source"), {
 			agoda: 148.96,
 			direct: 20.01,
-			"trip.com": 63.11,
+			"trip.com": 435.94,
 			OTA: 200,
 		});
 		assert.deepEqual(rowTotalsBy(sourceNet, "booking_source"), {
 			agoda: 92.18,
 			direct: 20.01,
-			"trip.com": 63.11,
+			"trip.com": 415.24,
 			OTA: -10,
 		});
 
@@ -479,7 +514,7 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 			"2026-07-03": 63.11,
 			"2026-07-04": 100,
 			"2026-07-05": 100,
-			"2026-07-06": 0,
+			"2026-07-06": 372.83,
 			"2026-07-07": 0,
 		});
 		assert.deepEqual(rowTotalsBy(checkinNet, "checkin_date"), {
@@ -488,7 +523,7 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 			"2026-07-03": 63.11,
 			"2026-07-04": 0,
 			"2026-07-05": -10,
-			"2026-07-06": 0,
+			"2026-07-06": 352.13,
 			"2026-07-07": 0,
 		});
 		assert.deepEqual(rowTotalsBy(checkoutGross, "checkout_date"), {
@@ -497,7 +532,7 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 			"2026-07-04": 63.11,
 			"2026-07-05": 100,
 			"2026-07-06": 100,
-			"2026-07-07": 0,
+			"2026-07-07": 372.83,
 			"2026-07-08": 0,
 		});
 		assert.deepEqual(rowTotalsBy(checkoutNet, "checkout_date"), {
@@ -506,7 +541,7 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 			"2026-07-04": 63.11,
 			"2026-07-05": 0,
 			"2026-07-06": -10,
-			"2026-07-07": 0,
+			"2026-07-07": 352.13,
 			"2026-07-08": 0,
 		});
 

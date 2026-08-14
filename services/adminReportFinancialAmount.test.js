@@ -83,9 +83,11 @@ test("exports every field needed by the canonical financial resolver", () => {
 		"supplierData.hotelRunner.transport",
 		"supplierData.otaAutomationPipeline",
 		"supplierData.otaPaymentSummary",
+		"supplierData.otaAmountSar",
 		"otaIdentityKey",
 		"otaCrossTransportIdentityKey",
 		"pickedRoomsPricing",
+		"pickedRoomsType",
 		"commission_ota",
 	]) {
 		assert.equal(fields.has(field), true, `${field} must be projected`);
@@ -120,6 +122,82 @@ test("verified OTA evidence selects distinct guest gross and hotel payout", () =
 		{ amount: net.amount, currency: net.currency, sourceMode: net.sourceMode },
 		{ amount: 92.18, currency: "SAR", sourceMode: "net" }
 	);
+});
+
+test("reports include saved Trip roles when valid USD evidence has no property conversion", () => {
+	const evidence = buildAuthenticatedProviderCommercialEvidence({
+		provider: "trip",
+		authenticatedProvider: "trip",
+		sourceAuthenticated: true,
+		sourceTrusted: true,
+		sourceType: "authenticated_ota_email",
+		sourceCurrency: "USD",
+		propertyCurrency: "SAR",
+		bookingBasis: "reservation_total",
+		sourceHash: "b".repeat(64),
+		sourceTimestamp: "2026-08-14T05:00:00.000Z",
+		sourceId: "trip-1567953939695657",
+		guestGross: { verified: true, amount: 99.42 },
+		hotelPayout: { verified: true, amount: 93.9 },
+	});
+	const reservation = {
+		booking_source: "trip.com",
+		currency: "sar",
+		total_amount: 372.83,
+		paid_amount: 372.83,
+		sub_total: 306,
+		adminPricing: {
+			mode: "ota_review",
+			propertyCurrency: "SAR",
+			clientTotal: 372.83,
+			rootTotal: 306,
+			netAfterExpensesTotal: 352.13,
+			otaExpenseTotal: 20.7,
+		},
+		supplierData: {
+			otaProvider: "trip",
+			otaCommercialEvidence: evidence,
+		},
+	};
+
+	const gross = resolveAdminReportFinancialAmount(reservation, "gross");
+	const net = resolveAdminReportFinancialAmount(reservation, "net");
+	const aggregate = aggregateAdminReportFinancialAmounts([reservation], "net");
+	assert.deepEqual(
+		{ amount: gross.amount, currency: gross.currency, available: gross.available },
+		{ amount: 372.83, currency: "SAR", available: true }
+	);
+	assert.deepEqual(
+		{ amount: net.amount, currency: net.currency, available: net.available },
+		{ amount: 352.13, currency: "SAR", available: true }
+	);
+	assert.equal(aggregate.totalAmount, 352.13);
+	assert.equal(aggregate.includedCount, 1);
+	assert.deepEqual(aggregate.metadata, {
+		netFallback: 0,
+		unavailable: 0,
+		foreignCurrency: 0,
+	});
+});
+
+test("net reports never relabel a different-currency saved payout", () => {
+	const reservation = {
+		booking_source: "trip.com",
+		currency: "SAR",
+		adminPricing: {
+			mode: "ota_review",
+			propertyCurrency: "SAR",
+			clientTotal: 100,
+		},
+		ota_financial_summary: {
+			currency: "USD",
+			netAfterExpenses: 20,
+		},
+	};
+	const selected = resolveAdminReportFinancialAmount(reservation, "net");
+	assert.equal(selected.amount, 100);
+	assert.equal(selected.currency, "SAR");
+	assert.equal(selected.netFallback, true);
 });
 
 test("net mode falls back only to a canonical available gross", () => {
@@ -167,11 +245,10 @@ test("valid zero and negative calculated nets remain available", () => {
 	assert.equal(aggregate.includedCount, 2);
 });
 
-test("an unavailable canonical gross fails closed", () => {
+test("a truly unpriced reservation remains unavailable", () => {
 	const reservation = {
 		booking_source: "agoda",
 		currency: "SAR",
-		total_amount: 77,
 		adminPricing: { mode: "hotelrunner_api" },
 		supplierData: { hotelRunner: { transport: "hotelrunner_api" } },
 	};

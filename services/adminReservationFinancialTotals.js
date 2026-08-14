@@ -15,9 +15,6 @@ const OTA_BOOKING_SOURCE_PATTERN =
 	/(?:\bota\b|expedia|agoda|booking\.?com|airbnb|hotels?\.?com|trivago|trip\.?com|\btrip\b|ctrip)/i;
 const CALCULATED_PRICING_MODE_PATTERN =
 	/^(?:admin_three_price$|ota(?:_|$)|platform(?:_|$)|hotelrunner_api$)/i;
-const SAVED_PRICING_BREAKDOWN_MODE_PATTERN =
-	/^(?:admin_three_price$|ota(?:_|$)|platform(?:_|$))/i;
-const SAVED_PRICING_SUMMARY_TOLERANCE = 0.5;
 const AUDITED_OVERRIDE_SOURCE = "platform_ota_pricing_review";
 const AUDITED_OVERRIDE_MODES = new Set(["ota_review", "admin_three_price"]);
 
@@ -508,32 +505,6 @@ const availableRole = (
 	reason: "",
 });
 
-const agreesWithOptionalPersistedSummaries = (
-	reservation,
-	amount,
-	fields,
-	{ allowNegative = false } = {}
-) => {
-	for (const summary of [
-		reservation?.ota_financial_summary,
-		reservation?.otaFinancialSummary,
-	]) {
-		for (const field of fields) {
-			if (!hasOwn(summary, field)) continue;
-			const value = summary[field];
-			if (value === null || value === undefined || value === "") continue;
-			const candidate = finiteMoneyOrNull(value, { allowNegative });
-			if (
-				candidate === null ||
-				Math.abs(candidate - amount) > SAVED_PRICING_SUMMARY_TOLERANCE
-			) {
-				return false;
-			}
-		}
-	}
-	return true;
-};
-
 const resolveProviderNeutralEvidence = (reservation = {}) => {
 	const supplierData = reservation?.supplierData || {};
 	const evidence = supplierData.otaCommercialEvidence;
@@ -660,76 +631,271 @@ const resolveVerifiedHotelRunnerMaterializedNet = (reservation = {}) => {
 	);
 };
 
-const resolveSavedPricingBreakdown = (reservation = {}) => {
-	const adminPricing = reservation?.adminPricing || {};
-	const mode = String(adminPricing.mode || "").trim();
-	const unavailable = () => ({
-		gross: unavailableRole("invalid_saved_pricing_breakdown"),
-		net: unavailableRole("invalid_saved_pricing_breakdown"),
-	});
-	if (
-		!SAVED_PRICING_BREAKDOWN_MODE_PATTERN.test(mode) ||
-		!["clientTotal", "netAfterExpensesTotal", "otaExpenseTotal"].every(
-			(field) => hasOwn(adminPricing, field)
-		)
-	) {
-		return unavailable();
+const persistedNightlyRoleAmount = (
+	reservation,
+	fields,
+	{ allowNegative = false } = {}
+) => {
+	for (const rooms of [
+		reservation?.pickedRoomsPricing,
+		reservation?.pickedRoomsType,
+	]) {
+		if (!Array.isArray(rooms) || rooms.length === 0) continue;
+		let total = 0;
+		let sawDay = false;
+		let complete = true;
+		for (const room of rooms) {
+			const count = Number(room?.count ?? 1);
+			const days = Array.isArray(room?.pricingByDay)
+				? room.pricingByDay
+				: [];
+			if (!Number.isSafeInteger(count) || count <= 0 || days.length === 0) {
+				complete = false;
+				break;
+			}
+			for (const day of days) {
+				let amount = null;
+				for (const field of fields) {
+					if (!hasOwn(day, field)) continue;
+					amount = finiteMoneyOrNull(day[field], { allowNegative });
+					if (amount !== null) break;
+				}
+				if (amount === null) {
+					complete = false;
+					break;
+				}
+				total += amount * count;
+				sawDay = true;
+			}
+			if (!complete) break;
+		}
+		if (complete && sawDay && Number.isFinite(total)) {
+			return Number(total.toFixed(2));
+		}
 	}
+	return null;
+};
 
-	const gross = finiteMoneyOrNull(adminPricing.clientTotal);
-	const net = finiteMoneyOrNull(adminPricing.netAfterExpensesTotal, {
-		allowNegative: true,
-	});
-	const expense = finiteMoneyOrNull(adminPricing.otaExpenseTotal);
-	const rawCurrencies = [
+const firstPersistedRole = (
+	candidates,
+	defaultCurrency,
+	{
+		allowNegative = false,
+		preferPositive = false,
+		requiredCurrency = "",
+	} = {}
+) => {
+	let deferredZero = null;
+	const normalizedRequiredCurrency = explicitCurrency(requiredCurrency);
+	for (const candidate of candidates) {
+		if (!candidate || !hasOwn(candidate.source, candidate.field)) continue;
+		const amount = finiteMoneyOrNull(candidate.source[candidate.field], {
+			allowNegative,
+		});
+		if (amount === null || (candidate.ignoreUnmarkedZero && amount === 0)) {
+			continue;
+		}
+		const rawCandidateCurrency = String(candidate.currency || "").trim();
+		const currency = rawCandidateCurrency
+			? /^[A-Z]{3}$/.test(rawCandidateCurrency.toUpperCase())
+				? rawCandidateCurrency.toUpperCase()
+				: ""
+			: defaultCurrency;
+		if (!currency) continue;
+		if (normalizedRequiredCurrency && currency !== normalizedRequiredCurrency) {
+			continue;
+		}
+		const role = availableRole(amount, currency, candidate.label, {
+			allowNegative,
+		});
+		if (preferPositive && amount === 0) {
+			deferredZero ||= role;
+			continue;
+		}
+		return role;
+	}
+	return deferredZero || unavailableRole("persisted_role_not_recorded");
+};
+
+/**
+ * Admin pages display persisted commercial roles. Authentication/evidence
+ * remains authoritative when it resolves a role, but incomplete or stale
+ * evidence must not hide a separately saved guest gross or hotel payout.
+ * These fallbacks are display-only and deliberately never use paid, root/base,
+ * subtotal, or commission fields as substitutes for a commercial role.
+ */
+const resolvePersistedDisplayPricing = (
+	reservation = {},
+	{ requiredGrossCurrency = "", requiredNetCurrency = "" } = {}
+) => {
+	const adminPricing = reservation?.adminPricing || {};
+	const snakeSummary = reservation?.ota_financial_summary || {};
+	const camelSummary = reservation?.otaFinancialSummary || {};
+	const supplier = reservation?.supplierData || {};
+	const paymentSummary = supplier.otaPaymentSummary || {};
+	const snakePaymentSummary = snakeSummary.paymentSummary || {};
+	const camelPaymentSummary = camelSummary.paymentSummary || {};
+	const calculatedMode = CALCULATED_PRICING_MODE_PATTERN.test(
+		String(adminPricing.mode || "").trim()
+	);
+	const defaultCurrency = explicitCurrency(
 		adminPricing.propertyCurrency,
 		reservation?.currency,
-		reservation?.ota_financial_summary?.propertyCurrency,
-		reservation?.ota_financial_summary?.currency,
-		reservation?.otaFinancialSummary?.propertyCurrency,
-		reservation?.otaFinancialSummary?.currency,
-	].filter((value) => String(value || "").trim());
-	const currencies = rawCurrencies.map((value) =>
-		String(value).trim().toUpperCase()
+		snakeSummary.propertyCurrency,
+		snakeSummary.currency,
+		camelSummary.propertyCurrency,
+		camelSummary.currency,
+		paymentSummary.propertyCurrency,
+		paymentSummary.currency,
+		snakePaymentSummary.propertyCurrency,
+		snakePaymentSummary.currency,
+		camelPaymentSummary.propertyCurrency,
+		camelPaymentSummary.currency,
+		"SAR"
 	);
-	const currency =
-		currencies.length > 0 &&
-		currencies.every((value) => /^[A-Z]{3}$/.test(value)) &&
-		new Set(currencies).size === 1
-			? currencies[0]
-			: "";
-	if (
-		gross === null ||
-		gross <= 0 ||
-		net === null ||
-		expense === null ||
-		!currency ||
-		Math.abs(gross - net - expense) > SAVED_PRICING_SUMMARY_TOLERANCE ||
-		!agreesWithOptionalPersistedSummaries(
-			reservation,
-			gross,
-			["clientTotal", "client_total"]
-		) ||
-		!agreesWithOptionalPersistedSummaries(
-			reservation,
-			net,
-			["netAfterExpenses", "netAfterOtaExpenses"],
-			{ allowNegative: true }
-		)
-	) {
-		return unavailable();
-	}
+	const gross = firstPersistedRole(
+		[
+			{
+				source: adminPricing,
+				field: "clientTotal",
+				currency: adminPricing.propertyCurrency,
+				label: "persisted_admin_pricing",
+				ignoreUnmarkedZero: !calculatedMode,
+			},
+			...[
+				[snakeSummary, "clientTotal"],
+				[snakeSummary, "client_total"],
+				[camelSummary, "clientTotal"],
+				[camelSummary, "client_total"],
+			].map(([source, field]) => ({
+				source,
+				field,
+				currency: source.propertyCurrency || source.currency,
+				label: "persisted_ota_financial_summary",
+				ignoreUnmarkedZero:
+					source.commercialVerified !== true && !calculatedMode,
+			})),
+			...[
+				[snakePaymentSummary, "totalGuestPaymentAmount"],
+				[camelPaymentSummary, "totalGuestPaymentAmount"],
+			].map(([source, field]) => ({
+				source,
+				field,
+				currency: source.propertyCurrency || source.currency,
+				label: "persisted_ota_financial_summary",
+			})),
+			{
+				source: supplier,
+				field: "otaAmountSar",
+				currency: "SAR",
+				label: "persisted_supplier_pricing",
+			},
+			{
+				source: paymentSummary,
+				field: "totalGuestPaymentAmount",
+				currency: paymentSummary.propertyCurrency || paymentSummary.currency,
+				label: "persisted_supplier_pricing",
+			},
+			{
+				source: reservation,
+				field: "total_amount",
+				currency: reservation.currency,
+				label: "reservation_total",
+			},
+		],
+		defaultCurrency,
+		{ preferPositive: true, requiredCurrency: requiredGrossCurrency }
+	);
+	const net = firstPersistedRole(
+		[
+			{
+				source: adminPricing,
+				field: "netAfterExpensesTotal",
+				currency: adminPricing.propertyCurrency,
+				label: "persisted_admin_pricing",
+				ignoreUnmarkedZero: !calculatedMode,
+			},
+			...[
+				[snakeSummary, "netAfterExpenses"],
+				[snakeSummary, "netAfterOtaExpenses"],
+				[snakeSummary, "hotelPayout"],
+				[camelSummary, "netAfterExpenses"],
+				[camelSummary, "netAfterOtaExpenses"],
+				[camelSummary, "hotelPayout"],
+			].map(([source, field]) => ({
+				source,
+				field,
+				currency: source.propertyCurrency || source.currency,
+				label: "persisted_ota_financial_summary",
+				ignoreUnmarkedZero:
+					source.commercialVerified !== true && !calculatedMode,
+			})),
+			...[
+				[snakePaymentSummary, "totalPayoutAmount"],
+				[camelPaymentSummary, "totalPayoutAmount"],
+			].map(([source, field]) => ({
+				source,
+				field,
+				currency: source.propertyCurrency || source.currency,
+				label: "persisted_ota_financial_summary",
+			})),
+			{
+				source: supplier,
+				field: "otaTotalPayoutSar",
+				currency: "SAR",
+				label: "persisted_supplier_pricing",
+			},
+			{
+				source: paymentSummary,
+				field: "totalPayoutAmount",
+				currency: paymentSummary.propertyCurrency || paymentSummary.currency,
+				label: "persisted_supplier_pricing",
+			},
+		],
+		defaultCurrency,
+		{ allowNegative: true, requiredCurrency: requiredNetCurrency }
+	);
+	const nightlyGross = persistedNightlyRoleAmount(
+		reservation,
+		["clientPrice", "mainPrice", "totalPriceWithCommission", "price"]
+	);
+	const nightlyNet = persistedNightlyRoleAmount(
+		reservation,
+		["netAfterExpenses", "netAfterOtaExpenses", "netAfterOtherExpenses"],
+		{ allowNegative: true }
+	);
+	const nightlyGrossCurrencyMatches =
+		!explicitCurrency(requiredGrossCurrency) ||
+		defaultCurrency === explicitCurrency(requiredGrossCurrency);
+	const nightlyNetCurrencyMatches =
+		!explicitCurrency(requiredNetCurrency) ||
+		defaultCurrency === explicitCurrency(requiredNetCurrency);
+	const shouldUseNightlyGross =
+		nightlyGrossCurrencyMatches &&
+		nightlyGross !== null &&
+		(!gross.available || (gross.amount === 0 && nightlyGross > 0));
 	return {
-		gross: availableRole(gross, currency, "saved_pricing_breakdown"),
-		net: availableRole(net, currency, "saved_pricing_breakdown", {
-			allowNegative: true,
-		}),
+		gross: shouldUseNightlyGross
+			? availableRole(
+						nightlyGross,
+						defaultCurrency,
+						"persisted_nightly_pricing"
+					)
+			: gross,
+		net:
+			net.available || nightlyNet === null || !nightlyNetCurrencyMatches
+				? net
+				: availableRole(
+						nightlyNet,
+						defaultCurrency,
+						"persisted_nightly_pricing",
+						{ allowNegative: true }
+					),
 	};
 };
 
-// Preserve the established non-HotelRunner list behavior. The stricter paired
-// breakdown contract above is only a fallback for HotelRunner rows whose saved
-// editor pricing was previously hidden from the table.
+// Preserve the established direct-reservation calculation path when no
+// persisted OTA role was recorded.
 const resolveCalculatedNet = (reservation = {}) => {
 	const adminPricing = reservation?.adminPricing || {};
 	const mode = String(adminPricing.mode || "").trim();
@@ -798,16 +964,15 @@ const resolveAdminReservationFinancialTotals = (reservation = {}) => {
 		Boolean(
 			String(supplierData.otaCommercialEvidenceStaleReason || "").trim()
 		);
-	const savedPricingBreakdown =
-		isHotelRunner && !hasAnyCommercialEvidenceState
-		? resolveSavedPricingBreakdown(reservation)
+	const persistedDisplayPricing = otaManaged
+		? resolvePersistedDisplayPricing(reservation)
 		: null;
 
 	let gross = authoritativeEvidence.gross;
-	if (!authoritativeEvidence.present) {
-		if (isHotelRunner && savedPricingBreakdown?.gross.available) {
-			gross = savedPricingBreakdown.gross;
-		} else if (!isHotelRunner) {
+	if (!gross.available) {
+		if (persistedDisplayPricing?.gross.available) {
+			gross = persistedDisplayPricing.gross;
+		} else if (!authoritativeEvidence.present && !isHotelRunner) {
 			const totalAmount = hasOwn(reservation, "total_amount")
 				? finiteMoneyOrNull(reservation.total_amount)
 				: null;
@@ -823,14 +988,43 @@ const resolveAdminReservationFinancialTotals = (reservation = {}) => {
 	}
 
 	let net = authoritativeEvidence.net;
-	if (!authoritativeEvidence.present) {
-		if (isHotelRunner && savedPricingBreakdown?.net.available) {
-			net = savedPricingBreakdown.net;
-		} else if (isHotelRunner && !hasAnyCommercialEvidenceState) {
+	if (
+		net.available &&
+		gross.available &&
+		net.currency !== gross.currency
+	) {
+		net = unavailableRole("commercial_role_currency_conflict");
+	}
+	if (!net.available) {
+		let persistedNet = persistedDisplayPricing?.net;
+		if (
+			persistedNet?.available &&
+			gross.available &&
+			persistedNet.currency !== gross.currency
+		) {
+			persistedNet = resolvePersistedDisplayPricing(reservation, {
+				requiredNetCurrency: gross.currency,
+			}).net;
+		}
+		if (persistedNet?.available) {
+			net = persistedNet;
+		} else if (
+			!authoritativeEvidence.present &&
+			isHotelRunner &&
+			!hasAnyCommercialEvidenceState
+		) {
 			net = resolveVerifiedHotelRunnerMaterializedNet(reservation);
-		} else if (!isHotelRunner && otaManaged) {
+		} else if (
+			!authoritativeEvidence.present &&
+			!isHotelRunner &&
+			otaManaged
+		) {
 			net = resolveCalculatedNet(reservation);
-		} else if (!isHotelRunner && gross.available) {
+		} else if (
+			!authoritativeEvidence.present &&
+			!isHotelRunner &&
+			gross.available
+		) {
 			net = availableRole(gross.amount, gross.currency, "no_ota_deduction");
 		}
 	}
