@@ -52,6 +52,15 @@ const {
 	releaseHotelRunnerFirstFallbackEmailCreation,
 	validateHotelRunnerFallbackCreationAuthorization,
 } = require("./hotelrunnerFallbackIngressGate");
+const {
+	assertPmsConfirmationDistinctFromExternal,
+	assertReservationPmsConfirmationDistinct,
+	assertReservationPmsConfirmationUpdateSafe,
+	generateUniquePmsConfirmationNumber,
+} = require("./pmsConfirmationAllocator");
+const {
+	assertOtaReservationIdentityMaterialization,
+} = require("./otaReservationIdentityUpdatePolicy");
 
 dayjs.extend(customParseFormat);
 
@@ -15415,6 +15424,11 @@ async function applyExistingReservationEmailUpdate({
 		statusToApply,
 		warnings,
 	});
+	// OTA refreshes may backfill trusted provider aliases, but they must never
+	// attach an external identifier equal to the existing PMS confirmation. The
+	// check is performed on the exact dotted $set immediately before the CAS.
+	assertOtaReservationIdentityMaterialization(existing, set);
+	assertReservationPmsConfirmationUpdateSafe(existing, set);
 	const updateResult = await Reservations.updateOne(
 		buildReservationSnapshotFilter(existing),
 		addReservationVersionBump({
@@ -17129,22 +17143,21 @@ function detectConfirmationMatchFields(
 		.map(([field]) => field);
 }
 
-function generateRandomConfirmationNumber() {
-	return Math.floor(1000000000 + Math.random() * 9000000000).toString();
-}
-
-async function generateUniquePmsConfirmationNumber(maxAttempts = 25) {
-	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-		const candidate = generateRandomConfirmationNumber();
-		// eslint-disable-next-line no-await-in-loop
-		const exists = await Reservations.exists({ confirmation_number: candidate });
-		if (!exists) return candidate;
-	}
-
-	const fallback = `${Date.now()}`.slice(-10).padStart(10, "1");
-	const exists = await Reservations.exists({ confirmation_number: fallback });
-	if (!exists) return fallback;
-	throw new Error("Could not generate a unique PMS confirmation number.");
+async function generateOtaPmsConfirmationNumber(
+	normalized = {},
+	confirmationNumber = "",
+	crossTransportIdentityKey = ""
+) {
+	return generateUniquePmsConfirmationNumber(25, [
+		confirmationNumber,
+		normalized.confirmationNumber,
+		normalized.reservationId,
+		normalized.hotelRunnerReservationId,
+		normalized.hrNumber,
+		normalized.providerNumber,
+		buildOtaIdentityKey(normalized.provider, confirmationNumber),
+		crossTransportIdentityKey,
+	]);
 }
 
 function hasAmbiguousMultiRoomEvidence(normalized = {}) {
@@ -17765,7 +17778,11 @@ async function createUnmappedOtaReviewReservation({
 		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
 	];
 	applyVccSafeFieldsToDocument(document, normalized);
-	document.confirmation_number = await generateUniquePmsConfirmationNumber();
+	document.confirmation_number = await generateOtaPmsConfirmationNumber(
+		normalized,
+		confirmationNumber,
+		crossTransportIdentityKey
+	);
 	document.customer_details = {
 		...(document.customer_details || {}),
 		confirmation_number2: confirmationNumber,
@@ -17805,6 +17822,7 @@ async function createUnmappedOtaReviewReservation({
 					mapped: false,
 				});
 			}
+			assertReservationPmsConfirmationDistinct(document);
 			created = await Reservations.create(document);
 			if (hotelRunnerFirstFallbackBoundary) {
 				await commitHotelRunnerFirstFallbackCreation(
@@ -17896,7 +17914,11 @@ async function createUnmappedOtaReviewReservation({
 				}
 				if (createAttempt === 0) {
 					document.confirmation_number =
-						await generateUniquePmsConfirmationNumber();
+						await generateOtaPmsConfirmationNumber(
+							normalized,
+							confirmationNumber,
+							crossTransportIdentityKey
+						);
 					document.supplierData.pmsConfirmationNumber =
 						document.confirmation_number;
 					continue;
@@ -19726,7 +19748,11 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 		);
 	}
 	applyVccSafeFieldsToDocument(document, normalized);
-	document.confirmation_number = await generateUniquePmsConfirmationNumber();
+	document.confirmation_number = await generateOtaPmsConfirmationNumber(
+		normalized,
+		confirmationNumber,
+		crossTransportIdentityKey
+	);
 	document.customer_details = {
 		...(document.customer_details || {}),
 		confirmation_number2: confirmationNumber,
@@ -19798,6 +19824,7 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 								mapped: true,
 							});
 						}
+						assertReservationPmsConfirmationDistinct(reservationData);
 					},
 				}
 			);
@@ -19894,7 +19921,12 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 					};
 				}
 				if (createAttempt === 0) {
-					document.confirmation_number = await generateUniquePmsConfirmationNumber();
+					document.confirmation_number =
+						await generateOtaPmsConfirmationNumber(
+							normalized,
+							confirmationNumber,
+							crossTransportIdentityKey
+						);
 					document.supplierData.pmsConfirmationNumber = document.confirmation_number;
 					continue;
 				}
@@ -20495,6 +20527,7 @@ module.exports = {
 	buildUnmappedOtaReviewReservationDocument,
 	applyExactResolvedHotelToUnmappedReview,
 	buildExistingReservationUpdateSet,
+	applyExistingReservationEmailUpdate,
 	explicitRoomCapacity,
 	roomCapacityFromLabels,
 	findConfidentFuzzyHotelMatch,
@@ -20531,6 +20564,9 @@ module.exports = {
 	otaInboundAllocationSafety,
 	findReservationByOtaConfirmation,
 	detectConfirmationMatchFields,
+	assertPmsConfirmationDistinctFromExternal,
+	assertReservationPmsConfirmationDistinct,
+	generateOtaPmsConfirmationNumber,
 	generateUniquePmsConfirmationNumber,
 	getOtaInboundAllowedHotelIds,
 	isHotelAllowedForOtaInbound,

@@ -15,6 +15,13 @@ const {
 const {
 	createReservationWithAvailabilitySnapshot,
 } = require("./reservations");
+const {
+	manualOtaProviderForBookingSource,
+	prepareManualOtaCreateDocument,
+} = require("../services/manualOtaReservationIdentity");
+const {
+	assertReservationPmsConfirmationDistinct,
+} = require("../services/pmsConfirmationAllocator");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -575,6 +582,74 @@ const generateConfirmationNumber = async () => {
 	return `${Date.now()}`.slice(-10);
 };
 
+const excelOtaIdentityError = (code, message) => {
+	const error = new Error(message);
+	error.code = code;
+	error.statusCode = 400;
+	return error;
+};
+
+const resolveExcelOtaIdentity = ({
+	bookingSource = "",
+	rowConfirmationNumber = "",
+} = {}) => {
+	const provider = manualOtaProviderForBookingSource(bookingSource);
+	if (!provider) return null;
+
+	const externalConfirmationNumber = ["string", "number", "bigint"].includes(
+		typeof rowConfirmationNumber
+	)
+		? String(rowConfirmationNumber).trim()
+		: "";
+	if (!externalConfirmationNumber) {
+		throw excelOtaIdentityError(
+			"excel_ota_external_confirmation_required",
+			"An OTA confirmation number is required for an OTA Excel row."
+		);
+	}
+
+	return { provider, externalConfirmationNumber };
+};
+
+const prepareExcelReservationIdentity = async ({
+	reservationPayload = {},
+	bookingSource = "",
+	rowConfirmationNumber = "",
+	generateConfirmation,
+} = {}) => {
+	const otaIdentity = resolveExcelOtaIdentity({
+		bookingSource,
+		rowConfirmationNumber,
+	});
+	if (!otaIdentity) {
+		return { reservationPayload, otaIdentity: null };
+	}
+
+	// The spreadsheet confirmation belongs exclusively to the OTA namespace.
+	// Remove the temporary/non-OTA canonical value before the server allocates
+	// its own PMS confirmation number and canonical provider-scoped aliases.
+	const otaPayload = {
+		...reservationPayload,
+		customer_details: {
+			...(reservationPayload.customer_details || {}),
+			confirmation_number2: otaIdentity.externalConfirmationNumber,
+		},
+	};
+	delete otaPayload.confirmation_number;
+
+	const prepared = await prepareManualOtaCreateDocument({
+		document: otaPayload,
+		...(typeof generateConfirmation === "function"
+			? { generateConfirmation }
+			: {}),
+	});
+	assertReservationPmsConfirmationDistinct(prepared.document);
+	return {
+		reservationPayload: prepared.document,
+		otaIdentity: prepared.identity,
+	};
+};
+
 const buildPricingByDay = ({ checkinDate, checkoutDate, totalAmount }) => {
 	const start = moment(checkinDate).startOf("day");
 	const end = moment(checkoutDate).startOf("day");
@@ -622,9 +697,6 @@ exports.commitReservationExcelImport = async (req, res) => {
 				continue;
 			}
 			try {
-				const confirmationNumber =
-					String(row.confirmationNumber || "").trim() ||
-					(await generateConfirmationNumber());
 				const agent = row.agentId && ObjectId.isValid(row.agentId)
 					? await User.findById(row.agentId)
 							.select("_id name email companyName role roleDescription")
@@ -652,8 +724,18 @@ exports.commitReservationExcelImport = async (req, res) => {
 					row.agentCompanyName ||
 					row.agentName ||
 					"Excel Upload";
-				const reservationPayload = {
-					confirmation_number: confirmationNumber,
+				const otaIdentity = resolveExcelOtaIdentity({
+					bookingSource,
+					rowConfirmationNumber: row.confirmationNumber,
+				});
+				const confirmationNumber = otaIdentity
+					? ""
+					: String(row.confirmationNumber || "").trim() ||
+						(await generateConfirmationNumber());
+				let reservationPayload = {
+					...(confirmationNumber
+						? { confirmation_number: confirmationNumber }
+						: {}),
 					customer_details: {
 						name: row.guestName || "Guest",
 						phone: row.guestPhone || "",
@@ -741,9 +823,24 @@ exports.commitReservationExcelImport = async (req, res) => {
 						},
 					],
 				};
+				if (otaIdentity) {
+					({ reservationPayload } = await prepareExcelReservationIdentity({
+						reservationPayload,
+						bookingSource,
+						rowConfirmationNumber: row.confirmationNumber,
+					}));
+				}
 				const saved = await createReservationWithAvailabilitySnapshot(
 					reservationPayload,
-					"ai_excel_import"
+					"ai_excel_import",
+					otaIdentity
+						? {
+								beforeInsert: ({ reservationData }) =>
+									assertReservationPmsConfirmationDistinct(
+										reservationData
+									),
+							}
+						: {}
 				);
 				created.push({
 					_id: saved._id,
@@ -770,3 +867,8 @@ exports.commitReservationExcelImport = async (req, res) => {
 		res.status(500).json({ error: "Could not import reservations." });
 	}
 };
+
+exports.__excelOtaIdentityTestHooks = Object.freeze({
+	prepareExcelReservationIdentity,
+	resolveExcelOtaIdentity,
+});

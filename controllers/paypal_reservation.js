@@ -81,6 +81,11 @@ const {
 	scheduleReservationConfirmedConversion,
 	schedulePaymentCapturedConversion,
 } = require("../services/conversionTracking");
+const {
+	CANONICAL_CONFIRMATION_MODES,
+	isPublicDirectReservationIdentityError,
+	preparePublicDirectReservationPayload,
+} = require("../services/publicDirectReservationIdentity");
 
 /* Email setup */
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -92,6 +97,13 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	code: "inventory_unavailable",
 	inventory: inventoryValidation,
 });
+
+const sendPublicDirectIdentityFailure = (res, error) =>
+	res.status(error.statusCode || 400).json({
+		message: error.message,
+		code: error.code,
+		fields: error.fields || [],
+	});
 
 function analyticsContextFromRequest(req, source = "") {
 	return {
@@ -2009,6 +2021,9 @@ async function buildAndSaveReservation({
 		availabilitySnapshot: reqBody.availabilitySnapshot,
 		...(financeStatus ? { financeStatus } : {}),
 	};
+	preparePublicDirectReservationPayload(reservationPayload, {
+		canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
+	});
 	markReservationPendingConfirmation(reservationPayload, {
 		source: reqBody.pendingConfirmationSource || "public_paypal_reservation_create",
 		operationalStatus: false,
@@ -2644,7 +2659,8 @@ exports.generateClientToken = async (req, res) => {
  */
 exports.preparePendingReservation = async (req, res) => {
 	try {
-		const body = req.body || {};
+		const body = preparePublicDirectReservationPayload(req.body || {});
+		req.body = body;
 		const {
 			userId,
 			hotelId,
@@ -2735,6 +2751,14 @@ exports.preparePendingReservation = async (req, res) => {
 			hotelId,
 			reservation_status: { $in: PAYPAL_ACTIVE_PENDING_STATUSES },
 		}).sort({ createdAt: -1 });
+		if (existingPending) {
+			preparePublicDirectReservationPayload(
+				typeof existingPending.toObject === "function"
+					? existingPending.toObject()
+					: existingPending,
+				{ canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW }
+			);
+		}
 
 		if (
 			existingPending?.reservation_status ===
@@ -2793,7 +2817,7 @@ exports.preparePendingReservation = async (req, res) => {
 		pendingCustomer.email = normalizedEmail;
 		pendingCustomer.phone = normalizedPhone;
 
-		const pendingDoc = new UncompleteReservations({
+		const pendingPayload = {
 			confirmation_number: confirmationNumber,
 			userId: userId || null,
 			hotelId,
@@ -2829,7 +2853,11 @@ exports.preparePendingReservation = async (req, res) => {
 			guestAgreedOnTermsAndConditions: !!guestAgreedOnTermsAndConditions,
 			reservation_status: "pending_payment",
 			state: "pending_payment",
+		};
+		preparePublicDirectReservationPayload(pendingPayload, {
+			canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
 		});
+		const pendingDoc = new UncompleteReservations(pendingPayload);
 
 		await pendingDoc.save();
 
@@ -2839,6 +2867,9 @@ exports.preparePendingReservation = async (req, res) => {
 			confirmation_number: confirmationNumber,
 		});
 	} catch (error) {
+		if (isPublicDirectReservationIdentityError(error)) {
+			return sendPublicDirectIdentityFailure(res, error);
+		}
 		console.error(
 			"preparePendingReservation error:",
 			error?.response?.data || error,
@@ -2899,7 +2930,10 @@ exports.cancelPendingReservation = async (req, res) => {
  */
 exports.createReservationAndProcess = async (req, res) => {
 	try {
-		const body = req.body || {};
+		const body = preparePublicDirectReservationPayload(req.body || {}, {
+			canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.STRIP,
+		});
+		req.body = body;
 		body.analyticsContext = analyticsContextFromRequest(req, "checkout");
 		const {
 			sentFrom,
@@ -3324,6 +3358,12 @@ exports.createReservationAndProcess = async (req, res) => {
 							"Pending reservation not found or expired. Please try again.",
 					});
 				}
+				preparePublicDirectReservationPayload(
+					typeof pendingReservation.toObject === "function"
+						? pendingReservation.toObject()
+						: pendingReservation,
+					{ canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW }
+				);
 				if (
 					pendingReservation.reservation_status ===
 					PAYPAL_PENDING_REVIEW_RESERVATION_STATUS
@@ -3934,6 +3974,9 @@ exports.createReservationAndProcess = async (req, res) => {
 				"Unsupported flow. If a temporary reservation was created, it has been removed.",
 		});
 	} catch (error) {
+		if (isPublicDirectReservationIdentityError(error)) {
+			return sendPublicDirectIdentityFailure(res, error);
+		}
 		console.error(
 			"createReservationAndProcess error:",
 			error?.response?.data || error,
@@ -6589,6 +6632,9 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		} catch (e) {
 			return res.status(400).json({ message: "Invalid or expired token." });
 		}
+		decoded = preparePublicDirectReservationPayload(decoded, {
+			canonicalConfirmation: CANONICAL_CONFIRMATION_MODES.ALLOW,
+		});
 
 		// Idempotency
 		const existing = await Reservations.findOne({
@@ -6789,6 +6835,9 @@ exports.verifyReservationAndCreate = async (req, res) => {
 			accountSession,
 		});
 	} catch (err) {
+		if (isPublicDirectReservationIdentityError(err)) {
+			return sendPublicDirectIdentityFailure(res, err);
+		}
 		console.error(
 			"verifyReservationAndCreate error:",
 			err?.response?.data || err,

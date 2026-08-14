@@ -19,10 +19,17 @@ const {
 	buildDirectHotelRunnerCommercialPricing,
 	buildOtaIdentityKey,
 	directHotelRunnerCommercialEnrichmentSet,
-	generateUniquePmsConfirmationNumber,
 	hotelRunnerEmailCommercialEvidenceHash,
 	verifiedHotelRunnerEmailCommercialEvidence,
 } = require("./otaReservationMapper");
+const {
+	assertPmsConfirmationDistinctFromExternal,
+	assertReservationPmsConfirmationDistinct,
+	generateUniquePmsConfirmationNumber,
+	normalizeConfirmation,
+	normalizedExternalConfirmationValues,
+	reservationExternalConfirmationValues,
+} = require("./pmsConfirmationAllocator");
 const {
 	addReservationVersionBump,
 	buildReservationSnapshotFilter,
@@ -624,17 +631,54 @@ function hotelRunnerSupplierMetadata(
 	normalized,
 	event,
 	appliedAt = new Date(),
-	previous = {}
+	previous = {},
+	identityHistory = {}
 ) {
 	const pricing = normalizedHasPricingBreakdown(normalized)
 		? hotelRunnerPricingBreakdown(normalized)
 		: previous.pricing;
+	const hrNumberAliases = Array.from(
+		new Set(
+			[
+				...(Array.isArray(previous.hrNumberAliases)
+					? previous.hrNumberAliases
+					: []),
+				...(Array.isArray(identityHistory.hrNumberAliases)
+					? identityHistory.hrNumberAliases
+					: []),
+				previous.hrNumber,
+				identityHistory.hrNumber,
+				normalized.hrNumber,
+			]
+				.map(clean)
+				.filter(Boolean)
+		)
+	);
+	const providerNumberAliases = Array.from(
+		new Set(
+			[
+				...(Array.isArray(previous.providerNumberAliases)
+					? previous.providerNumberAliases
+					: []),
+				...(Array.isArray(identityHistory.providerNumberAliases)
+					? identityHistory.providerNumberAliases
+					: []),
+				previous.providerNumber,
+				identityHistory.providerNumber,
+				normalized.providerNumber,
+			]
+				.map(clean)
+				.filter(Boolean)
+		)
+	);
 	return {
 		transport: "hotelrunner_api",
 		reservationId:
 			normalized.hotelRunnerReservationId || previous.reservationId || "",
 		hrNumber: normalized.hrNumber || previous.hrNumber || "",
 		providerNumber: normalized.providerNumber || previous.providerNumber || "",
+		hrNumberAliases,
+		providerNumberAliases,
 		channel: normalized.channel || previous.channel || "",
 		channelDisplay: normalized.channelDisplay || previous.channelDisplay || "",
 		sourceDisplay: normalized.sourceDisplay || previous.sourceDisplay || "",
@@ -654,6 +698,50 @@ function hotelRunnerSupplierMetadata(
 			normalized.currency || previous.reportedPaidAmountCurrency || "",
 		...(pricing ? { pricing } : {}),
 	};
+}
+
+function prospectiveHotelRunnerExternalValues(normalized = {}, mirror = {}) {
+	return [
+		normalized.hotelRunnerReservationId,
+		normalized.hrNumber,
+		normalized.providerNumber,
+		mirror.hotelRunnerReservationId,
+		mirror.hrNumber,
+		mirror.providerNumber,
+		mirror.hrNumberAliases,
+		mirror.providerNumberAliases,
+	];
+}
+
+function hotelRunnerPmsExternalIdentityConflict(
+	existing = {},
+	normalized = {},
+	mirror = {}
+) {
+	const canonical = normalizeConfirmation(existing.confirmation_number);
+	if (!canonical) return null;
+	const existingExternal = normalizedExternalConfirmationValues(
+		reservationExternalConfirmationValues(existing)
+	);
+	// Existing legacy rows are deliberately not migrated or frozen by this
+	// safeguard. It prevents a new HotelRunner alias from introducing equality on
+	// a currently distinct reservation while preserving established records.
+	if (existingExternal.has(canonical)) return null;
+	try {
+		assertPmsConfirmationDistinctFromExternal(
+			existing.confirmation_number,
+			prospectiveHotelRunnerExternalValues(normalized, mirror)
+		);
+		return null;
+	} catch (error) {
+		if (error?.code !== "pms_confirmation_matches_external_ota") throw error;
+		return {
+			status: "quarantined",
+			code: "hotelrunner_pms_external_identity_collision",
+			message:
+				"A HotelRunner identifier matches the PMS confirmation number; the reservation was not changed.",
+		};
+	}
 }
 
 function hotelRunnerOtaReviewMetadata(normalized, hotel, now = new Date()) {
@@ -683,6 +771,7 @@ function hotelRunnerOtaReviewMetadata(normalized, hotel, now = new Date()) {
 function buildCreateReservationDocument({
 	normalized,
 	event,
+	mirror = {},
 	hotel,
 	pricing,
 	confirmationNumber,
@@ -872,7 +961,7 @@ function buildCreateReservationDocument({
 			otaExpenseTotalSar: null,
 			otaPayoutFallbackReason: HOTELRUNNER_PAYOUT_NOT_PROVIDED,
 			...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
-			hotelRunner: hotelRunnerSupplierMetadata(normalized, event, now),
+			hotelRunner: hotelRunnerSupplierMetadata(normalized, event, now, mirror),
 		},
 		reservationAuditLog: [
 			{
@@ -2653,6 +2742,12 @@ async function applyReleasedHotelRunnerLifecycleOnly(
 	{ normalized, mirror, existing, linkMethod },
 	dependencies
 ) {
+	const identityConflict = hotelRunnerPmsExternalIdentityConflict(
+		existing,
+		normalized,
+		mirror
+	);
+	if (identityConflict) return identityConflict;
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const cancellation = normalized.state === "canceled";
 	const mirrorResult = (changedPaths, mirrorRecovery = false) => ({
@@ -2739,6 +2834,12 @@ async function applyCancellation(
 	{ normalized, event, mirror, existing, linkMethod, emailBridge = null },
 	dependencies
 ) {
+	const identityConflict = hotelRunnerPmsExternalIdentityConflict(
+		existing,
+		normalized,
+		mirror
+	);
+	if (identityConflict) return identityConflict;
 	if (canonicalReleasedOtaReviewEvidence(existing)) {
 		return applyReleasedHotelRunnerLifecycleOnly(
 			{ normalized, mirror, existing, linkMethod },
@@ -2788,7 +2889,8 @@ async function applyCancellation(
 			normalized,
 			event,
 			now,
-			existing.supplierData?.hotelRunner
+			existing.supplierData?.hotelRunner,
+			mirror
 		),
 		"supplierData.otaAutomationPipeline": "hotelrunner-background-worker",
 		"supplierData.otaSourceAuthority": 4,
@@ -3156,13 +3258,20 @@ async function applyOlderAuthenticatedProviderHandoff(
 	{ normalized, event, mirror, existing, linkMethod, proof, pricing },
 	dependencies
 ) {
+	const identityConflict = hotelRunnerPmsExternalIdentityConflict(
+		existing,
+		normalized,
+		mirror
+	);
+	if (identityConflict) return identityConflict;
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const set = {
 		"supplierData.hotelRunner": hotelRunnerSupplierMetadata(
 			normalized,
 			event,
 			new Date(),
-			existing.supplierData?.hotelRunner
+			existing.supplierData?.hotelRunner,
+			mirror
 		),
 		"supplierData.otaAutomationPipeline": "hotelrunner-background-worker",
 		"supplierData.otaSourceAuthority": 4,
@@ -3297,6 +3406,12 @@ async function applyActiveUpdate({
 	emailBridge = null,
 	config = {},
 }, dependencies) {
+	const identityConflict = hotelRunnerPmsExternalIdentityConflict(
+		existing,
+		normalized,
+		mirror
+	);
+	if (identityConflict) return identityConflict;
 	const ReservationModel = dependencies.ReservationModel || Reservations;
 	const terminal = isLocalTerminal(existing);
 	if (terminal) {
@@ -3661,7 +3776,8 @@ async function applyActiveUpdate({
 		normalized,
 		event,
 		now,
-		existing.supplierData?.hotelRunner
+		existing.supplierData?.hotelRunner,
+		mirror
 	);
 	set["supplierData.otaAutomationPipeline"] = "hotelrunner-background-worker";
 	set["supplierData.otaSourceAuthority"] = 4;
@@ -3859,10 +3975,28 @@ async function createReservation({
 	}
 	const generateConfirmation =
 		dependencies.generateConfirmation || generateUniquePmsConfirmationNumber;
-	const confirmationNumber = await generateConfirmation();
+	const externalConfirmationValues = [
+		...hotelRunnerExternalIdentityAliases(normalized),
+		normalized.hotelRunnerReservationId,
+		normalized.hrNumber,
+		normalized.providerNumber,
+		mirror.hrNumber,
+		mirror.providerNumber,
+		mirror.hrNumberAliases,
+		mirror.providerNumberAliases,
+	];
+	const confirmationNumber = await generateConfirmation(
+		25,
+		externalConfirmationValues
+	);
+	assertPmsConfirmationDistinctFromExternal(
+		confirmationNumber,
+		externalConfirmationValues
+	);
 	let document = buildCreateReservationDocument({
 		normalized,
 		event,
+		mirror,
 		hotel,
 		pricing,
 		confirmationNumber,
@@ -3892,6 +4026,7 @@ async function createReservation({
 			document = buildCreateReservationDocument({
 				normalized,
 				event,
+				mirror,
 				hotel,
 				pricing,
 				confirmationNumber,
@@ -3904,7 +4039,15 @@ async function createReservation({
 	try {
 		const createWithSnapshot =
 			dependencies.createWithSnapshot || createReservationWithAvailabilitySnapshot;
-		createdReservation = await createWithSnapshot(document, "hotelrunner_api_create");
+		assertReservationPmsConfirmationDistinct(document);
+		createdReservation = await createWithSnapshot(
+			document,
+			"hotelrunner_api_create",
+			{
+				beforeInsert: ({ reservationData }) =>
+					assertReservationPmsConfirmationDistinct(reservationData),
+			}
+		);
 	} catch (error) {
 		if (error?.code !== 11000) throw error;
 		existingById = await ReservationModel.findById(reservationMongoId).lean().exec();
@@ -4091,6 +4234,28 @@ async function projectHotelRunnerReservation(
 					mirrorId: mirror._id,
 				};
 			}
+		}
+	}
+	if (existing) {
+		const identityConflict = hotelRunnerPmsExternalIdentityConflict(
+			existing,
+			normalized,
+			mirror
+		);
+		if (identityConflict) {
+			await markMirrorReview(
+				mirror,
+				identityConflict.status,
+				identityConflict.code,
+				identityConflict.message,
+				{},
+				dependencies
+			);
+			return {
+				...identityConflict,
+				mirrorId: mirror._id,
+				reservationMongoId: existing._id,
+			};
 		}
 	}
 	if (existing && !mirror.reservationMongoId) {
