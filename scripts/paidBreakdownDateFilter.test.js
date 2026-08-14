@@ -538,7 +538,7 @@ test("invalid admin date queries return 400 before reservation reads", async () 
 	}
 });
 
-test("paid report category and reconciliation filters affect rows while existing scorecard scope stays intact", async () => {
+test("paid report returns mixed rows with overlapping clickable reconciliation counts", async () => {
 	const row = {
 		_id: "68b74714fb50e159d48c714e",
 		hotelId: HOTEL_ID,
@@ -554,6 +554,9 @@ test("paid report category and reconciliation filters affect rows while existing
 				paid_at_hotel_cash: {
 					status: "reconciled",
 					amountCents: 10000,
+					reconciledBy: { email: "private-paid-actor@example.com" },
+					batchId: "private-paid-entry-batch",
+					note: "private paid entry note",
 				},
 			},
 		},
@@ -600,7 +603,7 @@ test("paid report category and reconciliation filters affect rows while existing
 			]);
 			assert.equal(res.payload.reconciliationStatus, "waiting");
 			assert.equal(res.payload.data[0].selected_breakdown_total_cents, 12500);
-			assert.equal(res.payload.data[0].reconciliation_status, "waiting");
+			assert.equal(res.payload.data[0].reconciliation_status, "mixed");
 			assert.equal(res.payload.data[0].payment_reconciliation, undefined);
 			assert.deepEqual(res.payload.data[0].adminChangeLog, [
 				{ field: "safe_field", note: "safe audit" },
@@ -613,12 +616,45 @@ test("paid report category and reconciliation filters affect rows while existing
 					res.payload.data[0].reconciliation_by_breakdown
 						.paid_at_hotel_cash
 				).sort(),
-				["amount", "amountCents", "reconciled", "stale", "status"].sort()
+				[
+					"amount",
+					"amountCents",
+					"hasStoredEntry",
+					"reconciled",
+					"stale",
+					"status",
+				].sort()
 			);
+			assert.equal(
+				res.payload.data[0].reconciliation_by_breakdown
+					.paid_at_hotel_cash.hasStoredEntry,
+				true
+			);
+			assert.equal(
+				res.payload.data[0].reconciliation_by_breakdown
+					.paid_at_hotel_card.hasStoredEntry,
+				false
+			);
+			const serializedRow = JSON.stringify(res.payload.data[0]);
+			for (const privateValue of [
+				"private-paid-actor@example.com",
+				"private-paid-entry-batch",
+				"private paid entry note",
+			]) {
+				assert.equal(serializedRow.includes(privateValue), false);
+			}
 			assert.equal(res.payload.reconciliationSummary.totalAmountCents, 12500);
 			assert.equal(
 				res.payload.reconciliationSummary.reconciledAmountCents,
 				10000
+			);
+			assert.equal(
+				res.payload.reconciliationSummary.reconciledReservationsCount,
+				1
+			);
+			assert.equal(
+				res.payload.reconciliationSummary.waitingReservationsCount,
+				1
 			);
 
 			const rowClauses = clausesFor(observed.countFilter);
@@ -654,6 +690,19 @@ test("paid report category and reconciliation filters affect rows while existing
 				dateClauseFor(observed.aggregateMatch, "createdAt"),
 				dateClauseFor(observed.countFilter, "createdAt")
 			);
+			const scorecardFields = observed.aggregatePipeline[1].$addFields;
+			assert.equal(
+				scorecardFields.reconciliation_row_reconciled.$or.length,
+				2
+			);
+			assert.equal(
+				scorecardFields.reconciliation_row_waiting.$or.length,
+				2
+			);
+			assert.ok(
+				observed.aggregatePipeline[2].$group
+					.reconciliationWaitingReservationsCount
+			);
 		},
 		{
 			rowReservations: [row],
@@ -665,12 +714,77 @@ test("paid report category and reconciliation filters affect rows while existing
 					reconciliationTotalCents: 12500,
 					reconciliationReconciledCents: 10000,
 					reconciliationReservationsCount: 1,
-					reconciliationReconciledReservationsCount: 0,
+				reconciliationReconciledReservationsCount: 1,
+				reconciliationWaitingReservationsCount: 1,
 				},
 			],
 			count: 1,
 		}
 	);
+});
+
+test("paid endpoint includes a mixed row in both reconciled and waiting category filters", async () => {
+	const row = {
+		_id: "68b74714fb50e159d48c714f",
+		hotelId: HOTEL_ID,
+		currency: "SAR",
+		total_amount: 150,
+		paid_amount_breakdown: {
+			paid_at_hotel_cash: 100,
+			paid_at_hotel_card: 50,
+		},
+		payment_reconciliation: {
+			breakdown: {
+				paid_at_hotel_cash: {
+					status: "reconciled",
+					amountCents: 10000,
+				},
+			},
+		},
+	};
+	for (const requestedStatus of ["reconciled", "waiting"]) {
+		await withReservationReadMocks(
+			async (observed) => {
+				const res = makeResponse();
+				await paidBreakdownReportAdmin(
+					{
+						query: {
+							hotelId: HOTEL_ID,
+							paymentBreakdownKeys:
+								"paid_at_hotel_cash,paid_at_hotel_card",
+							reconciliationStatus: requestedStatus,
+							includeScorecards: "false",
+						},
+						profile: { role: 8000 },
+					},
+					res
+				);
+				assert.equal(res.statusCode, 200);
+				assert.equal(res.payload.reconciliationStatus, requestedStatus);
+				assert.equal(res.payload.data[0].reconciliation_status, "mixed");
+				const statusClause = clausesFor(observed.countFilter).find(
+					(clause) =>
+						clause?.$expr?.$or?.length === 2 &&
+						clause.$expr.$or.every(
+							(condition) => Array.isArray(condition?.$and)
+						)
+				);
+				assert.ok(statusClause);
+				if (requestedStatus === "reconciled") {
+					assert.equal(statusClause.$expr.$or[0].$and.length, 3);
+					assert.equal(statusClause.$expr.$or[0].$and[1].$eq.length, 2);
+				} else {
+					assert.equal(statusClause.$expr.$or[0].$and.length, 2);
+					assert.ok(statusClause.$expr.$or[0].$and[1].$not);
+				}
+			},
+			{
+				rowReservations: [row],
+				financialReservations: [row],
+				count: 1,
+			}
+		);
+	}
 });
 
 test("paid report rejects injected category keys and invalid reconciliation statuses before reads", async () => {
@@ -697,6 +811,7 @@ test("paid report rejects injected category keys and invalid reconciliation stat
 		for (const query of [
 			{ hotelId: HOTEL_ID, paymentBreakdownKeys: "$where" },
 			{ hotelId: HOTEL_ID, reconciliationStatus: "partial" },
+			{ hotelId: HOTEL_ID, reconciliationStatus: "mixed" },
 		]) {
 			const res = makeResponse();
 			await paidBreakdownReportAdmin(

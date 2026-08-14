@@ -405,7 +405,10 @@ const computePaidBreakdownTotal = (breakdown = {}) =>
 		0,
 	);
 
-const reconciliationBreakdownForReportResponse = (byBreakdown = {}) =>
+const reconciliationBreakdownForReportResponse = (
+	byBreakdown = {},
+	storedBreakdown = {},
+) =>
 	Object.fromEntries(
 		Object.entries(byBreakdown).map(([key, entry = {}]) => [
 			key,
@@ -415,6 +418,12 @@ const reconciliationBreakdownForReportResponse = (byBreakdown = {}) =>
 				status: entry.status,
 				reconciled: entry.reconciled === true,
 				stale: entry.stale === true,
+				hasStoredEntry: Object.prototype.hasOwnProperty.call(
+					storedBreakdown && typeof storedBreakdown === "object"
+						? storedBreakdown
+						: {},
+					key,
+				),
 			},
 		])
 	);
@@ -5100,11 +5109,14 @@ const buildPaidBreakdownScorecards = async (
 			$gt: [paymentAmountCentsExpression(key), 0],
 		})),
 	};
-	const selectedEveryPositiveReconciled = {
-		$and: selectedReconciliationKeys.map((key) => ({
-			$or: [
-				{ $lte: [paymentAmountCentsExpression(key), 0] },
-				effectivelyReconciledExpression(key),
+	const selectedAnyReconciled = {
+		$or: selectedReconciliationKeys.map(effectivelyReconciledExpression),
+	};
+	const selectedAnyWaiting = {
+		$or: selectedReconciliationKeys.map((key) => ({
+			$and: [
+				{ $gt: [paymentAmountCentsExpression(key), 0] },
+				{ $not: [effectivelyReconciledExpression(key)] },
 			],
 		})),
 	};
@@ -5133,12 +5145,8 @@ const buildPaidBreakdownScorecards = async (
 					reconciliation_reconciled_cents:
 						selectedReconciledAmountCents,
 					reconciliation_has_positive: selectedAnyPositive,
-					reconciliation_row_reconciled: {
-						$and: [
-							selectedAnyPositive,
-							selectedEveryPositiveReconciled,
-						],
-					},
+					reconciliation_row_reconciled: selectedAnyReconciled,
+					reconciliation_row_waiting: selectedAnyWaiting,
 				},
 			},
 			{
@@ -5157,6 +5165,9 @@ const buildPaidBreakdownScorecards = async (
 					},
 					reconciliationReconciledReservationsCount: {
 						$sum: { $cond: ["$reconciliation_row_reconciled", 1, 0] },
+					},
+					reconciliationWaitingReservationsCount: {
+						$sum: { $cond: ["$reconciliation_row_waiting", 1, 0] },
 					},
 					...breakdownTotalsGroup,
 				},
@@ -5192,6 +5203,9 @@ const buildPaidBreakdownScorecards = async (
 	const reconciliationReconciledReservationsCount = Math.round(
 		safeNumber(summary.reconciliationReconciledReservationsCount)
 	);
+	const reconciliationWaitingReservationsCount = Math.round(
+		safeNumber(summary.reconciliationWaitingReservationsCount)
+	);
 	return {
 		totalAmount: financialSummary
 			? financialSummary.totalAmount
@@ -5211,11 +5225,13 @@ const buildPaidBreakdownScorecards = async (
 			waitingAmountCents: reconciliationWaitingCents,
 			reservationsCount: reconciliationReservationsCount,
 			reconciledReservationsCount:
-				reconciliationReconciledReservationsCount,
-			waitingReservationsCount: Math.max(
-				reconciliationReservationsCount -
-					reconciliationReconciledReservationsCount,
-				0
+				Math.min(
+					Math.max(reconciliationReconciledReservationsCount, 0),
+					reconciliationReservationsCount,
+				),
+			waitingReservationsCount: Math.min(
+				Math.max(reconciliationWaitingReservationsCount, 0),
+				reconciliationReservationsCount,
 			),
 			paymentBreakdownKeys: selectedReconciliationKeys,
 		},
@@ -5336,7 +5352,8 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 				reconciliation_status: reconciliation.reconciliationStatus,
 				reconciliation_by_breakdown:
 					reconciliationBreakdownForReportResponse(
-						reconciliation.byBreakdown
+						reconciliation.byBreakdown,
+						reservation?.payment_reconciliation?.breakdown,
 					),
 				selected_positive_payment_breakdown_keys:
 					reconciliation.selectedPositiveKeys,

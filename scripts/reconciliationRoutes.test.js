@@ -10,6 +10,7 @@ process.env.SENDGRID_API_KEY ||= "SG.route-test.placeholder";
 
 const router = require("../routes/reconciliation");
 const reconciliationController = require("../controllers/reconciliation");
+const reconciliationAttachment = require("../services/reconciliationAttachment");
 const { userById } = require("../controllers/user");
 const { isAuth } = require("../controllers/auth");
 
@@ -21,7 +22,7 @@ test("reconciliation routes wire authenticated report and patch handlers", () =>
 			methods: layer.route.methods,
 			handlers: layer.route.stack.map((item) => item.handle),
 		}));
-	assert.equal(routes.length, 2);
+	assert.equal(routes.length, 3);
 	assert.equal(routes[0].path, "/reconciliation/report/:userId");
 	assert.equal(routes[0].methods.get, true);
 	assert.equal(
@@ -38,7 +39,38 @@ test("reconciliation routes wire authenticated report and patch handlers", () =>
 		reconciliationController.updateReconciliationStatus
 	);
 	assert.ok(routes[1].handlers.includes(isAuth));
-	assert.ok(routes[1].handlers.length >= 4);
+	assert.ok(
+		routes[1].handlers.includes(
+			reconciliationController.requireConfiguredReconciliationSuperAdmin
+		)
+	);
+	assert.ok(
+		routes[1].handlers.includes(
+			reconciliationAttachment.parseReconciliationAttachment
+		)
+	);
+	assert.ok(
+		routes[1].handlers.indexOf(
+			reconciliationController.requireConfiguredReconciliationSuperAdmin
+		) <
+			routes[1].handlers.indexOf(
+				reconciliationAttachment.parseReconciliationAttachment
+			)
+	);
+	assert.ok(routes[1].handlers.length >= 6);
+
+	assert.equal(routes[2].path, "/reconciliation/closest-match/:userId");
+	assert.equal(routes[2].methods.post, true);
+	assert.equal(
+		routes[2].handlers.at(-1),
+		reconciliationController.closestReconciliationMatch
+	);
+	assert.ok(routes[2].handlers.includes(isAuth));
+	assert.ok(
+		routes[2].handlers.includes(
+			reconciliationController.requireConfiguredReconciliationSuperAdmin
+		)
+	);
 });
 
 test("reconciliation router registers userId loading", () => {

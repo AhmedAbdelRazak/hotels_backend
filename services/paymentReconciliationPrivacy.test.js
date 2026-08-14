@@ -42,6 +42,11 @@ const rawReservation = () => ({
 			batchId: "private-batch",
 			note: "private note",
 		},
+		{
+			type: "payment_reconciliation_reset",
+			batchId: "private-reset-batch",
+			note: "private reset note",
+		},
 	],
 });
 
@@ -97,6 +102,10 @@ test("only the configured super admin retains raw reconciliation audit metadata"
 		assert.equal(
 			sanitized.reservationAuditLog[1].note,
 			"private note"
+		);
+		assert.equal(
+			sanitized.reservationAuditLog[2].note,
+			"private reset note"
 		);
 	} finally {
 		if (previous === undefined) delete process.env.SUPER_ADMIN_ID;

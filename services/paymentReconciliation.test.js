@@ -75,10 +75,12 @@ test("payment reconciliation exposes exactly the eight supported breakdown keys"
 				error.statusCode === 400
 		);
 	}
-	assert.throws(
-		() => normalizeReconciliationStatus("partially_reconciled"),
-		PaymentReconciliationError
-	);
+	for (const unsupportedStatus of ["partially_reconciled", "mixed"]) {
+		assert.throws(
+			() => normalizeReconciliationStatus(unsupportedStatus),
+			PaymentReconciliationError
+		);
+	}
 });
 
 test("legacy, missing, and stale snapshots are waiting", () => {
@@ -156,7 +158,7 @@ test("multi-category rows require any positive amount but reconcile every select
 		"paid_at_hotel_cash",
 		"paid_online_other_platforms",
 	]);
-	assert.equal(cashAndOnline.reconciliationStatus, "waiting");
+	assert.equal(cashAndOnline.reconciliationStatus, "mixed");
 	assert.equal(cashAndOnline.reconciledAmountCents, 10000);
 	assert.equal(cashAndOnline.waitingAmountCents, 5000);
 
@@ -178,14 +180,38 @@ test("Mongo inclusion and status filters use rounded cents for positivity", () =
 	const selection = buildPaymentBreakdownSelectionFilter([key]);
 	assert.deepEqual(selection.$expr.$or[0], { $gt: [cents, 0] });
 
-	const reconciled = effectivelyReconciledExpression(key);
-	assert.deepEqual(reconciled.$and[0], { $gt: [cents, 0] });
+	const effectivelyReconciled = effectivelyReconciledExpression(key);
+	assert.deepEqual(effectivelyReconciled.$and[0], { $gt: [cents, 0] });
 
 	const waiting = buildReconciliationStatusFilter([key], "waiting");
-	const [anyPositive, notEveryReconciled] = waiting.$expr.$and;
-	assert.deepEqual(anyPositive.$or[0], { $gt: [cents, 0] });
-	assert.deepEqual(notEveryReconciled.$not[0].$and[0].$or[0], {
-		$lte: [cents, 0],
+	const waitingCategory = waiting.$expr.$or[0];
+	assert.deepEqual(waitingCategory.$and[0], { $gt: [cents, 0] });
+	assert.deepEqual(
+		waitingCategory.$and[1].$not[0],
+		effectivelyReconciledExpression(key)
+	);
+	const reconciled = buildReconciliationStatusFilter([key], "reconciled");
+	assert.deepEqual(
+		reconciled.$expr.$or[0],
+		effectivelyReconciledExpression(key)
+	);
+	const mixedKeys = [key, "paid_at_hotel_card"];
+	const mixedReconciledFilter = buildReconciliationStatusFilter(
+		mixedKeys,
+		"reconciled"
+	);
+	const mixedWaitingFilter = buildReconciliationStatusFilter(
+		mixedKeys,
+		"waiting"
+	);
+	assert.equal(mixedReconciledFilter.$expr.$or.length, 2);
+	assert.equal(mixedWaitingFilter.$expr.$or.length, 2);
+	assert.deepEqual(
+		mixedReconciledFilter.$expr.$or[1],
+		effectivelyReconciledExpression("paid_at_hotel_card")
+	);
+	assert.deepEqual(mixedWaitingFilter.$expr.$or[1].$and[0], {
+		$gt: [paymentAmountCentsExpression("paid_at_hotel_card"), 0],
 	});
 
 	assert.equal(paymentAmountCents({ paid_amount_breakdown: { [key]: 0.004 } }, key), 0);
@@ -223,7 +249,7 @@ test("scorecard cents always reconcile exactly", () => {
 		summary.totalAmountCents
 	);
 	assert.equal(summary.reservationsCount, 2);
-	assert.equal(summary.reconciledReservationsCount, 0);
+	assert.equal(summary.reconciledReservationsCount, 1);
 	assert.equal(summary.waitingReservationsCount, 2);
 });
 

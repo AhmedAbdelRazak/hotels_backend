@@ -11,9 +11,14 @@ const {
 } = require("../controllers/auth");
 const { userById } = require("../controllers/user");
 const {
+	closestReconciliationMatch,
+	requireConfiguredReconciliationSuperAdmin,
 	reconciliationReport,
 	updateReconciliationStatus,
 } = require("../controllers/reconciliation");
+const {
+	parseReconciliationAttachment,
+} = require("../services/reconciliationAttachment");
 
 router.param("userId", userById);
 
@@ -35,7 +40,16 @@ router.get(
 router.patch(
 	"/reconciliation/status/:userId",
 	...canReadReconciliation,
+	requireConfiguredReconciliationSuperAdmin,
+	parseReconciliationAttachment,
 	updateReconciliationStatus
+);
+
+router.post(
+	"/reconciliation/closest-match/:userId",
+	...canReadReconciliation,
+	requireConfiguredReconciliationSuperAdmin,
+	closestReconciliationMatch
 );
 
 module.exports = router;
