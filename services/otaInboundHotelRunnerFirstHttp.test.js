@@ -122,7 +122,8 @@ function loadControllerWithStubs(state) {
 		findByIdAndUpdate(id, update) {
 			state.auditUpdates.push({ id: String(id), update });
 			if (
-				update?.$set?.processingStatus === "needs_review" &&
+				update?.$set?.processingStatus ===
+					"hotelrunner_relay_audit_only" &&
 				update?.$set?.hotelRunnerFirstFallback?.status ===
 					"hotelrunner_relay_audit_only"
 			) {
@@ -567,7 +568,7 @@ test("master-disabled mode processes direct OTA email inline despite legacy Hote
 	);
 });
 
-test("master-disabled mode processes an authenticated HotelRunner relay through the inline email path", async () => {
+test("master-disabled mode archives an authenticated HotelRunner relay without inline reservation mutation", async () => {
 	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
 	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
 	const relayAuthentication = {
@@ -583,16 +584,6 @@ test("master-disabled mode processes an authenticated HotelRunner relay through 
 			trustedTransportProvider: "hotelrunner",
 			senderAuthentication: relayAuthentication,
 			hotelRunnerCommercialSourceProviders: ["agoda"],
-		},
-		inlineReconciliation: {
-			status: "created",
-			actionTaken: "created",
-			skipReason: "",
-			warnings: [],
-			errors: [],
-			reservationId: "64b000000000000000000207",
-			hotelId: HOTEL_ID,
-			pmsConfirmationNumber: "PMS-EMAIL-ONLY-RELAY-1",
 		},
 		hotelRunnerConfig: {
 			integrationEnabled: false,
@@ -624,14 +615,189 @@ test("master-disabled mode processes an authenticated HotelRunner relay through 
 
 	assert.equal(state.response.statusCode, 200);
 	assert.equal(state.response.body, "OK");
-	assert.equal(state.inlineReconcileCalls, 1);
+	assert.equal(state.inlineReconcileCalls, 0);
 	assert.equal(state.coordinatorCreations, 0);
 	assert.equal(state.enqueueCalls.length, 0);
-	assert.equal(state.events.includes("persist_relay_audit"), false);
-	assert.ok(
-		state.auditUpdates.some(
-			(entry) => entry.update?.$set?.processingStatus === "created"
-		)
+	assert.equal(state.forwardCalls, 0);
+	assert.equal(state.reservationNotificationCalls, 0);
+	assert.equal(state.whatsappCalls, 0);
+	assert.deepEqual(state.events, ["resolve_hotel", "persist_relay_audit"]);
+	const audit = state.auditUpdates.find(
+		(entry) =>
+			entry.update?.$set?.processingStatus ===
+			"hotelrunner_relay_audit_only"
+	).update.$set;
+	assert.equal(audit.processingStatus, "hotelrunner_relay_audit_only");
+	assert.equal(audit.reservationMongoId, null);
+	assert.equal(
+		audit.reconciliation.skipReason,
+		"hotelrunner_relay_audit_only"
+	);
+	assert.equal(
+		audit.hotelRunnerFirstFallback.status,
+		"hotelrunner_relay_audit_only"
+	);
+});
+
+test("master-disabled HotelRunner non-reservation and lifecycle relays remain silent audit-only evidence", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const relayAuthentication = {
+		authenticatedAligned: true,
+		trustedProvider: "hotelrunner",
+		method: "dkim",
+	};
+	try {
+		for (const [name, lifecycle] of [
+			[
+				"not reservation",
+				{ intent: "not_reservation", eventType: "unknown", statusToApply: "" },
+			],
+			[
+				"cancelled",
+				{
+					intent: "reservation_status",
+					eventType: "cancelled",
+					statusToApply: "cancelled",
+				},
+			],
+			[
+				"status",
+				{
+					intent: "reservation_status",
+					eventType: "status",
+					statusToApply: "confirmed",
+				},
+			],
+		]) {
+			const state = makeState({
+				forwardMustFollowResponse: false,
+				senderAuthentication: relayAuthentication,
+				orchestrationNormalized: {
+					...normalizedReservation(),
+					...lifecycle,
+					trustedTransportProvider: "hotelrunner",
+					senderAuthentication: relayAuthentication,
+					hotelRunnerCommercialSourceProviders: ["agoda"],
+				},
+				hotelRunnerConfig: {
+					integrationEnabled: false,
+					configured: false,
+					projectionEnabled: false,
+					hotelId: HOTEL_ID,
+				},
+			});
+			const controller = loadControllerWithStubs(state);
+			await controller.handleSendGridInbound(
+				requestMock({
+					from: "HotelRunner <noreply@hotelrunner.com>",
+					subject: `HotelRunner ${name} relay`,
+					messageId: `<hotelrunner-${name.replace(/\s+/g, "-")}@example.com>`,
+				}),
+				state.response
+			);
+
+			assert.equal(state.response.statusCode, 200, name);
+			assert.equal(state.response.body, "OK", name);
+			assert.equal(state.inlineReconcileCalls, 0, name);
+			assert.equal(state.coordinatorCreations, 0, name);
+			assert.equal(state.enqueueCalls.length, 0, name);
+			assert.equal(state.forwardCalls, 0, name);
+			assert.equal(state.reservationNotificationCalls, 0, name);
+			assert.equal(state.whatsappCalls, 0, name);
+			assert.deepEqual(
+				state.events,
+				["resolve_hotel", "persist_relay_audit"],
+				name
+			);
+			const audit = state.auditUpdates[0].update.$set;
+			assert.equal(
+				audit.processingStatus,
+				"hotelrunner_relay_audit_only",
+				name
+			);
+			assert.equal(audit.intent, lifecycle.intent, name);
+			assert.equal(audit.eventType, lifecycle.eventType, name);
+			assert.equal(audit.reconciliation.status, "needs_review", name);
+			assert.equal(
+				audit.reconciliation.skipReason,
+				"hotelrunner_relay_audit_only",
+				name
+			);
+		}
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+});
+
+test("authenticated HotelRunner transport remains audit-only when relay facts cannot resolve a hotel", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const relayAuthentication = {
+		authenticatedAligned: true,
+		trustedProvider: "hotelrunner",
+		method: "dkim",
+	};
+	const state = makeState({
+		forwardMustFollowResponse: false,
+		senderAuthentication: relayAuthentication,
+		orchestrationNormalized: {
+			...normalizedReservation(),
+			provider: "unknown",
+			providerLabel: "HotelRunner",
+			trustedTransportProvider: "hotelrunner",
+			senderAuthentication: relayAuthentication,
+			hotelRunnerCommercialSourceProviders: ["agoda", "booking"],
+			hotelRunnerBookingSourceConflict: true,
+			confirmationNumber: "",
+			reservationId: "",
+			hotelName: "",
+			sourcePresence: {},
+		},
+		hotelRunnerConfig: {
+			integrationEnabled: false,
+			configured: false,
+			projectionEnabled: false,
+			hotelId: HOTEL_ID,
+		},
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(
+			requestMock({
+				from: "HotelRunner <noreply@hotelrunner.com>",
+				subject: "Unresolved relay evidence",
+				messageId: "<unresolved-hotelrunner-relay@example.com>",
+			}),
+			state.response
+		);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.response.body, "OK");
+	assert.equal(state.inlineReconcileCalls, 0);
+	assert.equal(state.coordinatorCreations, 0);
+	assert.equal(state.enqueueCalls.length, 0);
+	assert.equal(state.forwardCalls, 0);
+	assert.equal(state.reservationNotificationCalls, 0);
+	assert.equal(state.whatsappCalls, 0);
+	assert.deepEqual(state.events, ["persist_relay_audit"]);
+	const audit = state.auditUpdates.find(
+		(entry) =>
+			entry.update?.$set?.processingStatus ===
+			"hotelrunner_relay_audit_only"
+	).update.$set;
+	assert.equal(audit.provider, "hotelrunner");
+	assert.equal(audit.hotelId, null);
+	assert.equal(audit.reservationMongoId, null);
+	assert.equal(audit.hotelRunnerFirstFallback.resolvedHotelProof, null);
+	assert.equal(
+		audit.reconciliation.skipReason,
+		"hotelrunner_relay_audit_only"
 	);
 });
 
@@ -721,11 +887,11 @@ test("authenticated HotelRunner relay HTTP ingress is audit-only and never reach
 	assert.equal(state.inlineReconcileCalls, 0);
 	assert.equal(state.reservationNotificationCalls, 0);
 	assert.equal(state.whatsappCalls, 0);
-	assert.equal(state.forwardCalls, 1);
+	assert.equal(state.forwardCalls, 0);
 	assert.deepEqual(state.events, ["resolve_hotel", "persist_relay_audit"]);
 	assert.equal(state.auditUpdates.length, 1);
 	const audit = state.auditUpdates[0].update.$set;
-	assert.equal(audit.processingStatus, "needs_review");
+	assert.equal(audit.processingStatus, "hotelrunner_relay_audit_only");
 	assert.equal(audit.provider, "agoda");
 	assert.equal(audit.reconciliation.skipReason, "hotelrunner_relay_audit_only");
 	assert.equal(
@@ -777,6 +943,70 @@ test("duplicate redelivery of an awaiting audit returns OK without orchestration
 	assert.equal(
 		state.duplicateQueries[0].processingStatus.$in.includes(
 			"awaiting_hotelrunner"
+		),
+		true
+	);
+});
+
+test("duplicate redelivery of a HotelRunner relay audit cannot reclaim or re-enter automation", async () => {
+	const originalSecret = process.env.SENDGRID_INBOUND_SECRET;
+	process.env.SENDGRID_INBOUND_SECRET = "inbound-secret";
+	const originalRelayAudit = {
+		_id: INBOUND_ID,
+		processingStatus: "hotelrunner_relay_audit_only",
+		receivedAt: new Date("2026-08-14T01:09:00.000Z"),
+		dedupeKey: "mid:hotelrunner-relay-audit",
+		reservationMongoId: null,
+		hotelId: HOTEL_ID,
+		provider: "agoda",
+		providerLabel: "Agoda",
+		intent: "new_reservation",
+		eventType: "new",
+		confirmationNumber: "2039878308",
+		hotelName: "Zad Ajyad",
+		roomName: "Double Room",
+		sourceAmount: 37.6,
+		sourceCurrency: "SAR",
+		totalAmountSar: 37.6,
+		paymentCollectionModel: "ota_collect",
+		reconciliation: {
+			status: "needs_review",
+			reservationId: null,
+			skipReason: "hotelrunner_relay_audit_only",
+		},
+	};
+	const state = makeState({
+		processedDuplicate: originalRelayAudit,
+		forwardMustFollowResponse: false,
+	});
+	const controller = loadControllerWithStubs(state);
+	try {
+		await controller.handleSendGridInbound(
+			requestMock({
+				from: "HotelRunner <noreply@hotelrunner.com>",
+				subject: "HotelRunner Agoda relay",
+				messageId: "<hotelrunner-relay-audit@example.com>",
+			}),
+			state.response
+		);
+	} finally {
+		if (originalSecret === undefined) delete process.env.SENDGRID_INBOUND_SECRET;
+		else process.env.SENDGRID_INBOUND_SECRET = originalSecret;
+	}
+
+	assert.equal(state.response.statusCode, 200);
+	assert.equal(state.response.body, "OK");
+	assert.equal(state.orchestratorCalls, 0);
+	assert.equal(state.coordinatorCreations, 0);
+	assert.equal(state.enqueueCalls.length, 0);
+	assert.equal(state.inlineReconcileCalls, 0);
+	assert.equal(state.forwardCalls, 0);
+	assert.equal(state.claimUpdates.length, 0);
+	assert.equal(state.createdAudits.length, 1);
+	assert.equal(state.createdAudits[0].duplicateOf, INBOUND_ID);
+	assert.equal(
+		state.duplicateQueries[0].processingStatus.$in.includes(
+			"hotelrunner_relay_audit_only"
 		),
 		true
 	);

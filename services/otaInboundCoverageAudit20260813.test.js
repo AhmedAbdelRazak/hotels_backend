@@ -103,6 +103,58 @@ function reservation({
 	};
 }
 
+function directCommercialArchive(options = {}) {
+	const value = archive(options);
+	value.normalizedReservation = {
+		...value.normalizedReservation,
+		propertyCurrency: "SAR",
+		propertyConversionVerified: true,
+		sourceAmount: 60.76,
+		sourceCurrency: "SAR",
+		sourcePayoutAmount: 37.6,
+		sourcePayoutCurrency: "SAR",
+		totalAmountSar: 60.76,
+		totalPayoutSar: 37.6,
+		paymentSummary: {
+			totalGuestPaymentAmount: 60.76,
+			totalPayoutAmount: 37.6,
+			currency: "SAR",
+		},
+		sourcePresence: { amount: true },
+	};
+	return value;
+}
+
+function otaEmailCreatedReservation({
+	provider = "agoda",
+	confirmationNumber = "commercial-id",
+	state = "ota platform review",
+	gross = null,
+	payout = null,
+} = {}) {
+	return {
+		...reservation({ provider, confirmationNumber }),
+		state,
+		reservation_status: state,
+		total_amount: gross,
+		adminPricing: {
+			source: "ota_email_create",
+			clientTotal: gross,
+			netAfterExpensesTotal: payout,
+		},
+		ota_financial_summary: {
+			source: "ota_email_create",
+			netAfterExpenses: payout,
+		},
+		supplierData: {
+			otaProvider: provider,
+			otaConfirmationNumber: confirmationNumber,
+			otaAutomationPipeline: "ota-email-orchestrator",
+			otaTotalPayoutSar: payout,
+		},
+	};
+}
+
 test("all-time authenticated transport coverage surfaces the three current active identities only", () => {
 	const creating = [
 		archive({
@@ -186,6 +238,7 @@ test("all-time authenticated transport coverage surfaces the three current activ
 		asOf: AS_OF,
 	});
 
+	assert.equal(report.reportVersion, 4);
 	assert.equal(report.readOnly, true);
 	assert.equal(report.vendorCalls, false);
 	assert.equal(report.summary.canonicalIdentityCount, 6);
@@ -233,6 +286,7 @@ test("HotelRunner relay collapses into the authenticated direct winner even with
 		confirmationNumber: "same-id",
 		receivedAt: "2026-08-13T10:01:00Z",
 		bookingSource: "Direct Plus - unparsed",
+		processingStatus: "hotelrunner_relay_audit_only",
 	});
 	const { groups } = groupCandidateArchives([direct, relay]);
 	assert.equal(groups.size, 1);
@@ -655,6 +709,184 @@ test("archive-link integrity flags include represented identities", () => {
 		report.summary.integrityFlagCounts.reservation_connection_without_id,
 		1
 	);
+});
+
+test("represented OTA-email reservations alert when authenticated direct gross and payout were not materialized", () => {
+	const confirmationNumber = "PRIVATE-COMMERCIAL-ID";
+	const direct = directCommercialArchive({
+		provider: "agoda",
+		confirmationNumber,
+		receivedAt: "2026-08-13T21:00:00Z",
+		processingStatus: "needs_review",
+	});
+	const relay = hotelRunnerRelay({
+		otaProvider: "agoda",
+		storedProvider: "agoda",
+		confirmationNumber,
+		receivedAt: "2026-08-13T21:01:00Z",
+		processingStatus: "created",
+		reservationMongoId: "PRIVATE-COMMERCIAL-RESERVATION",
+		hasReservationConnection: true,
+	});
+	const report = buildCoverageReport({
+		creatingArchives: [direct, relay],
+		lifecycleArchives: [direct, relay],
+		reservations: [
+			{
+				...otaEmailCreatedReservation({ confirmationNumber }),
+				_id: "PRIVATE-COMMERCIAL-RESERVATION",
+			},
+		],
+		asOf: AS_OF,
+	});
+
+	assert.equal(report.summary.representedIdentityCount, 1);
+	assert.equal(report.summary.activeNonterminalMissingCount, 0);
+	assert.equal(report.summary.financialIntegrityIssueCount, 1);
+	assert.equal(report.alert.active, true);
+	assert.equal(report.alert.activeIdentityCount, 1);
+	assert.equal(report.alert.financialIntegrityIssueCount, 1);
+	assert.equal(report.alert.activeIssueCount, 1);
+	assert.equal(report.alert.exitCode, 2);
+	assert.deepEqual(report.financialIntegrityIssues, [
+		{
+			provider: "agoda",
+			confirmationNumber: "private-commercial-id",
+			status: "represented_financial_integrity",
+			reason: "authenticated_direct_gross_and_payout_not_materialized",
+			matchMethod: "ota_identity_key",
+			transportDisposition:
+				"corroborating_hotelrunner_relay_direct_winner",
+		},
+	]);
+	assert.equal(
+		report.summary.integrityFlagCounts
+			.authenticated_direct_gross_and_payout_not_materialized,
+		1
+	);
+
+	const state = buildMonitorState({
+		report,
+		auditExitCode: 2,
+		mode: "recent",
+	});
+	assert.equal(state.status, "alert");
+	assert.equal(state.activeIdentityCount, 1);
+	assert.equal(state.activeIssueCount, 1);
+	assert.equal(
+		state.integrityFlagCounts
+			.authenticated_direct_gross_and_payout_not_materialized,
+		1
+	);
+	const serializedState = JSON.stringify(state);
+	for (const privateValue of [
+		"PRIVATE-COMMERCIAL-ID",
+		"private-commercial-id",
+		"PRIVATE-COMMERCIAL-RESERVATION",
+		"PRIVATE BODY",
+		"PRIVATE GUEST",
+	]) {
+		assert.equal(serializedState.includes(privateValue), false);
+	}
+});
+
+test("financial completeness alert excludes terminal, manual, unavailable, and already materialized cases", () => {
+	const scenarios = [
+		{
+			name: "healthy materialization",
+			reservation: otaEmailCreatedReservation({ gross: 60.76, payout: 37.6 }),
+		},
+		{
+			name: "terminal reservation",
+			reservation: otaEmailCreatedReservation({ state: "cancelled" }),
+		},
+		{
+			name: "manual or historical reservation without the exact creation markers",
+			reservation: reservation({
+				provider: "agoda",
+				confirmationNumber: "commercial-id",
+			}),
+		},
+	];
+	for (const scenario of scenarios) {
+		const direct = directCommercialArchive({
+			provider: "agoda",
+			confirmationNumber: "commercial-id",
+			receivedAt: "2026-08-13T21:00:00Z",
+		});
+		const report = buildCoverageReport({
+			creatingArchives: [direct],
+			lifecycleArchives: [direct],
+			reservations: [scenario.reservation],
+			asOf: AS_OF,
+		});
+		assert.equal(report.summary.financialIntegrityIssueCount, 0, scenario.name);
+		assert.equal(report.alert.active, false, scenario.name);
+	}
+
+	const unavailablePayout = directCommercialArchive({
+		provider: "agoda",
+		confirmationNumber: "commercial-id",
+		receivedAt: "2026-08-13T21:00:00Z",
+	});
+	delete unavailablePayout.normalizedReservation.sourcePayoutAmount;
+	delete unavailablePayout.normalizedReservation.sourcePayoutCurrency;
+	delete unavailablePayout.normalizedReservation.totalPayoutSar;
+	delete unavailablePayout.normalizedReservation.paymentSummary.totalPayoutAmount;
+	const foreignConversionUnavailable = directCommercialArchive({
+		provider: "agoda",
+		confirmationNumber: "commercial-id",
+		receivedAt: "2026-08-13T21:00:00Z",
+	});
+	foreignConversionUnavailable.normalizedReservation.sourceCurrency = "USD";
+	foreignConversionUnavailable.normalizedReservation.sourcePayoutCurrency =
+		"USD";
+	foreignConversionUnavailable.normalizedReservation.propertyConversionVerified =
+		false;
+	const inconsistentPropertySummary = directCommercialArchive({
+		provider: "agoda",
+		confirmationNumber: "commercial-id",
+		receivedAt: "2026-08-13T21:00:00Z",
+	});
+	inconsistentPropertySummary.normalizedReservation.paymentSummary.totalPayoutAmount =
+		37.61;
+
+	for (const [name, direct] of [
+		["payout legitimately unavailable", unavailablePayout],
+		["foreign conversion unavailable", foreignConversionUnavailable],
+		["inconsistent property summary", inconsistentPropertySummary],
+	]) {
+		const report = buildCoverageReport({
+			creatingArchives: [direct],
+			lifecycleArchives: [direct],
+			reservations: [otaEmailCreatedReservation()],
+			asOf: AS_OF,
+		});
+		assert.equal(report.summary.financialIntegrityIssueCount, 0, name);
+		assert.equal(report.alert.active, false, name);
+	}
+
+	const direct = directCommercialArchive({
+		provider: "agoda",
+		confirmationNumber: "commercial-id",
+		receivedAt: "2026-08-13T21:00:00Z",
+	});
+	const cancellation = archive({
+		provider: "agoda",
+		confirmationNumber: "commercial-id",
+		receivedAt: "2026-08-13T21:01:00Z",
+		intent: "reservation_status",
+		eventType: "cancelled",
+		processingStatus: "cancelled",
+	});
+	const laterTerminalReport = buildCoverageReport({
+		creatingArchives: [direct],
+		lifecycleArchives: [direct, cancellation],
+		reservations: [otaEmailCreatedReservation()],
+		asOf: AS_OF,
+	});
+	assert.equal(laterTerminalReport.summary.financialIntegrityIssueCount, 0);
+	assert.equal(laterTerminalReport.alert.active, false);
 });
 
 test("stale or failed authenticated deliveries without a canonical identity alert without exposing PII", () => {

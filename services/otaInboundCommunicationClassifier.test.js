@@ -151,6 +151,100 @@ test("Airbnb guest conversation subjects are terminal but confirmations are not"
 	assert.equal(confirmation.matched, false);
 });
 
+test("authenticated Airbnb Reservation-for thread replies terminate before AI without hiding lifecycle mail", async () => {
+	const authenticated = {
+		from: "Airbnb <express@airbnb.com>",
+		subject:
+			"RE: Reservation for خطوات للحرم الشريف - باص خاص - غرفة ثلاثى, Sep 1 – 6",
+		text: [
+			"RESERVATION FOR خطوات للحرم الشريف - باص خاص - غرفة ثلاثى, SEP 1 – 6",
+			"A guest reply appears here.",
+			"Reply",
+			"You can also respond by replying directly to this email.",
+			"Check-in Checkout",
+			"Sep 1 Sep 6",
+			"Guests",
+			"3 guests",
+		].join("\n"),
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "airbnb",
+			method: "dkim",
+		},
+	};
+	const classification = classifyOtaGuestCommunication(authenticated);
+	assert.equal(classification.matched, true);
+	assert.equal(classification.provider, "airbnb");
+	assert.equal(classification.intent, "not_reservation");
+	assert.equal(classification.reason, "airbnb_guest_message");
+	assert.deepEqual(classification.evidence, [
+		"authenticated_airbnb_sender",
+		"reservation_thread_reply_subject_without_identity",
+	]);
+
+	const orchestration = await orchestrateInboundReservationEmail(authenticated);
+	assert.equal(orchestration.normalized.intent, "not_reservation");
+	assert.equal(orchestration.normalized.terminalNonReservation, true);
+	assert.equal(orchestration.normalized.suppressForwarding, true);
+	assert.equal(orchestration.decision.usedAI, false);
+	assert.equal(orchestration.decision.skipReason, "airbnb_guest_message");
+
+	for (const [label, email] of [
+		[
+			"unaligned reply",
+			{
+				...authenticated,
+				senderAuthentication: {
+					authenticatedAligned: false,
+					trustedProvider: "airbnb",
+				},
+			},
+		],
+		[
+			"non-reply subject",
+			{
+				...authenticated,
+				subject:
+					"Reservation for خطوات للحرم الشريف - باص خاص - غرفة ثلاثى, Sep 1–6",
+			},
+		],
+		[
+			"reply with canonical confirmation code",
+			{
+				...authenticated,
+				text: `${authenticated.text}\nConfirmation code HM2D9NPR35`,
+			},
+		],
+		[
+			"reply with canonical reservation code",
+			{
+				...authenticated,
+				text: `${authenticated.text}\nReservation code HM2D9NPR35`,
+			},
+		],
+		[
+			"reply with canonical reservation URL",
+			{
+				...authenticated,
+				text: `${authenticated.text}\nhttps://www.airbnb.com/hosting/reservations/details/HM2D9NPR35`,
+			},
+		],
+		[
+			"actual confirmation",
+			{
+				...authenticated,
+				subject: "Reservation confirmed - HM2D9NPR35",
+			},
+		],
+	]) {
+		assert.equal(
+			classifyOtaGuestCommunication(email).matched,
+			false,
+			label
+		);
+	}
+});
+
 const authenticatedAirbnbPayoutEmail = (overrides = {}) => ({
 	from: "Airbnb <automated@airbnb.com>",
 	subject: "We sent a payout of $29.00 USD",

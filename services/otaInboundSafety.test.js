@@ -2987,12 +2987,150 @@ test("HotelRunner commercial source requires zero-or-one-provider consensus", as
 			text: ["EXPEDIA", "AGODA", ...commonReservationLines].join("\n"),
 		});
 		const result = await reconcileOtaReservation(conflicting);
-		assert.equal(result.status, "needs_review");
+		assert.equal(result.status, "hotelrunner_relay_audit_only");
 		assert.equal(result.actionTaken, "skipped");
-		assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+		assert.equal(result.skipReason, "hotelrunner_relay_audit_only");
 	} finally {
 		Reservations.find = originalReservationFind;
 	}
+});
+
+test("mapper entry point keeps every authenticated HotelRunner transport audit-only before FX or database work", async () => {
+	const reservationMethods = [
+		"find",
+		"findOne",
+		"findById",
+		"create",
+		"updateOne",
+		"findOneAndUpdate",
+		"bulkWrite",
+		"exists",
+	];
+	const hotelMethods = ["find", "findOne", "findById"];
+	const originalReservationMethods = Object.fromEntries(
+		reservationMethods.map((method) => [method, Reservations[method]])
+	);
+	const originalHotelMethods = Object.fromEntries(
+		hotelMethods.map((method) => [method, HotelDetails[method]])
+	);
+	let databaseCalls = 0;
+	let exchangeCalls = 0;
+	const unexpectedDatabaseCall = () => {
+		databaseCalls += 1;
+		throw new Error("HotelRunner relay guard must stop before database work");
+	};
+	for (const method of reservationMethods) {
+		Reservations[method] = unexpectedDatabaseCall;
+	}
+	for (const method of hotelMethods) HotelDetails[method] = unexpectedDatabaseCall;
+
+	const base = {
+		inboundEmailId: "hotelrunner-relay-audit-boundary",
+		provider: "agoda",
+		providerLabel: "Agoda",
+		bookingSource: "Agoda",
+		confirmationNumber: "relay-boundary-123456",
+		reservationId: "relay-boundary-123456",
+		amount: 100,
+		sourceAmount: 100,
+		sourceCurrency: "USD",
+		currency: "USD",
+		roomCount: MAX_OTA_INBOUND_ROOM_COUNT + 1,
+		sourceSenderTrusted: true,
+		sourceSenderAuthenticated: true,
+		trustedTransportProvider: "hotelrunner",
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "hotelrunner",
+		},
+		source: {
+			from: "HotelRunner <noreply@hotelrunner.com>",
+			subject: "Agoda reservation relayed by HotelRunner",
+			messageId: "relay-boundary@hotelrunner.com",
+		},
+		warnings: ["preserved relay warning"],
+		errors: [],
+	};
+	const sarConversionOptions = {
+		apiKey: "must-not-be-used",
+		fetchImpl: async () => {
+			exchangeCalls += 1;
+			throw new Error("HotelRunner relay guard must stop before exchange lookup");
+		},
+	};
+
+	try {
+		for (const [name, lifecycle] of [
+			["new", { intent: "new_reservation", eventType: "new" }],
+			["not reservation", { intent: "not_reservation", eventType: "unknown" }],
+			[
+				"cancelled",
+				{
+					intent: "reservation_status",
+					eventType: "cancelled",
+					statusToApply: "cancelled",
+				},
+			],
+			[
+				"status",
+				{
+					intent: "reservation_status",
+					eventType: "status",
+					statusToApply: "confirmed",
+				},
+			],
+		]) {
+			const result = await reconcileOtaReservation(
+				{ ...base, ...lifecycle },
+				{ sarConversionOptions }
+			);
+			assert.equal(result.status, "hotelrunner_relay_audit_only", name);
+			assert.equal(result.actionTaken, "skipped", name);
+			assert.equal(result.skipReason, "hotelrunner_relay_audit_only", name);
+			assert.equal(result.reservationId, null, name);
+			assert.equal(result.hotelId, null, name);
+			assert.deepEqual(result.warnings, ["preserved relay warning"], name);
+		}
+
+		const scriptRelay = { ...base, intent: "new_reservation", eventType: "new" };
+		delete scriptRelay.inboundEmailId;
+		delete scriptRelay.source;
+		const scriptResult = await reconcileOtaReservation(scriptRelay, {
+			sarConversionOptions,
+		});
+		assert.equal(
+			scriptResult.status,
+			"hotelrunner_relay_audit_only",
+			"manual/script callers cannot bypass the transport boundary by omitting email shape",
+		);
+
+		const directNonReservation = await reconcileOtaReservation({
+			...base,
+			provider: "agoda",
+			trustedTransportProvider: "agoda",
+			senderAuthentication: {
+				authenticatedAligned: true,
+				trustedProvider: "agoda",
+			},
+			intent: "not_reservation",
+			eventType: "unknown",
+			skipReason: "direct_non_reservation",
+		});
+		assert.equal(directNonReservation.status, "not_reservation");
+		assert.equal(directNonReservation.skipReason, "direct_non_reservation");
+	} finally {
+		for (const [method, original] of Object.entries(
+			originalReservationMethods
+		)) {
+			Reservations[method] = original;
+		}
+		for (const [method, original] of Object.entries(originalHotelMethods)) {
+			HotelDetails[method] = original;
+		}
+	}
+
+	assert.equal(exchangeCalls, 0);
+	assert.equal(databaseCalls, 0);
 });
 
 test("HotelRunner non-Trip authoritative confirmation conflicts fail closed independent of order", async () => {
@@ -3052,9 +3190,9 @@ test("HotelRunner non-Trip authoritative confirmation conflicts fail closed inde
 		const result = await reconcileOtaReservation(
 			buildConflict(["2038704202", "2038703612"])
 		);
-		assert.equal(result.status, "needs_review");
+		assert.equal(result.status, "hotelrunner_relay_audit_only");
 		assert.equal(result.actionTaken, "skipped");
-		assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+		assert.equal(result.skipReason, "hotelrunner_relay_audit_only");
 		assert.equal(databaseCallCount, 0);
 	} finally {
 		for (const [method, original] of Object.entries(originals)) {
@@ -3394,9 +3532,9 @@ test("HotelRunner provider-specific Booking IDs are canonical only when uniquely
 		});
 		assert.equal(cancellationConflict.eventType, "cancelled");
 		const result = await reconcileOtaReservation(cancellationConflict);
-		assert.equal(result.status, "needs_review");
+		assert.equal(result.status, "hotelrunner_relay_audit_only");
 		assert.equal(result.actionTaken, "skipped");
-		assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+		assert.equal(result.skipReason, "hotelrunner_relay_audit_only");
 		assert.equal(databaseCallCount, 0);
 	} finally {
 		for (const [method, original] of Object.entries(originals)) {
@@ -6248,6 +6386,9 @@ const productionAgodaQuantityEmail = ({
 	payout,
 	specialRequests,
 	phone = "",
+	commission = "26.46",
+	growthProgram = "17.64",
+	taxOnCommission = "6.62",
 }) => {
 	const text = [
 		`Booking ID ${bookingId}`,
@@ -6271,9 +6412,9 @@ const productionAgodaQuantityEmail = ({
 		"Room Extra Bed Other From - To Rates",
 		...nightlyRows,
 		`Reference sell rate (incl. taxes & fees) SAR ${gross}`,
-		"Commission SAR -26.46",
-		"Agoda Growth Program SAR -17.64",
-		"Tax on Commission SAR -6.62",
+		`Commission SAR -${commission}`,
+		`Agoda Growth Program SAR -${growthProgram}`,
+		`Tax on Commission SAR -${taxOnCommission}`,
 		`Net rate (incl. taxes & fees) SAR ${payout}`,
 		`Customer Info - Name: ${guestFirstName} ${guestLastName}, Phone:${phone ? ` ${phone}` : ""}`,
 		"Attention Hotel Staff",
@@ -6341,6 +6482,74 @@ const productionAgodaQuantityFixtures = [
 		expectedNightPayout: [44.55, 44.55],
 	},
 ];
+
+test("direct Agoda MIME consensus accepts an exact sell rate split across a plain-text line wrap", () => {
+	const email = productionAgodaQuantityEmail({
+		bookingId: "6900000123",
+		guestFirstName: "SYNTHETIC",
+		guestLastName: "SINGLE ROOM GUEST",
+		checkin: "August 18, 2026",
+		checkout: "August 19, 2026",
+		roomName: "Comfort Double - Non-Smoking (Comfort Double Room-)",
+		roomCount: 1,
+		adults: 1,
+		nightlyRows: ["August 18, 2026 SAR 37.60"],
+		gross: "60.76",
+		payout: "37.60",
+		specialRequests: "NonSmoke",
+		commission: "9.11",
+		growthProgram: "6.08",
+		taxOnCommission: "2.28",
+	});
+	// Agoda's real text/plain part may fold this label while the HTML part keeps
+	// it on one line. Both representations still assert the exact same money.
+	email.text = email.text.replace(
+		"Reference sell rate (incl. taxes & fees)",
+		"Reference sell rate (incl. taxes\n& fees)"
+	);
+	const normalized = {
+		...extractNormalizedReservation(email),
+		inboundEmailId: "audit-agoda-wrapped-money-label",
+	};
+
+	assert.equal(normalized.requiresManualReview, false);
+	assert.deepEqual(normalized.agodaMimeConflictFields, []);
+	assert.equal(normalized.totalAmountSar, 60.76);
+	assert.equal(normalized.totalPayoutSar, 37.6);
+	assert.equal(normalized.otaCommissionSar, 9.11);
+	assert.deepEqual(
+		normalized.otaDeductionComponents.map((component) => component.amountSar),
+		[9.11, 6.08, 2.28]
+	);
+
+	const built = buildReservationDocument(normalized, {
+		_id: "zad",
+		belongsTo: "owner",
+		currency: "SAR",
+		roomCountDetails: [
+			{
+				_id: "double",
+				roomType: "doubleRooms",
+				displayName: "Double Room - Comfort & Relaxation",
+				activeRoom: true,
+				pricingRate: [{ calendarDate: "2026-08-18", rootPrice: 75 }],
+			},
+		],
+	});
+	assert.equal(built.ok, true);
+	assert.equal(built.document.total_amount, 60.76);
+	assert.equal(built.document.adminPricing.netAfterExpensesTotal, 37.6);
+	assert.equal(built.document.adminPricing.otaExpenseTotal, 23.16);
+	assert.equal(built.document.pickedRoomsPricing[0].count, 1);
+	assert.deepEqual(
+		built.document.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+			client: day.clientPrice,
+			payout: day.netAfterExpenses,
+			expense: day.otaExpenseAmount,
+		})),
+		[{ client: 60.76, payout: 37.6, expense: 23.16 }]
+	);
+});
 
 test("trusted direct Agoda parser input budgets stop text and HTML before FX, AI, lookup, or writes", async () => {
 	const normal = productionAgodaQuantityEmail(productionAgodaQuantityFixtures[0]);
@@ -7698,9 +7907,9 @@ test("Arabic HotelRunner action parser budgets fail closed before lookup, creati
 					...normalized,
 					...lifecycle,
 				});
-				assert.equal(result.status, "needs_review");
+				assert.equal(result.status, "hotelrunner_relay_audit_only");
 				assert.equal(result.actionTaken, "skipped");
-				assert.equal(result.skipReason, "ota_parser_requires_manual_review");
+				assert.equal(result.skipReason, "hotelrunner_relay_audit_only");
 			}
 		}
 	} finally {

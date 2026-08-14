@@ -3020,7 +3020,17 @@ function analyzeAgodaRoomTable(email = {}, fallbackText = "") {
 }
 
 function extractAgodaMoneyByLabel(text = "", label = "") {
-	const escapedLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
+	// `escapeRegExp` does not escape ordinary spaces. Build the exact label from
+	// escaped tokens so mail-client line wrapping (for example between "taxes"
+	// and "& fees") is treated as whitespace, not as conflicting MIME money.
+	const labelTokens = String(label || "")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean);
+	if (!labelTokens.length) {
+		return { amount: 0, currency: "", matched: false };
+	}
+	const escapedLabel = labelTokens.map(escapeRegExp).join("\\s+");
 	const inline = String(text || "").match(
 		new RegExp(
 			`${escapedLabel}\\s*[:#-]?\\s*((?:(?:${MONEY_CURRENCY_CODES.join(
@@ -4361,6 +4371,15 @@ function agodaMultiRoomAllocationReviewAllowsCommercialOnly(normalized = {}) {
 		normalizeOtaIdentityProvider(normalized.provider) === "agoda" &&
 		reasons.length === 1 &&
 		reasons[0] === AGODA_MULTI_ROOM_ALLOCATION_REVIEW_REASON
+	);
+}
+
+function isAuthenticatedHotelRunnerTransport(normalized = {}) {
+	return Boolean(
+		normalized.sourceSenderTrusted === true &&
+			normalized.sourceSenderAuthenticated === true &&
+			normalizeOtaIdentityProvider(normalized.trustedTransportProvider) ===
+				"hotelrunner"
 	);
 }
 
@@ -19789,6 +19808,26 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 
 async function reconcileOtaReservation(inputNormalized, options = {}) {
 	const input = inputNormalized || {};
+	// HotelRunner email transport is private audit evidence only. Keep this
+	// boundary at the mapper entry point as well as HTTP ingress so a script,
+	// worker, or future caller cannot accidentally turn an authenticated relay
+	// into a Reservation mutation. Directly authenticated OTA transport remains
+	// eligible for the ordinary email reconciliation path.
+	if (isAuthenticatedHotelRunnerTransport(input)) {
+		return {
+			status: "hotelrunner_relay_audit_only",
+			warnings: [...(input.warnings || [])],
+			errors: [...(input.errors || [])],
+			actionTaken: "skipped",
+			skipReason: "hotelrunner_relay_audit_only",
+			automationComment:
+				"Authenticated HotelRunner transport is audit evidence only; no reservation lookup, creation, or mutation was attempted.",
+			reservationId: null,
+			hotelId: null,
+			pmsConfirmationNumber: "",
+			matchedReservationBy: [],
+		};
+	}
 	if (input.intent === "not_reservation") {
 		return {
 			status: "not_reservation",

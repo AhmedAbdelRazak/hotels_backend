@@ -98,6 +98,7 @@ const duplicateBlockingEmailStatuses = [
 	"status_updated",
 	"duplicate_reservation",
 	"not_reservation",
+	"hotelrunner_relay_audit_only",
 	"awaiting_hotelrunner",
 	"parsed_awaiting_hotelrunner",
 ];
@@ -758,14 +759,17 @@ const hasSourceBackedHotelIdentity = (normalized = {}) => {
 	);
 };
 
-const buildHotelRunnerResolvedHotelProof = (hotel = {}) => ({
-	version: 1,
-	hotelId: normalizedObjectId(hotel._id),
-	belongsTo: normalizedObjectId(hotel.belongsTo),
-	currency: String(hotel.currency || "SAR").trim().toUpperCase(),
-	activateHotel: hotel.activateHotel === true,
-	xHotelProActive: hotel.xHotelProActive !== false,
-});
+const buildHotelRunnerResolvedHotelProof = (hotel = {}) => {
+	const value = hotel || {};
+	return {
+		version: 1,
+		hotelId: normalizedObjectId(value._id),
+		belongsTo: normalizedObjectId(value.belongsTo),
+		currency: String(value.currency || "SAR").trim().toUpperCase(),
+		activateHotel: value.activateHotel === true,
+		xHotelProActive: value.xHotelProActive !== false,
+	};
+};
 
 const hotelRunnerFirstPreliminaryGate = ({
 	normalized = {},
@@ -785,6 +789,11 @@ const hotelRunnerFirstPreliminaryGate = ({
 		normalized.sourceSenderAuthenticated === true &&
 		normalized.sourceSenderTrusted === true &&
 		authentication.authenticatedAligned === true
+	);
+	const authenticatedHotelRunnerTransport = !!(
+		authenticatedAligned &&
+		transportProvider === "hotelrunner" &&
+		authenticatedProvider === "hotelrunner"
 	);
 	const directTransport = !!(
 		authenticatedAligned &&
@@ -816,16 +825,30 @@ const hotelRunnerFirstPreliminaryGate = ({
 		normalized.hotelRunnerNonTripIdentityConflict !== true &&
 		normalized.hotelRunnerProviderSpecificBookingIdConflict !== true
 	);
-	if (!directTransport && !hotelRunnerRelay) {
+	// HotelRunner transport is evidence for the private inbound audit only. This
+	// branch is intentionally independent of every HotelRunner API feature flag:
+	// disabling the integration must never make a relay fall through to ordinary
+	// OTA reconciliation. Even an incomplete/conflicting relay is terminally
+	// audit-only; only a directly authenticated OTA transport may create or mutate.
+	if (authenticatedHotelRunnerTransport) {
+		const provider = hotelRunnerRelay ? embeddedProvider : "hotelrunner";
+		return {
+			eligible: true,
+			provider,
+			handlingMode: "hotelrunner_relay_audit_only",
+			queueAvailable: false,
+			queueUnavailableReason: "",
+			normalizedReservation: normalized,
+		};
+	}
+	if (!directTransport) {
 		return { eligible: false, reason: "not_authenticated_direct_ota" };
 	}
 	if (config?.integrationEnabled !== true) {
 		return { eligible: false, reason: "hotelrunner_integration_disabled" };
 	}
-	const provider = hotelRunnerRelay ? embeddedProvider : parsedProvider;
-	const handlingMode = hotelRunnerRelay
-		? "hotelrunner_relay_audit_only"
-		: "direct_ota_queue";
+	const provider = parsedProvider;
+	const handlingMode = "direct_ota_queue";
 	if (
 		String(normalized.intent || "").trim().toLowerCase() !== "new_reservation" ||
 		String(normalized.eventType || "").trim().toLowerCase() !== "new"
@@ -871,6 +894,21 @@ const resolveHotelRunnerFirstInboundEligibility = async (
 		config,
 	});
 	if (!preliminary.eligible) return preliminary;
+	if (preliminary.handlingMode === "hotelrunner_relay_audit_only") {
+		let hotel = null;
+		if (hasSourceBackedHotelIdentity(normalized)) {
+			hotel = await resolveHotelDetails(normalized);
+			if (
+				hotel &&
+				(hotel.activateHotel !== true ||
+					hotel.xHotelProActive === false ||
+					!normalizedObjectId(hotel.belongsTo))
+			) {
+				hotel = null;
+			}
+		}
+		return { ...preliminary, hotel };
+	}
 	const hotel = await resolveHotelDetails(normalized);
 	if (!hotel) return { eligible: false, reason: "hotel_not_resolved" };
 	if (normalizedObjectId(hotel._id) !== normalizedObjectId(config.hotelId)) {
@@ -932,7 +970,7 @@ const buildHotelRunnerRelayAuditOnlyReconciliation = ({
 	actionTaken: "skipped",
 	skipReason: "hotelrunner_relay_audit_only",
 	automationComment:
-		"Authenticated HotelRunner relay was archived for audit only; API push remains authoritative and the relay cannot create or price a reservation.",
+		"Authenticated HotelRunner transport was archived for audit only; it cannot create, price, or mutate a reservation.",
 	reservationId: null,
 	hotelId: hotel?._id || null,
 	pmsConfirmationNumber: "",
@@ -971,15 +1009,15 @@ const archiveAndEnqueueHotelRunnerFirstInbound = async (
 		const audited = await persistAudit(inboundRecord._id, {
 			provider: eligibility.provider,
 			providerLabel: normalized.providerLabel || "HotelRunner",
-			intent: "new_reservation",
-			eventType: "new",
-			processingStatus: "needs_review",
+			intent: normalized.intent || "unknown",
+			eventType: normalized.eventType || "unknown",
+			processingStatus: "hotelrunner_relay_audit_only",
 			confirmationNumber:
 				normalized.confirmationNumber || normalized.reservationId || "",
 			hotelName: normalized.hotelName || "",
 			roomName: normalized.roomName || "",
 			...buildInboundExtractionFields(normalized, reconciliation),
-			hotelId: eligibility.hotel._id,
+			hotelId: eligibility.hotel?._id || null,
 			reservationMongoId: null,
 			normalizedReservation: normalized,
 			emailContext: orchestration.emailContext || {},
@@ -1002,9 +1040,9 @@ const archiveAndEnqueueHotelRunnerFirstInbound = async (
 				collision: false,
 				lastErrorCode: "",
 				lastErrorMessage: "",
-				resolvedHotelProof: buildHotelRunnerResolvedHotelProof(
-					eligibility.hotel
-				),
+				resolvedHotelProof: eligibility.hotel
+					? buildHotelRunnerResolvedHotelProof(eligibility.hotel)
+					: null,
 			},
 		});
 		if (!audited?._id) {
@@ -1546,26 +1584,16 @@ exports.handleSendGridInbound = async (req, res) => {
 					confirmationNumber: normalized.confirmationNumber || "",
 				});
 				emitInboundEmailUpdated(req, queuedRecord, {
-					processingStatus: "needs_review",
+					processingStatus: "hotelrunner_relay_audit_only",
 					provider: hotelRunnerFirst.eligibility?.provider || "",
 					intent: normalized.intent,
 					confirmationNumber: normalized.confirmationNumber,
 					hotelId: hotelRunnerFirst.eligibility?.hotel?._id,
 				});
-				const response = res.status(200).send("OK");
-				void handleImportantInboundForwarding({
-					req,
-					record: queuedRecord,
-					email,
-					normalized,
-					reconciliation: hotelRunnerFirst.reconciliation,
-				}).catch((error) =>
-					console.error(
-						"[SendGrid Inbound] relay-audit forwarding failed safely:",
-						error.message
-					)
-				);
-				return response;
+				// HotelRunner transport is intentionally private audit evidence only.
+				// Do not turn its terminal audit status into a needs-review forwarding
+				// alert: direct OTA transport is the sole reservation/notification input.
+				return res.status(200).send("OK");
 			}
 			if (hotelRunnerFirst.enqueueError) {
 				logInbound("hotelrunner_first.enqueue_failed", {

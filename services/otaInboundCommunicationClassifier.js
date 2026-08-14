@@ -235,13 +235,53 @@ const classifyOtaGuestCommunication = (email = {}, context = {}) => {
 			subject
 		)
 	);
+	// Airbnb guest-thread replies can use "RE: Reservation for <listing>,
+	// <dates>" without any booking identity. That subject describes the thread,
+	// not a new booking. Require authenticated Airbnb transport and the original
+	// reply prefix, and fail open for every canonical lifecycle identity shape.
+	const airbnbReservationThreadReplySubject = compactUnique([
+		email.subject,
+		email.originalSubject,
+		...(Array.isArray(email.subjectCandidates)
+			? email.subjectCandidates
+			: []),
+		context.subject,
+		context.originalSubject,
+		...(Array.isArray(context.subjectCandidates)
+			? context.subjectCandidates
+			: []),
+	]).some((subject) =>
+		/^(?:(?:\[external\]\s*)?re\s*:\s*)+reservation\s+for\s+.+?,\s*[a-z]{3,9}\s+\d{1,2}\s*(?:[-–—]|&(?:ndash|mdash);)\s*\d{1,2}\s*$/iu.test(
+			normalizeWhitespace(subject)
+		)
+	);
+	const airbnbCanonicalLifecycleIdentity = !!(
+		subjectCandidates.some(
+			(subject) =>
+				/\b(?:reservation|booking)\s+(?:confirmed|confirmation)\b/i.test(
+					subject
+				) ||
+				/\b(?:reservation|booking|confirmation)\s*(?:code|id|number|no\.?|#)\s*[:#-]?\s*[a-z0-9][a-z0-9-]{4,23}\b/i.test(
+					subject
+				)
+		) ||
+		/airbnb\.com\/hosting\/reservations\/details\/[a-z0-9]{6,24}\b/i.test(
+			body
+		) ||
+		/\b(?:reservation|booking|confirmation)\s*(?:code|id|number|no\.?|#)\s*[:#-]?\s*[a-z0-9][a-z0-9-]{4,23}\b/i.test(
+			body
+		)
+	);
 	const airbnbMessageTemplate =
 		/\b(?:(?:new )?message from (?:your )?guest|guest.{0,80}sent you a message)\b/i.test(
 			body
 		);
 	if (
-		(airbnbSender || airbnbHint) &&
-		(airbnbMessageSubject || airbnbMessageTemplate)
+		((airbnbSender || airbnbHint) &&
+			(airbnbMessageSubject || airbnbMessageTemplate)) ||
+		(authenticatedAirbnbSender &&
+			airbnbReservationThreadReplySubject &&
+			!airbnbCanonicalLifecycleIdentity)
 	) {
 		return matchedClassification({
 			provider: "airbnb",
@@ -249,6 +289,14 @@ const classifyOtaGuestCommunication = (email = {}, context = {}) => {
 			evidence: [
 				...(airbnbMessageSubject ? ["message_subject"] : []),
 				...(airbnbMessageTemplate ? ["message_template"] : []),
+				...(authenticatedAirbnbSender &&
+				airbnbReservationThreadReplySubject &&
+				!airbnbCanonicalLifecycleIdentity
+					? [
+							"authenticated_airbnb_sender",
+							"reservation_thread_reply_subject_without_identity",
+						]
+					: []),
 			],
 		});
 	}
