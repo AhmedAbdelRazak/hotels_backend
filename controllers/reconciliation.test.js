@@ -4,8 +4,13 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const mongoose = require("mongoose");
 const Reservations = require("../models/reservations");
+const PaymentReconciliationBatch = require("../models/payment_reconciliation_batch");
+const reconciliationAttachment = require("../services/reconciliationAttachment");
 const {
+	_private,
+	closestReconciliationMatch,
 	reconciliationReport,
 	updateReconciliationStatus,
 } = require("./reconciliation");
@@ -54,8 +59,12 @@ const validSnapshot = (overrides = {}) => ({
 
 const validBody = (overrides = {}) => ({
 	hotelId: HOTEL_ID,
+	action: "reconcile",
 	status: "reconciled",
 	paymentBreakdownKeys: ["paid_at_hotel_cash"],
+	payoutPurpose: "paid_out_to_zad",
+	comment: "Payout batch 42",
+	expectedActionAmountCents: 1234,
 	reservations: [validSnapshot()],
 	...overrides,
 });
@@ -90,16 +99,129 @@ const withSuperAdminEnvironment = async (callback) => {
 
 const mockMutationReads = (rows) => {
 	const originalFind = Reservations.find;
+	const originalBatchCreate = PaymentReconciliationBatch.create;
+	const originalBatchUpdateOne = PaymentReconciliationBatch.updateOne;
+	const created = [];
+	const finalized = [];
 	Reservations.find = () => ({
 		select() {
 			return this;
 		},
 		lean: async () => rows,
 	});
-	return () => {
-		Reservations.find = originalFind;
+	PaymentReconciliationBatch.create = async (payload) => {
+		created.push(payload);
+		return payload;
 	};
+	PaymentReconciliationBatch.updateOne = async (filter, update) => {
+		finalized.push({ filter, update });
+		return { matchedCount: 1, modifiedCount: 1 };
+	};
+	const restore = () => {
+		Reservations.find = originalFind;
+		PaymentReconciliationBatch.create = originalBatchCreate;
+		PaymentReconciliationBatch.updateOne = originalBatchUpdateOne;
+	};
+	restore.created = created;
+	restore.finalized = finalized;
+	return restore;
 };
+
+const completedBatchState = (overrides = {}) => ({
+	status: "complete",
+	appliedAmountCents: 1234,
+	appliedReservationCount: 1,
+	appliedItemCount: 1,
+	appliedItems: [
+		{
+			reservationId: RESERVATION_ID,
+			paymentBreakdownKey: "paid_at_hotel_cash",
+			amountCents: 1234,
+			from: "waiting",
+			to: "reconciled",
+		},
+	],
+	completedAt: new Date("2026-08-14T12:00:00.000Z"),
+	...overrides,
+});
+
+test("batch finalization accepts a transient ambiguous write only after exact state verification", async () => {
+	const originalUpdateOne = PaymentReconciliationBatch.updateOne;
+	const originalFindOne = PaymentReconciliationBatch.findOne;
+	const intended = completedBatchState();
+	let persisted = null;
+	let updateCalls = 0;
+	let readCalls = 0;
+	let observedFilter = null;
+	PaymentReconciliationBatch.updateOne = async (filter, update) => {
+		updateCalls += 1;
+		observedFilter = filter;
+		persisted = { ...update.$set };
+		throw new Error("network response lost after commit");
+	};
+	PaymentReconciliationBatch.findOne = (filter) => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			readCalls += 1;
+			assert.deepEqual(filter, { batchId: "batch-transient" });
+			return persisted;
+		},
+	});
+	try {
+		await _private.finalizePaymentReconciliationBatch(
+			"batch-transient",
+			intended
+		);
+		assert.equal(updateCalls, 1);
+		assert.equal(readCalls, 1);
+		assert.deepEqual(observedFilter, {
+			batchId: "batch-transient",
+			status: "applying",
+		});
+	} finally {
+		PaymentReconciliationBatch.updateOne = originalUpdateOne;
+		PaymentReconciliationBatch.findOne = originalFindOne;
+	}
+});
+
+test("batch finalization stops after three attempts when final state cannot be verified", async () => {
+	const originalUpdateOne = PaymentReconciliationBatch.updateOne;
+	const originalFindOne = PaymentReconciliationBatch.findOne;
+	let updateCalls = 0;
+	let readCalls = 0;
+	PaymentReconciliationBatch.updateOne = async () => {
+		updateCalls += 1;
+		return { matchedCount: 0, modifiedCount: 0 };
+	};
+	PaymentReconciliationBatch.findOne = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			readCalls += 1;
+			return completedBatchState({
+				status: "partial",
+				appliedAmountCents: 1200,
+			});
+		},
+	});
+	try {
+		await assert.rejects(
+			_private.finalizePaymentReconciliationBatch(
+				"batch-permanent-failure",
+				completedBatchState()
+			),
+			/after 3 attempts/
+		);
+		assert.equal(updateCalls, 3);
+		assert.equal(readCalls, 3);
+	} finally {
+		PaymentReconciliationBatch.updateOne = originalUpdateOne;
+		PaymentReconciliationBatch.findOne = originalFindOne;
+	}
+});
 
 test("mutation requires the configured active super admin before any database read", async () => {
 	const previousServer = process.env.SUPER_ADMIN_ID;
@@ -147,6 +269,26 @@ test("mutation rejects unknown keys, duplicates, bad statuses, and oversized req
 					code: "invalid_reconciliation_status",
 				},
 				{
+					body: validBody({ payoutPurpose: "client_supplied_other" }),
+					status: 400,
+					code: "invalid_reconciliation_payout_purpose",
+				},
+				{
+					body: validBody({ comment: "x".repeat(1001) }),
+					status: 400,
+					code: "reconciliation_comment_too_long",
+				},
+				{
+					body: validBody({ expectedActionAmountCents: 12.34 }),
+					status: 400,
+					code: "invalid_expected_action_amount_cents",
+				},
+				{
+					body: validBody({ attachment: { url: "https://attacker.invalid" } }),
+					status: 400,
+					code: "untrusted_reconciliation_attachment",
+				},
+				{
 					body: validBody({
 						reservations: [validSnapshot(), validSnapshot()],
 					}),
@@ -180,6 +322,134 @@ test("mutation rejects unknown keys, duplicates, bad statuses, and oversized req
 	});
 });
 
+test("confirmed action cents are checked before batch creation or reservation writes", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const restoreFind = mockMutationReads([currentReservation()]);
+		const originalUpdateOne = Reservations.updateOne;
+		let writes = 0;
+		Reservations.updateOne = async () => {
+			writes += 1;
+			return { matchedCount: 1 };
+		};
+		try {
+			const res = response();
+			await updateReconciliationStatus(
+				superAdminRequest(
+					validBody({ expectedActionAmountCents: 1200 })
+				),
+				res
+			);
+			assert.equal(res.statusCode, 409);
+			assert.equal(res.payload.code, "reconciliation_confirmed_amount_changed");
+			assert.equal(res.payload.serverActionAmountCents, 1234);
+			assert.equal(writes, 0);
+			assert.equal(restoreFind.created.length, 0);
+		} finally {
+			restoreFind();
+			Reservations.updateOne = originalUpdateOne;
+		}
+	});
+});
+
+test("multipart reconciliation uploads one verified attachment and stores no URL", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const restoreFind = mockMutationReads([currentReservation()]);
+		const originalUpdateOne = Reservations.updateOne;
+		const originalUpload =
+			reconciliationAttachment.uploadReconciliationAttachment;
+		let uploads = 0;
+		Reservations.updateOne = async () => ({ matchedCount: 1, modifiedCount: 1 });
+		reconciliationAttachment.uploadReconciliationAttachment = async () => {
+			uploads += 1;
+			return {
+				publicId: "private/reconciliation-proof",
+				resourceType: "image",
+				format: "png",
+				version: 1,
+				bytes: 8,
+				originalName: "proof.png",
+				mimeType: "image/png",
+				uploadedAt: new Date(),
+			};
+		};
+		try {
+			const req = superAdminRequest({ payload: JSON.stringify(validBody()) });
+			req.file = {
+				originalname: "proof.png",
+				mimetype: "image/png",
+				buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+			};
+			const res = response();
+			await updateReconciliationStatus(req, res);
+			assert.equal(res.statusCode, 200);
+			assert.equal(uploads, 1);
+			assert.equal(restoreFind.created.length, 1);
+			assert.equal(
+				restoreFind.created[0].attachment.publicId,
+				"private/reconciliation-proof"
+			);
+			assert.equal(restoreFind.created[0].attachment.url, undefined);
+		} finally {
+			restoreFind();
+			Reservations.updateOne = originalUpdateOne;
+			reconciliationAttachment.uploadReconciliationAttachment = originalUpload;
+		}
+	});
+});
+
+test("an uploaded attachment is cleaned up when the applying batch cannot be created", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const restoreFind = mockMutationReads([currentReservation()]);
+		const originalUpdateOne = Reservations.updateOne;
+		const originalUpload =
+			reconciliationAttachment.uploadReconciliationAttachment;
+		const originalRemove =
+			reconciliationAttachment.removeReconciliationAttachment;
+		const originalConsoleError = console.error;
+		let writes = 0;
+		let removals = 0;
+		Reservations.updateOne = async () => {
+			writes += 1;
+			return { matchedCount: 1 };
+		};
+		reconciliationAttachment.uploadReconciliationAttachment = async () => ({
+			publicId: "private/cleanup-proof",
+			resourceType: "image",
+			bytes: 8,
+			originalName: "proof.png",
+			mimeType: "image/png",
+			uploadedAt: new Date(),
+		});
+		reconciliationAttachment.removeReconciliationAttachment = async () => {
+			removals += 1;
+			return true;
+		};
+		PaymentReconciliationBatch.create = async () => {
+			throw new Error("batch unavailable");
+		};
+		console.error = () => {};
+		try {
+			const req = superAdminRequest({ payload: JSON.stringify(validBody()) });
+			req.file = {
+				originalname: "proof.png",
+				mimetype: "image/png",
+				buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+			};
+			const res = response();
+			await updateReconciliationStatus(req, res);
+			assert.equal(res.statusCode, 500);
+			assert.equal(removals, 1);
+			assert.equal(writes, 0);
+		} finally {
+			restoreFind();
+			Reservations.updateOne = originalUpdateOne;
+			reconciliationAttachment.uploadReconciliationAttachment = originalUpload;
+			reconciliationAttachment.removeReconciliationAttachment = originalRemove;
+			console.error = originalConsoleError;
+		}
+	});
+});
+
 test("mutation uses server-derived cents and writes only reconciliation, audit, timestamp, and version paths", async () => {
 	await withSuperAdminEnvironment(async () => {
 		const restoreFind = mockMutationReads([currentReservation()]);
@@ -192,7 +462,7 @@ test("mutation uses server-derived cents and writes only reconciliation, audit, 
 		try {
 			const body = validBody({
 				actor: { _id: "attacker", name: "Attacker" },
-				note: "Payout batch 42",
+				comment: "Payout batch 42",
 			});
 			const res = response();
 			await updateReconciliationStatus(superAdminRequest(body), res);
@@ -230,6 +500,17 @@ test("mutation uses server-derived cents and writes only reconciliation, audit, 
 			assert.equal(entry.status, "reconciled");
 			assert.equal(entry.reconciledBy.name, "Configured Admin");
 			assert.notEqual(entry.reconciledBy.name, "Attacker");
+			assert.equal(entry.note, undefined);
+			assert.equal(restoreFind.created.length, 1);
+			assert.equal(restoreFind.created[0].payoutPurpose, "paid_out_to_zad");
+			assert.equal(restoreFind.created[0].comment, "Payout batch 42");
+			assert.equal(restoreFind.created[0].plannedAmountCents, 1234);
+			assert.equal(restoreFind.created[0].attachment, null);
+			assert.equal(restoreFind.finalized.length, 1);
+			assert.equal(
+				restoreFind.finalized[0].update.$set.appliedAmountCents,
+				1234
+			);
 			assert.deepEqual(Object.keys(observed.update.$push).sort(), [
 				"adminChangeLog",
 				"reservationAuditLog",
@@ -296,6 +577,7 @@ test("marking a mixed reservation reconciled preserves provenance for categories
 				superAdminRequest(
 					validBody({
 						paymentBreakdownKeys: selectedKeys,
+						expectedActionAmountCents: 4567,
 						reservations: [
 							validSnapshot({
 								displayedAmountsCents: {
@@ -304,7 +586,7 @@ test("marking a mixed reservation reconciled preserves provenance for categories
 								},
 							}),
 						],
-						note: "New combined payout",
+						comment: "New combined payout",
 					})
 				),
 				res
@@ -324,7 +606,8 @@ test("marking a mixed reservation reconciled preserves provenance for categories
 				];
 			assert.equal(cardEntry.status, "reconciled");
 			assert.equal(cardEntry.amountCents, 4567);
-			assert.equal(cardEntry.note, "New combined payout");
+			assert.equal(cardEntry.note, undefined);
+			assert.equal(restoreFind.created[0].comment, "New combined payout");
 			assert.deepEqual(observed.update.$push.adminChangeLog.from, {
 				paid_at_hotel_card: "waiting",
 			});
@@ -347,7 +630,7 @@ test("marking a mixed reservation reconciled preserves provenance for categories
 				observed.filter["paid_amount_breakdown.paid_at_hotel_card"],
 				{ $eq: 45.67 }
 			);
-			assert.equal(observed.filter.$expr.$and.length, 2);
+			assert.equal(observed.filter.$expr.$and.length, 1);
 			assert.equal(originalCashProvenance.batchId, "original-cash-batch");
 			assert.equal(originalCashProvenance.note, "Original cash payout");
 		} finally {
@@ -357,7 +640,7 @@ test("marking a mixed reservation reconciled preserves provenance for categories
 	});
 });
 
-test("marking a mixed reservation waiting preserves already-waiting and stale category provenance", async () => {
+test("reset removes every selected stored category and preserves all other reservation data", async () => {
 	await withSuperAdminEnvironment(async () => {
 		const restoreFind = mockMutationReads([
 			currentReservation({
@@ -365,6 +648,7 @@ test("marking a mixed reservation waiting preserves already-waiting and stale ca
 					paid_at_hotel_cash: 12.34,
 					paid_at_hotel_card: 45.67,
 					paid_online_other_platforms: 89,
+					paid_online_via_link: 10,
 				},
 				payment_reconciliation: {
 					breakdown: {
@@ -388,6 +672,11 @@ test("marking a mixed reservation waiting preserves already-waiting and stale ca
 							batchId: "platform-batch",
 							note: "Platform payout",
 						},
+						paid_online_via_link: {
+							status: "reconciled",
+							amountCents: 1000,
+							batchId: "must-survive",
+						},
 					},
 				},
 			}),
@@ -408,7 +697,10 @@ test("marking a mixed reservation waiting preserves already-waiting and stale ca
 			await updateReconciliationStatus(
 				superAdminRequest(
 					validBody({
+						action: "reset",
 						status: "waiting",
+						payoutPurpose: undefined,
+						expectedActionAmountCents: 14701,
 						paymentBreakdownKeys: selectedKeys,
 						reservations: [
 							validSnapshot({
@@ -419,56 +711,54 @@ test("marking a mixed reservation waiting preserves already-waiting and stale ca
 								},
 							}),
 						],
-						note: "Return platform payout to waiting",
+						comment: "Reset accidental payout",
 					})
 				),
 				res
 			);
 
 			assert.equal(res.statusCode, 200);
+			assert.deepEqual(
+				Object.keys(observed.update.$unset).sort(),
+				selectedKeys
+					.map((key) => `payment_reconciliation.breakdown.${key}`)
+					.sort()
+			);
+			assert.ok(Object.values(observed.update.$unset).every((value) => value === 1));
 			assert.equal(
-				observed.update.$set[
-					"payment_reconciliation.breakdown.paid_at_hotel_cash"
+				observed.update.$unset[
+					"payment_reconciliation.breakdown.paid_online_via_link"
 				],
 				undefined
 			);
-			assert.equal(
-				observed.update.$set[
-					"payment_reconciliation.breakdown.paid_at_hotel_card"
-				],
-				undefined
-			);
-			const platformEntry =
-				observed.update.$set[
-					"payment_reconciliation.breakdown.paid_online_other_platforms"
-				];
-			assert.equal(platformEntry.status, "waiting");
-			assert.equal(platformEntry.amountCents, 8900);
-			assert.equal(platformEntry.reconciledAt, null);
-			assert.equal(platformEntry.reconciledBy, null);
 			assert.deepEqual(observed.update.$push.adminChangeLog.from, {
+				paid_at_hotel_cash: "waiting",
+				paid_at_hotel_card: "reconciled",
 				paid_online_other_platforms: "reconciled",
 			});
 			assert.deepEqual(observed.update.$push.adminChangeLog.to, {
-				paid_online_other_platforms: "waiting",
+				paid_at_hotel_cash: "default",
+				paid_at_hotel_card: "default",
+				paid_online_other_platforms: "default",
 			});
 			assert.deepEqual(
 				observed.update.$push.adminChangeLog.paymentBreakdownKeys,
-				["paid_online_other_platforms"]
+				selectedKeys
 			);
 			assert.deepEqual(
 				observed.update.$push.reservationAuditLog.paymentBreakdownKeys,
-				["paid_online_other_platforms"]
+				selectedKeys
 			);
-			assert.equal(observed.filter.$expr.$and.length, 3);
-			assert.deepEqual(
-				Object.keys(observed.update.$set)
-					.filter((path) => path.startsWith("payment_reconciliation.breakdown."))
-					.sort(),
-				[
-					"payment_reconciliation.breakdown.paid_online_other_platforms",
-				]
+			assert.equal(observed.filter.$expr, undefined);
+			assert.equal(
+				Object.keys(observed.update.$set).some((path) =>
+					path.startsWith("payment_reconciliation.breakdown.")
+				),
+				false
 			);
+			assert.equal(restoreFind.created[0].action, "reset");
+			assert.equal(restoreFind.created[0].payoutPurpose, "");
+			assert.equal(restoreFind.created[0].plannedAmountCents, 14701);
 		} finally {
 			restoreFind();
 			Reservations.updateOne = originalUpdateOne;
@@ -562,7 +852,9 @@ test("an optimistic race is explicit and an already-applied retry is idempotent"
 		try {
 			const retryResponse = response();
 			await updateReconciliationStatus(
-				superAdminRequest(validBody()),
+				superAdminRequest(
+					validBody({ expectedActionAmountCents: 0 })
+				),
 				retryResponse
 			);
 			assert.equal(retryResponse.statusCode, 200);
@@ -574,6 +866,90 @@ test("an optimistic race is explicit and an already-applied retry is idempotent"
 			Reservations.updateOne = originalUpdateOne;
 		}
 	});
+});
+
+test("report rows expose only safe stored-entry existence across every reconciliation state", () => {
+	const row = _private.reportRow(
+		{
+			_id: RESERVATION_ID,
+			paid_amount_breakdown: {
+				paid_at_hotel_cash: 10,
+				paid_at_hotel_card: 20,
+				paid_online_other_platforms: 30,
+				paid_no_show: 0,
+			},
+			payment_reconciliation: {
+				breakdown: {
+					paid_at_hotel_cash: {
+						status: "reconciled",
+						amountCents: 1000,
+						reconciledBy: { email: "private-actor@example.com" },
+						batchId: "private-effective-batch",
+						note: "private effective note",
+					},
+					paid_at_hotel_card: {
+						status: "reconciled",
+						amountCents: 1900,
+						batchId: "private-stale-batch",
+						note: "private stale note",
+					},
+					paid_online_other_platforms: {
+						status: "waiting",
+						amountCents: 3000,
+						batchId: "private-waiting-batch",
+						note: "private waiting note",
+					},
+					paid_no_show: {
+						status: "waiting",
+						amountCents: 0,
+						batchId: "private-zero-batch",
+						note: "private zero note",
+					},
+				},
+			},
+		},
+		["paid_at_hotel_cash"]
+	);
+	const byBreakdown = row.reconciliation_by_breakdown;
+	assert.equal(byBreakdown.paid_online_via_link.hasStoredEntry, false);
+	assert.equal(byBreakdown.paid_at_hotel_cash.hasStoredEntry, true);
+	assert.equal(byBreakdown.paid_at_hotel_cash.reconciled, true);
+	assert.equal(byBreakdown.paid_at_hotel_card.hasStoredEntry, true);
+	assert.equal(byBreakdown.paid_at_hotel_card.stale, true);
+	assert.equal(
+		byBreakdown.paid_online_other_platforms.hasStoredEntry,
+		true
+	);
+	assert.equal(byBreakdown.paid_online_other_platforms.status, "waiting");
+	assert.equal(byBreakdown.paid_no_show.hasStoredEntry, true);
+	assert.equal(byBreakdown.paid_no_show.amountCents, 0);
+	assert.equal(byBreakdown.paid_no_show.status, "not_applicable");
+	for (const safeEntry of Object.values(byBreakdown)) {
+		assert.equal(typeof safeEntry.hasStoredEntry, "boolean");
+		assert.deepEqual(Object.keys(safeEntry).sort(), [
+			"amount",
+			"amountCents",
+			"hasStoredEntry",
+			"reconciled",
+			"stale",
+			"status",
+		]);
+	}
+	assert.equal(row.payment_reconciliation, undefined);
+	const serialized = JSON.stringify(row);
+	for (const privateValue of [
+		"private-actor@example.com",
+		"private-effective-batch",
+		"private-stale-batch",
+		"private-waiting-batch",
+		"private-zero-batch",
+		"private effective note",
+		"private stale note",
+		"private waiting note",
+		"private zero note",
+	]) {
+		assert.equal(serialized.includes(privateValue), false);
+	}
 });
 
 test("report enforces hotel scope before reservation reads", async () => {
@@ -665,7 +1041,8 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 			const call = { kind: "find", filter, projection: "" };
 			observedFilters.push(call);
 			return {
-				sort() {
+				sort(sort) {
+					call.sort = sort;
 					return this;
 				},
 				skip() {
@@ -691,7 +1068,8 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 					totalAmountCents: 1734,
 					reconciledAmountCents: 1234,
 					reservationsCount: 1,
-					reconciledReservationsCount: 0,
+					reconciledReservationsCount: 1,
+					waitingReservationsCount: 1,
 				},
 			];
 		};
@@ -718,7 +1096,7 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 				300
 			);
 			assert.equal(res.payload.data[0].selected_breakdown_total_cents, 1734);
-			assert.equal(res.payload.data[0].reconciliation_status, "waiting");
+			assert.equal(res.payload.data[0].reconciliation_status, "mixed");
 			assert.equal(res.payload.data[0].payment_reconciliation, undefined);
 			assert.equal(res.payload.data[0].payment_details, undefined);
 			assert.equal(
@@ -726,16 +1104,62 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 				undefined
 			);
 			assert.equal(res.payload.data[0].customer_details.name, "Safe Guest");
+			assert.equal(
+				Object.keys(res.payload.data[0].reconciliation_by_breakdown).length,
+				8
+			);
 			assert.deepEqual(
 				Object.keys(
 					res.payload.data[0].reconciliation_by_breakdown
 						.paid_at_hotel_cash
 				).sort(),
-				["amount", "amountCents", "reconciled", "stale", "status"].sort()
+				[
+					"amount",
+					"amountCents",
+					"hasStoredEntry",
+					"reconciled",
+					"stale",
+					"status",
+				].sort()
+			);
+			assert.equal(
+				res.payload.data[0].reconciliation_by_breakdown
+					.paid_at_hotel_cash.hasStoredEntry,
+				true
+			);
+			assert.equal(
+				res.payload.data[0].reconciliation_by_breakdown
+					.paid_online_via_link.hasStoredEntry,
+				false
+			);
+			assert.deepEqual(
+				observedFilters.find((item) => item.kind === "find").sort,
+				{
+					checkin_date: 1,
+					checkout_date: 1,
+					createdAt: 1,
+					_id: 1,
+				}
 			);
 			assert.equal(res.payload.scorecards.totalAmountCents, 1734);
 			assert.equal(res.payload.scorecards.reconciledAmountCents, 1234);
 			assert.equal(res.payload.scorecards.waitingAmountCents, 500);
+			assert.equal(res.payload.scorecards.reconciledReservationsCount, 1);
+			assert.equal(res.payload.scorecards.waitingReservationsCount, 1);
+			const scorecardPipeline = observedFilters.find(
+				(item) => item.kind === "aggregate"
+			).pipeline;
+			assert.equal(
+				scorecardPipeline[1].$project.rowReconciled.$or.length,
+				2
+			);
+			assert.equal(
+				scorecardPipeline[1].$project.rowWaiting.$or.length,
+				2
+			);
+			assert.ok(
+				scorecardPipeline[2].$group.waitingReservationsCount
+			);
 			const rowFilter = observedFilters.find((item) => item.kind === "count").filter;
 			const categoryClause = rowFilter.$and.find(
 				(clause) =>
@@ -829,6 +1253,330 @@ test("report includeScorecards=false skips the unpaginated scorecard read", asyn
 			Reservations.find = originalFind;
 			Reservations.countDocuments = originalCount;
 			Reservations.aggregate = originalAggregate;
+		}
+	});
+});
+
+test("closest match is a waiting-only read that returns report rows and CAS snapshots", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const rows = [
+			{
+				...currentReservation({
+					_id: new mongoose.Types.ObjectId("64a000000000000000000011"),
+					paid_amount_breakdown: { paid_at_hotel_cash: 10 },
+				}),
+				createdAt: new Date("2026-08-01T00:00:00.000Z"),
+				checkin_date: new Date("2026-08-10T00:00:00.000Z"),
+				checkout_date: new Date("2026-08-11T00:00:00.000Z"),
+				customer_details: { name: "Ten" },
+			},
+			{
+				...currentReservation({
+					_id: new mongoose.Types.ObjectId("64a000000000000000000012"),
+					paid_amount_breakdown: { paid_at_hotel_cash: 15 },
+				}),
+				createdAt: new Date("2026-08-02T00:00:00.000Z"),
+				checkin_date: new Date("2026-08-11T00:00:00.000Z"),
+				checkout_date: new Date("2026-08-12T00:00:00.000Z"),
+				customer_details: { name: "Fifteen" },
+			},
+			{
+				...currentReservation({
+					_id: new mongoose.Types.ObjectId("64a000000000000000000013"),
+					paid_amount_breakdown: { paid_at_hotel_cash: 25 },
+				}),
+				createdAt: new Date("2026-08-03T00:00:00.000Z"),
+				checkin_date: new Date("2026-08-12T00:00:00.000Z"),
+				checkout_date: new Date("2026-08-13T00:00:00.000Z"),
+				customer_details: { name: "Twenty Five" },
+			},
+		];
+		const originalFind = Reservations.find;
+		const originalUpdateOne = Reservations.updateOne;
+		const observed = [];
+		let writes = 0;
+		Reservations.find = (filter) => {
+			const call = { filter };
+			observed.push(call);
+			return {
+				select(projection) {
+					call.projection = projection;
+					return this;
+				},
+				sort(sort) {
+					call.sort = sort;
+					return this;
+				},
+				limit(limit) {
+					call.limit = limit;
+					return this;
+				},
+				lean: async () => {
+					if (observed.length === 1) return rows;
+					const selectedIds = new Set(
+						(filter?.$and?.[1]?._id?.$in || []).map(String)
+					);
+					return rows.filter((row) => selectedIds.has(String(row._id)));
+				},
+			};
+		};
+		Reservations.updateOne = async () => {
+			writes += 1;
+		};
+		try {
+			const res = response();
+			await closestReconciliationMatch(
+				{
+					auth: { _id: USER_ID },
+					profile: { _id: USER_ID, role: 1000, activeUser: true },
+					body: {
+						hotelId: HOTEL_ID,
+						paymentBreakdownKey: "paid_at_hotel_cash",
+						targetAmountCents: 3500,
+						dateBy: "checkin_date",
+						dateFrom: "2026-08-01",
+						dateTo: "2026-08-31",
+					},
+				},
+				res
+			);
+			assert.equal(res.statusCode, 200);
+			assert.equal(res.payload.exactMatch, true);
+			assert.equal(res.payload.matchedAmountCents, 3500);
+			assert.equal(res.payload.selectedCount, 2);
+			assert.equal(res.payload.data.length, 2);
+			assert.equal(res.payload.reservations.length, 2);
+			assert.ok(
+				res.payload.reservations.every(
+					(snapshot) =>
+						snapshot.displayedAmountsCents.paid_at_hotel_cash > 0 &&
+						Number.isInteger(snapshot.__v)
+				)
+			);
+			assert.equal(writes, 0);
+			assert.equal(observed.length, 2);
+			assert.equal(observed[0].limit, 5001);
+			assert.deepEqual(observed[0].sort, {
+				checkin_date: 1,
+				checkout_date: 1,
+				createdAt: 1,
+				_id: 1,
+			});
+			assert.equal(
+				observed[0].projection,
+				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+			);
+			assert.doesNotMatch(
+				observed[0].projection,
+				/\+payment_reconciliation|customer_details|pickedRoomsPricing/
+			);
+			assert.match(observed[1].projection, /\+payment_reconciliation/);
+			assert.equal(observed[1].limit, 2);
+			assert.deepEqual(observed[1].sort, observed[0].sort);
+			assert.equal(observed[1].filter.$and[0], observed[0].filter);
+			assert.ok(
+				observed[0].filter.$and.some(
+					(clause) =>
+						clause?.$expr?.$or?.some(
+							(condition) => Array.isArray(condition?.$and)
+						)
+				)
+			);
+		} finally {
+			Reservations.find = originalFind;
+			Reservations.updateOne = originalUpdateOne;
+		}
+	});
+});
+
+test("closest match returns 409 without writes when a selected candidate changes before refetch", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const initial = {
+			...currentReservation(),
+			createdAt: new Date("2026-08-01T00:00:00.000Z"),
+			checkin_date: new Date("2026-08-10T00:00:00.000Z"),
+			checkout_date: new Date("2026-08-11T00:00:00.000Z"),
+		};
+		const changed = {
+			...initial,
+			__v: initial.__v + 1,
+			updatedAt: new Date("2026-08-14T10:00:01.000Z"),
+		};
+		const originalFind = Reservations.find;
+		const originalUpdateOne = Reservations.updateOne;
+		let reads = 0;
+		let writes = 0;
+		Reservations.find = () => ({
+			select() {
+				return this;
+			},
+			sort() {
+				return this;
+			},
+			limit() {
+				return this;
+			},
+			async lean() {
+				reads += 1;
+				return reads === 1 ? [initial] : [changed];
+			},
+		});
+		Reservations.updateOne = async () => {
+			writes += 1;
+			return { matchedCount: 1 };
+		};
+		try {
+			const res = response();
+			await closestReconciliationMatch(
+				{
+					auth: { _id: USER_ID },
+					profile: { _id: USER_ID, role: 1000, activeUser: true },
+					body: {
+						hotelId: HOTEL_ID,
+						paymentBreakdownKey: "paid_at_hotel_cash",
+						targetAmountCents: 1234,
+					},
+				},
+				res
+			);
+			assert.equal(res.statusCode, 409);
+			assert.equal(res.payload.code, "closest_match_candidates_changed");
+			assert.equal(reads, 2);
+			assert.equal(writes, 0);
+		} finally {
+			Reservations.find = originalFind;
+			Reservations.updateOne = originalUpdateOne;
+		}
+	});
+});
+
+test("closest match scans 5,000 candidates with only the narrow allowlisted projection", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const rows = Array.from({ length: 5000 }, (_, index) => ({
+			_id: (index + 1).toString(16).padStart(24, "0"),
+			__v: 1,
+			updatedAt: UPDATED_AT,
+			createdAt: new Date("2026-08-01T00:00:00.000Z"),
+			checkin_date: new Date("2026-08-10T00:00:00.000Z"),
+			checkout_date: new Date("2026-08-11T00:00:00.000Z"),
+			paid_amount_breakdown: { paid_at_hotel_cash: 1 },
+			payment_reconciliation: { breakdown: {} },
+		}));
+		const originalFind = Reservations.find;
+		const originalUpdateOne = Reservations.updateOne;
+		const observed = [];
+		let writes = 0;
+		Reservations.find = (filter) => {
+			const call = { filter };
+			observed.push(call);
+			return {
+				select(projection) {
+					call.projection = projection;
+					return this;
+				},
+				sort(sort) {
+					call.sort = sort;
+					return this;
+				},
+				limit(limit) {
+					call.limit = limit;
+					return this;
+				},
+				async lean() {
+					if (observed.length === 1) return rows;
+					const selectedIds = new Set(
+						(filter?.$and?.[1]?._id?.$in || []).map(String)
+					);
+					return rows.filter((row) => selectedIds.has(row._id));
+				},
+			};
+		};
+		Reservations.updateOne = async () => {
+			writes += 1;
+			return { matchedCount: 1 };
+		};
+		try {
+			const res = response();
+			await closestReconciliationMatch(
+				{
+					auth: { _id: USER_ID },
+					profile: { _id: USER_ID, role: 1000, activeUser: true },
+					body: {
+						hotelId: HOTEL_ID,
+						paymentBreakdownKey: "paid_at_hotel_cash",
+						targetAmountCents: 100,
+					},
+				},
+				res
+			);
+			assert.equal(res.statusCode, 200);
+			assert.equal(res.payload.candidateCount, 5000);
+			assert.equal(res.payload.selectedCount, 1);
+			assert.equal(observed.length, 2);
+			assert.equal(
+				observed[0].projection,
+				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+			);
+			assert.doesNotMatch(
+				observed[0].projection,
+				/\+payment_reconciliation|customer_details|adminPricing|pickedRoomsPricing/
+			);
+			assert.match(observed[1].projection, /\+payment_reconciliation/);
+			assert.equal(observed[1].limit, 1);
+			assert.equal(writes, 0);
+		} finally {
+			Reservations.find = originalFind;
+			Reservations.updateOne = originalUpdateOne;
+		}
+	});
+});
+
+test("closest match rejects an honestly over-limit candidate range without mutation", async () => {
+	await withSuperAdminEnvironment(async () => {
+		const originalFind = Reservations.find;
+		const originalUpdateOne = Reservations.updateOne;
+		let writes = 0;
+		let projection = "";
+		Reservations.find = () => ({
+			select(value) {
+				projection = value;
+				return this;
+			},
+			sort() {
+				return this;
+			},
+			limit() {
+				return this;
+			},
+			lean: async () => Array.from({ length: 5001 }, () => ({})),
+		});
+		Reservations.updateOne = async () => {
+			writes += 1;
+		};
+		try {
+			const res = response();
+			await closestReconciliationMatch(
+				{
+					auth: { _id: USER_ID },
+					profile: { _id: USER_ID, role: 1000, activeUser: true },
+					body: {
+						hotelId: HOTEL_ID,
+						paymentBreakdownKey: "paid_at_hotel_cash",
+						targetAmountCents: 100,
+					},
+				},
+				res
+			);
+			assert.equal(res.statusCode, 422);
+			assert.equal(res.payload.code, "closest_match_candidate_limit_exceeded");
+			assert.equal(
+				projection,
+				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+			);
+			assert.equal(writes, 0);
+		} finally {
+			Reservations.find = originalFind;
+			Reservations.updateOne = originalUpdateOne;
 		}
 	});
 });

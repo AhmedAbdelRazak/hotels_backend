@@ -534,6 +534,10 @@ const sanitizeHotelManagementInternalWorkflowText = (reservation = {}) => {
 	return sanitized;
 };
 
+const isPaymentReconciliationAuditEntry = (entry = {}) =>
+	entry?.field === "payment_reconciliation" ||
+	String(entry?.type || "").startsWith("payment_reconciliation_");
+
 const sanitizeReservationAuditLogsForViewer = (
 	reservation,
 	viewer = {},
@@ -558,9 +562,7 @@ const sanitizeReservationAuditLogsForViewer = (
 		["adminChangeLog", "reservationAuditLog"].forEach((field) => {
 			if (!Array.isArray(withoutReconciliation[field])) return;
 			withoutReconciliation[field] = withoutReconciliation[field].filter(
-				(entry) =>
-					entry?.field !== "payment_reconciliation" &&
-					entry?.type !== "payment_reconciliation_status_update"
+				(entry) => !isPaymentReconciliationAuditEntry(entry)
 			);
 		});
 		return withoutReconciliation;
@@ -574,8 +576,7 @@ const sanitizeReservationAuditLogsForViewer = (
 		if (!Array.isArray(plain?.[field])) return;
 		sanitized[field] = plain[field].filter(
 			(entry) =>
-				entry?.field !== "payment_reconciliation" &&
-				entry?.type !== "payment_reconciliation_status_update" &&
+				!isPaymentReconciliationAuditEntry(entry) &&
 				!shouldHideAuditEntry(entry, viewer)
 		);
 	});

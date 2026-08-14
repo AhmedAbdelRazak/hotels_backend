@@ -189,8 +189,9 @@ const summarizeReservationReconciliation = (
 
 	const waitingAmountCents = totalAmountCents - reconciledAmountCents;
 	const reconciliationStatus =
-		selectedPositiveKeys.length > 0 &&
-		selectedPositiveKeys.every((key) => byBreakdown[key].reconciled)
+		reconciledAmountCents > 0 && waitingAmountCents > 0
+			? "mixed"
+			: selectedPositiveKeys.length > 0 && waitingAmountCents === 0
 			? "reconciled"
 			: "waiting";
 
@@ -227,11 +228,8 @@ const summarizeReconciliationReservations = (
 		reservationsCount += 1;
 		totalAmountCents += summary.totalAmountCents;
 		reconciledAmountCents += summary.reconciledAmountCents;
-		if (summary.reconciliationStatus === "reconciled") {
-			reconciledReservationsCount += 1;
-		} else {
-			waitingReservationsCount += 1;
-		}
+		if (summary.reconciledAmountCents > 0) reconciledReservationsCount += 1;
+		if (summary.waitingAmountCents > 0) waitingReservationsCount += 1;
 	}
 
 	const waitingAmountCents = totalAmountCents - reconciledAmountCents;
@@ -319,27 +317,22 @@ const buildReconciliationStatusFilter = (selectedKeys, requestedStatus) => {
 	const keys = normalizePaymentBreakdownKeys(selectedKeys, {
 		defaultKeys: PAYMENT_BREAKDOWN_KEYS,
 	});
-	const anyPositive = {
-		$or: keys.map((key) => ({
-			$gt: [paymentAmountCentsExpression(key), 0],
-		})),
-	};
-	const everyPositiveIsReconciled = {
-		$and: keys.map((key) => ({
-			$or: [
-				{ $lte: [paymentAmountCentsExpression(key), 0] },
-				effectivelyReconciledExpression(key),
-			],
-		})),
-	};
 	return {
 		$expr: {
-			$and: [
-				anyPositive,
+			$or: keys.map((key) =>
 				status === "reconciled"
-					? everyPositiveIsReconciled
-					: { $not: [everyPositiveIsReconciled] },
-			],
+					? effectivelyReconciledExpression(key)
+					: {
+							$and: [
+								{
+									$gt: [paymentAmountCentsExpression(key), 0],
+								},
+								{
+									$not: [effectivelyReconciledExpression(key)],
+								},
+							],
+						  }
+			),
 		},
 	};
 };
