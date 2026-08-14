@@ -518,6 +518,9 @@ test("inventory booking-source and check-in/checkout matrices reconcile every gr
 		observed.findCalls.forEach((call) => {
 			assert.match(call.projection, /\badminPricingVisibility\b/);
 			assert.match(call.projection, /\bsupplierData\b/);
+			assert.deepEqual(call.filter["otaPlatformReview.status"], {
+				$ne: "pending",
+			});
 		});
 	});
 });

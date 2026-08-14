@@ -3572,7 +3572,12 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			parseCustomRange(start, end) || (month ? parseMonthParam(month) : null);
 		const normalizedDateBasis = normalizeSummaryDateBasis(dateBasis);
 
-		const query = {};
+		// Keep financial matrices aligned with the occupancy/report contract:
+		// OTA Platform Review rows are drafts until the dedicated release flow
+		// materializes their reviewed pricing and inventory state.
+		const query = {
+			...buildExcludePendingOtaReviewFilter(),
+		};
 		if (resolvedHotelId) {
 			query.hotelId = resolvedHotelId;
 		} else if (hotelIds.length) {
@@ -3698,7 +3703,12 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 		const range =
 			parseCustomRange(start, end) || (month ? parseMonthParam(month) : null);
 
-		const query = {};
+		// A pending OTA Platform Review is not yet a reportable reservation.
+		// Including an unpriced draft here would make the whole selected-basis
+		// matrix fail closed even though occupancy correctly excludes the row.
+		const query = {
+			...buildExcludePendingOtaReviewFilter(),
+		};
 		if (resolvedHotelId) {
 			query.hotelId = resolvedHotelId;
 		} else if (hotelIds.length) {
