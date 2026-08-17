@@ -1863,6 +1863,59 @@ test("direct Trip surname/given guest names display in given-name order only for
 	assert.equal(nonTemplate.guestName, "Family/Given");
 });
 
+test("direct Trip multi-guest line wrapping preserves the same primary guest", () => {
+	const base = wrappedDirectTripRoomEmail({
+		confirmationNumber: "1567954144136274",
+		guestName: "Synthetic Guest",
+	});
+	const firstGuest = "MOHAMED/AHMED IBRAHIM TAWHID ABDELAZIM";
+	const secondGuest = "MOHAMED/FARIDA IBRAHIM TAWHID ABDELAZI";
+	const thirdGuest = "ABDELHAKIM/NADIA KHALED MASRY";
+	const text = base.text.replace(
+		"Synthetic Guest",
+		`${firstGuest},${secondGuest}\n${thirdGuest}`
+	);
+	const htmlText = base.text.replace(
+		"Synthetic Guest",
+		`${firstGuest},${secondGuest},${thirdGuest}`
+	);
+	const normalized = extractNormalizedReservation({
+		...base,
+		text,
+		html: htmlText
+			.split("\n")
+			.map((line) => `<div>${line}</div>`)
+			.join(""),
+	});
+
+	assert.equal(normalized.directTripTemplateMatched, true);
+	assert.equal(normalized.guestName, "Ahmed Ibrahim Tawhid Abdelazim MOHAMED");
+	assert.deepEqual(normalized.directTripMimeConflictFields, []);
+	assert.deepEqual(normalized.genericRepeatedFactConflictFields, []);
+	assert.equal(normalized.genericRepeatedFactConflict, false);
+	assert.equal(normalized.requiresManualReview, false);
+	assert.equal(normalized.sourcePresence.guestName, true);
+});
+
+test("direct Trip multi-guest MIME copies still reject a different primary guest", () => {
+	const base = wrappedDirectTripRoomEmail({
+		guestName: "FAMILY/GIVEN,SECOND/GUEST",
+	});
+	const normalized = extractNormalizedReservation({
+		...base,
+		html: base.text
+			.replace("FAMILY/GIVEN,SECOND/GUEST", "OTHER/PRIMARY,SECOND/GUEST")
+			.split("\n")
+			.map((line) => `<div>${line}</div>`)
+			.join(""),
+	});
+
+	assert.ok(normalized.directTripMimeConflictFields.includes("guestName"));
+	assert.ok(normalized.genericRepeatedFactConflictFields.includes("guestName"));
+	assert.equal(normalized.requiresManualReview, true);
+	assert.equal(normalized.sourcePresence.guestName, false);
+});
+
 const productionTripTwoRoomEmail = ({
 	htmlAug12Payout = "15.17",
 } = {}) => {

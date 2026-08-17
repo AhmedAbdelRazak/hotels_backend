@@ -5324,7 +5324,28 @@ function extractDirectTripConfirmationNumbers(value = "") {
 }
 
 function normalizeDirectTripGuestName(value = "") {
-	const candidate = cleanFieldValue(value);
+	const sourceCandidate = cleanFieldValue(value);
+	const commaSeparatedCandidates = sourceCandidate
+		.split(",")
+		.map(normalizeWhitespace)
+		.filter(Boolean);
+	const isSurnameGivenName = (candidate = "") => {
+		const parts = candidate.split("/").map(normalizeWhitespace);
+		return (
+			parts.length === 2 &&
+			parts.every((part) => part && /\p{L}/u.test(part))
+		);
+	};
+	// Trip may list every occupant in one Guest Name cell. The plain-text MIME
+	// copy can wrap that comma-separated list while HTML keeps it on one line.
+	// The PMS guest identity is the first occupant, so compare and store that
+	// same primary name without treating the wrapping difference as a conflict.
+	const candidate =
+		commaSeparatedCandidates.length > 1 &&
+		isSurnameGivenName(commaSeparatedCandidates[0]) &&
+		commaSeparatedCandidates.slice(1).some(isSurnameGivenName)
+			? commaSeparatedCandidates[0]
+			: sourceCandidate;
 	const parts = candidate.split("/").map(normalizeWhitespace);
 	if (
 		parts.length !== 2 ||
@@ -5344,6 +5365,21 @@ function normalizeDirectTripGuestName(value = "") {
 		: givenNames;
 
 	return normalizeWhitespace(`${displayedGivenNames} ${surname}`);
+}
+
+function directTripRepeatedGuestNamesAgree(text = "") {
+	const rawValues = extractExplicitFactLabelValues(
+		text,
+		GENERIC_OTA_EXPLICIT_FACT_LABELS.guestName,
+		"guestName"
+	);
+	if (rawValues.length < 2) return false;
+	const normalizedValues = rawValues.map((value) =>
+		normalizeIntlComparable(normalizeDirectTripGuestName(value))
+	);
+	return (
+		normalizedValues.every(Boolean) && new Set(normalizedValues).size === 1
+	);
 }
 
 function extractDirectTripMimeRepresentationFacts(value = "") {
@@ -7360,10 +7396,19 @@ function extractNormalizedReservation(email) {
 		directTripFields.multipleRoomBlocks !== true
 	) {
 		// The dedicated Trip parser proves one structured room block. Text and HTML
-		// can wrap that same block differently, so only its generic room-name false
-		// conflict is suppressed; every other repeated-fact conflict remains fatal.
+		// can wrap that same block or its comma-separated guest list differently.
+		// Suppress a generic guest-name conflict only when every repeated primary
+		// guest agrees and the MIME-specific parser independently agrees. Every
+		// other repeated-fact conflict remains fatal.
+		const repeatedPrimaryGuestAgrees = !!(
+			directTripFields.guestName &&
+			!(directTripFields.mimeConflictFields || []).includes("guestName") &&
+			directTripRepeatedGuestNamesAgree(rawInboundText)
+		);
 		genericRepeatedFactConflictFields = genericRepeatedFactConflictFields.filter(
-			(field) => field !== "roomName"
+			(field) =>
+				field !== "roomName" &&
+				!(field === "guestName" && repeatedPrimaryGuestAgrees)
 		);
 	}
 	const genericRepeatedFactConflictSet = new Set(
