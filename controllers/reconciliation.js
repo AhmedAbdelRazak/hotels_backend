@@ -57,6 +57,7 @@ const RECONCILIATION_REPORT_SORT = Object.freeze({
 	createdAt: 1,
 	_id: 1,
 });
+const CANCELLED_RESERVATION_STATUS = /cancel/i;
 const RECONCILIATION_REPORT_ROW_PROJECTION = [
 	"_id",
 	"__v",
@@ -65,6 +66,8 @@ const RECONCILIATION_REPORT_ROW_PROJECTION = [
 	"hotelId",
 	"confirmation_number",
 	"booking_source",
+	"reservation_status",
+	"state",
 	"customer_details.name",
 	"customer_details.fullName",
 	"checkin_date",
@@ -87,8 +90,27 @@ const closestMatchCandidateProjection = (paymentBreakdownKey) =>
 		"updatedAt",
 		"checkin_date",
 		"checkout_date",
+		"reservation_status",
+		"state",
 		`paid_amount_breakdown.${paymentBreakdownKey}`,
 	].join(" ");
+
+const buildExcludeCancelledReservationsFilter = () => ({
+	reservation_status: { $not: CANCELLED_RESERVATION_STATUS },
+	state: { $not: CANCELLED_RESERVATION_STATUS },
+});
+
+const closestMatchReservationPriority = (status) => {
+	const normalized = String(status || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	if (normalized === "checked_out" || normalized === "checkedout") return 0;
+	if (normalized === "in_house" || normalized === "inhouse") return 1;
+	if (normalized === "no_show" || normalized === "noshow") return 2;
+	if (normalized === "confirmed") return 3;
+	return 4;
+};
 
 const normalizeId = (value) => {
 	const candidate = value?._id || value;
@@ -161,6 +183,7 @@ const buildReportFilter = ({
 }) => {
 	const filters = [
 		{ hotelId: new ObjectId(hotelId) },
+		buildExcludeCancelledReservationsFilter(),
 		buildExcludePendingOtaReviewFilter(),
 		buildPaymentBreakdownSelectionFilter(selectedKeys),
 	];
@@ -287,6 +310,8 @@ const reportRow = (reservation = {}, selectedKeys = PAYMENT_BREAKDOWN_KEYS) => {
 		},
 		confirmation_number: reservation.confirmation_number,
 		booking_source: reservation.booking_source,
+		reservation_status: reservation.reservation_status,
+		state: reservation.state,
 		checkin_date: reservation.checkin_date,
 		checkout_date: reservation.checkout_date,
 		nights: reservationNights(reservation),
@@ -900,6 +925,7 @@ const buildSnapshotUpdateFilter = (
 		hotelId: new ObjectId(hotelId),
 		__v: Number.isSafeInteger(reservation.__v) ? reservation.__v : 0,
 		updatedAt: reservation.updatedAt,
+		...buildExcludeCancelledReservationsFilter(),
 		...buildExcludePendingOtaReviewFilter(),
 	};
 	for (const key of selectedKeys) {
@@ -1017,6 +1043,7 @@ exports.updateReconciliationStatus = async (req, res) => {
 		const mutationScopeFilter = {
 			_id: { $in: ids },
 			hotelId: new ObjectId(hotelId),
+			...buildExcludeCancelledReservationsFilter(),
 			...buildExcludePendingOtaReviewFilter(),
 		};
 		addHotelManagementReservationVisibilityToFilter(
@@ -1394,12 +1421,22 @@ exports.closestReconciliationMatch = async (req, res) => {
 				candidateLimit: MAX_CLOSEST_MATCH_CANDIDATES,
 			});
 		}
-		const candidates = candidatesRows.map((reservation) => ({
-			id: normalizeId(reservation._id),
-			amountCents: paymentAmountCents(reservation, paymentBreakdownKey),
-			checkinDate: reservation.checkin_date,
-			checkoutDate: reservation.checkout_date,
-		}));
+		const candidates = candidatesRows.map((reservation) => {
+			const priorityRank = closestMatchReservationPriority(
+				reservation.reservation_status || reservation.state
+			);
+			return {
+				id: normalizeId(reservation._id),
+				amountCents: paymentAmountCents(reservation, paymentBreakdownKey),
+				priorityRank,
+				priorityDate:
+					priorityRank === 0
+						? reservation.checkout_date
+						: reservation.checkin_date,
+				checkinDate: reservation.checkin_date,
+				checkoutDate: reservation.checkout_date,
+			};
+		});
 		const match = await runClosestReconciliationMatch(
 			candidates,
 			targetAmountCents,
@@ -1581,6 +1618,8 @@ exports._private = {
 	MAX_RECONCILIATION_UPDATE_RESERVATIONS,
 	actorCanAccessHotel,
 	buildReconciliationUpdate,
+	buildExcludeCancelledReservationsFilter,
+	closestMatchReservationPriority,
 	buildReportFilter,
 	buildScorecardPipeline,
 	buildSnapshotUpdateFilter,

@@ -97,6 +97,21 @@ const withSuperAdminEnvironment = async (callback) => {
 	}
 };
 
+test("closest-match reservation priority follows the reconciliation business order", () => {
+	assert.deepEqual(
+		[
+			"checked_out",
+			"inhouse",
+			"no_show",
+			"confirmed",
+			"pending",
+		].map(_private.closestMatchReservationPriority),
+		[0, 1, 2, 3, 4]
+	);
+	assert.equal(_private.closestMatchReservationPriority("checked out"), 0);
+	assert.equal(_private.closestMatchReservationPriority("no-show"), 2);
+});
+
 const mockMutationReads = (rows) => {
 	const originalFind = Reservations.find;
 	const originalBatchCreate = PaymentReconciliationBatch.create;
@@ -483,6 +498,9 @@ test("mutation uses server-derived cents and writes only reconciliation, audit, 
 			assert.deepEqual(observed.filter["otaPlatformReview.status"], {
 				$ne: "pending",
 			});
+			assert.ok(observed.filter.reservation_status.$not.test("cancelled"));
+			assert.equal(observed.filter.reservation_status.$not.test("confirmed"), false);
+			assert.ok(observed.filter.state.$not.test("canceled"));
 			assert.deepEqual(observed.update.$inc, { __v: 1 });
 			assert.deepEqual(observed.options, { timestamps: false });
 
@@ -1365,7 +1383,7 @@ test("closest match is a waiting-only read that returns report rows and CAS snap
 			});
 			assert.equal(
 				observed[0].projection,
-				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+				"_id __v updatedAt checkin_date checkout_date reservation_status state paid_amount_breakdown.paid_at_hotel_cash"
 			);
 			assert.doesNotMatch(
 				observed[0].projection,
@@ -1381,6 +1399,11 @@ test("closest match is a waiting-only read that returns report rows and CAS snap
 						clause?.$expr?.$or?.some(
 							(condition) => Array.isArray(condition?.$and)
 						)
+				)
+			);
+			assert.ok(
+				observed[0].filter.$and.some((clause) =>
+					clause?.reservation_status?.$not?.test("cancelled")
 				)
 			);
 		} finally {
@@ -1516,7 +1539,7 @@ test("closest match scans 5,000 candidates with only the narrow allowlisted proj
 			assert.equal(observed.length, 2);
 			assert.equal(
 				observed[0].projection,
-				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+				"_id __v updatedAt checkin_date checkout_date reservation_status state paid_amount_breakdown.paid_at_hotel_cash"
 			);
 			assert.doesNotMatch(
 				observed[0].projection,
@@ -1572,7 +1595,7 @@ test("closest match rejects an honestly over-limit candidate range without mutat
 			assert.equal(res.payload.code, "closest_match_candidate_limit_exceeded");
 			assert.equal(
 				projection,
-				"_id __v updatedAt checkin_date checkout_date paid_amount_breakdown.paid_at_hotel_cash"
+				"_id __v updatedAt checkin_date checkout_date reservation_status state paid_amount_breakdown.paid_at_hotel_cash"
 			);
 			assert.equal(writes, 0);
 		} finally {
