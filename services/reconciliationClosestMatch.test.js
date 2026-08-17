@@ -122,6 +122,86 @@ test("equal financial ties are stable by chronology and then id", () => {
 	assert.deepEqual(result.selectedIds, ["a-same-day"]);
 });
 
+test("equal financial matches follow reservation priority and oldest checkout", () => {
+	const inputs = [
+		{
+			...candidate("confirmed", 1000, "2026-01-01", "2026-01-02"),
+			priorityRank: 3,
+			priorityDate: "2026-01-01",
+		},
+		{
+			...candidate("inhouse", 1000, "2026-01-02", "2026-01-04"),
+			priorityRank: 1,
+			priorityDate: "2026-01-02",
+		},
+		{
+			...candidate("checked-out-newer", 1000, "2026-01-01", "2026-01-05"),
+			priorityRank: 0,
+			priorityDate: "2026-01-05",
+		},
+		{
+			...candidate("checked-out-oldest", 1000, "2026-01-01", "2026-01-03"),
+			priorityRank: 0,
+			priorityDate: "2026-01-03",
+		},
+		{
+			...candidate("no-show", 1000, "2026-01-01", "2026-01-02"),
+			priorityRank: 2,
+			priorityDate: "2026-01-01",
+		},
+	];
+	const result = findClosestReconciliationMatch(inputs, 1000);
+	assert.deepEqual(result.selectedIds, ["checked-out-oldest"]);
+});
+
+test("financial distance remains ahead of reservation priority", () => {
+	const result = findClosestReconciliationMatch(
+		[
+			{
+				...candidate("checked-out", 900),
+				priorityRank: 0,
+				priorityDate: "2026-01-01",
+			},
+			{
+				...candidate("confirmed", 1000),
+				priorityRank: 3,
+				priorityDate: "2026-01-01",
+			},
+		],
+		1000
+	);
+	assert.deepEqual(result.selectedIds, ["confirmed"]);
+	assert.equal(result.exactMatch, true);
+});
+
+test("business priority precedes row count when exact totals tie", () => {
+	const result = findClosestReconciliationMatch(
+		[
+			{
+				...candidate("confirmed-whole", 1000),
+				priorityRank: 3,
+				priorityDate: "2026-01-01",
+			},
+			{
+				...candidate("checked-out-oldest", 400),
+				priorityRank: 0,
+				priorityDate: "2026-01-01",
+			},
+			{
+				...candidate("checked-out-next", 600),
+				priorityRank: 0,
+				priorityDate: "2026-01-02",
+			},
+		],
+		1000
+	);
+	assert.deepEqual(result.selectedIds, [
+		"checked-out-oldest",
+		"checked-out-next",
+	]);
+	assert.equal(result.exactMatch, true);
+});
+
 test("input ordering cannot change a deterministic proposal", () => {
 	const inputs = [
 		candidate("d", 277, "2026-01-04", "2026-01-05"),

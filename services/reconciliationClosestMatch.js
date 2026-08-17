@@ -37,7 +37,9 @@ const dateSortValue = (value) => {
 	return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 };
 
-const compareChronological = (left, right) =>
+const comparePreferred = (left, right) =>
+	left.priorityRank - right.priorityRank ||
+	left.prioritySort - right.prioritySort ||
 	left.checkinSort - right.checkinSort ||
 	left.checkoutSort - right.checkoutSort ||
 	left.id.localeCompare(right.id);
@@ -88,11 +90,17 @@ const normalizeCandidates = (candidates, maxCandidates) => {
 		return {
 			id,
 			amountCents,
+			priorityRank:
+				Number.isSafeInteger(candidate.priorityRank) &&
+				candidate.priorityRank >= 0
+					? candidate.priorityRank
+					: Number.MAX_SAFE_INTEGER,
+			prioritySort: dateSortValue(candidate.priorityDate),
 			checkinSort: dateSortValue(candidate.checkinDate),
 			checkoutSort: dateSortValue(candidate.checkoutDate),
 		};
 	});
-	return normalized.sort(compareChronological).map((candidate, stableIndex) => ({
+	return normalized.sort(comparePreferred).map((candidate, stableIndex) => ({
 		...candidate,
 		stableIndex,
 	}));
@@ -131,6 +139,14 @@ const compareStableSelections = (left = [], right = []) => {
 	return left.length - right.length;
 };
 
+const comparePrioritySelections = (left = [], right = []) => {
+	const length = Math.min(left.length, right.length);
+	for (let index = 0; index < length; index += 1) {
+		if (left[index] !== right[index]) return left[index] - right[index];
+	}
+	return 0;
+};
+
 const betterProposal = (current, candidate, targetCents) => {
 	if (!candidate || !candidate.selectedIndexes?.length) return current;
 	if (!current || !current.selectedIndexes?.length) return candidate;
@@ -142,6 +158,13 @@ const betterProposal = (current, candidate, targetCents) => {
 	const currentUnder = current.matchedCents <= targetCents;
 	const candidateUnder = candidate.matchedCents <= targetCents;
 	if (currentUnder !== candidateUnder) return candidateUnder ? candidate : current;
+	const priorityComparison = comparePrioritySelections(
+		candidate.priorityRanks,
+		current.priorityRanks
+	);
+	if (priorityComparison !== 0) {
+		return priorityComparison < 0 ? candidate : current;
+	}
 	if (candidate.selectedIndexes.length !== current.selectedIndexes.length) {
 		return candidate.selectedIndexes.length < current.selectedIndexes.length
 			? candidate
@@ -173,6 +196,9 @@ const proposalFromIndexes = (indexes, candidates) => {
 	return {
 		selectedIndexes,
 		selectedIds: selectedIdsInStableOrder(selectedIndexes, candidates),
+		priorityRanks: selectedIndexes.map(
+			(index) => candidates[index].priorityRank
+		),
 		matchedCents,
 	};
 };
@@ -193,8 +219,8 @@ const exactTwoSumProposal = (candidates, targetCents) => {
 				targetCents
 			);
 		}
-		// Candidates are already chronological/id sorted. Retaining the first
-		// row for an amount makes equal two-row matches deterministic.
+		// Candidates already follow the business priority/date/id order. Retaining
+		// the first row for an amount makes equal two-row matches deterministic.
 		if (!earliestByAmount.has(candidate.amountCents)) {
 			earliestByAmount.set(candidate.amountCents, candidate);
 		}
@@ -260,8 +286,8 @@ const reconstructBitsetSelection = ({
 		for (let index = end - 1; index >= start; index -= 1) {
 			const previousBits = before[index - start];
 			const weight = weights[index];
-			// Skipping a later chronological row whenever possible gives a stable,
-			// deterministic preference to earlier rows and ids.
+			// Skipping a later row whenever possible preserves the deterministic
+			// business priority/date/id preference.
 			if (bitIsSet(previousBits, remaining)) continue;
 			if (
 				weight <= remaining &&
@@ -359,31 +385,31 @@ const uniqueCandidates = (candidateGroups, limit) => {
 
 const fallbackCandidatePools = (work, targetCents, maxSelected) => {
 	if (work.length <= maxSelected) return [];
-	const chronological = [...work];
+	const preferred = [...work];
 	const byLargest = [...work].sort(
 		(left, right) =>
 			right.amountCents - left.amountCents ||
-			compareChronological(left, right)
+			comparePreferred(left, right)
 	);
 	const bySmallest = [...work].sort(
 		(left, right) =>
 			left.amountCents - right.amountCents ||
-			compareChronological(left, right)
+			comparePreferred(left, right)
 	);
 	const expectedAmount = targetCents / maxSelected;
 	const byExpectedAmount = [...work].sort(
 		(left, right) =>
 			Math.abs(left.amountCents - expectedAmount) -
 				Math.abs(right.amountCents - expectedAmount) ||
-			compareChronological(left, right)
+			comparePreferred(left, right)
 	);
 	const half = Math.floor(maxSelected / 2);
 	return [
 		byLargest.slice(0, maxSelected),
-		chronological.slice(0, maxSelected),
+		preferred.slice(0, maxSelected),
 		byExpectedAmount.slice(0, maxSelected),
 		uniqueCandidates(
-			[byLargest.slice(0, half), bySmallest, chronological],
+			[byLargest.slice(0, half), bySmallest, preferred],
 			maxSelected
 		),
 	];
@@ -439,20 +465,20 @@ const polishProposal = ({
 		[...items].sort(
 			(left, right) =>
 				left.amountCents - right.amountCents ||
-				compareChronological(left, right)
+				comparePreferred(left, right)
 		);
 	const byDescending = (items) =>
 		[...items].sort(
 			(left, right) =>
 				right.amountCents - left.amountCents ||
-				compareChronological(left, right)
+				comparePreferred(left, right)
 		);
 	const byDelta = (items) =>
 		[...items].sort(
 			(left, right) =>
 				Math.abs(left.amountCents - delta) -
 					Math.abs(right.amountCents - delta) ||
-				compareChronological(left, right)
+				comparePreferred(left, right)
 		);
 	const selectedLimit = Math.min(Math.floor(poolSize / 2), selected.length);
 	const unselectedLimit = Math.min(poolSize - selectedLimit, unselected.length);
@@ -557,9 +583,9 @@ const resultFromProposal = ({
 				? "under"
 				: "over",
 		exactMatch: differenceCents === 0,
-		// This guarantee concerns the closest amount only. Fewer rows and
-		// chronology/id are deterministic tie-breakers, but the bounded DP does
-		// not claim a global minimum-cardinality proof for every equal sum.
+		// This guarantee concerns the closest amount only. Business priority,
+		// fewer rows, date, and id are deterministic tie-breakers, but the bounded
+		// DP does not claim a global minimum-cardinality proof for every equal sum.
 		optimalityGuaranteed:
 			Boolean(optimalityGuaranteed) || differenceCents === 0,
 		resolutionCents,
@@ -619,6 +645,7 @@ const findClosestReconciliationMatch = (
 			422
 		);
 	}
+	const minimumPriorityRank = normalized[0].priorityRank;
 
 	let best = null;
 	for (const candidate of normalized) {
@@ -628,7 +655,10 @@ const findClosestReconciliationMatch = (
 			targetCents
 		);
 	}
-	if (best.matchedCents === targetCents) {
+	if (
+		best.matchedCents === targetCents &&
+		best.priorityRanks.every((rank) => rank === minimumPriorityRank)
+	) {
 		return resultFromProposal({
 			proposal: best,
 			targetCents,
@@ -641,7 +671,10 @@ const findClosestReconciliationMatch = (
 	}
 	const exactPair = exactTwoSumProposal(normalized, targetCents);
 	best = betterProposal(best, exactPair, targetCents);
-	if (best.matchedCents === targetCents) {
+	if (
+		best.matchedCents === targetCents &&
+		best.priorityRanks.every((rank) => rank === minimumPriorityRank)
+	) {
 		return resultFromProposal({
 			proposal: best,
 			targetCents,
