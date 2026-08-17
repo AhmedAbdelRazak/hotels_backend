@@ -382,6 +382,44 @@ test("reversed ranges are rejected while a single-day range is valid", () => {
 	);
 });
 
+test("admin paid rows and scorecards exclude only cancelled reservation statuses", async () => {
+	await withReservationReadMocks(async (observed) => {
+		const res = makeResponse();
+		await paidBreakdownReportAdmin(
+			{
+				query: { hotelId: HOTEL_ID },
+				profile: { role: 8000 },
+			},
+			res,
+		);
+
+		assert.equal(res.statusCode, 200);
+		for (const filter of [observed.countFilter, observed.aggregateMatch]) {
+			const exclusion = clausesFor(filter).find(
+				(clause) =>
+					clause?.reservation_status?.$not instanceof RegExp &&
+					clause?.state?.$not instanceof RegExp,
+			);
+			assert.ok(exclusion);
+			for (const cancelled of ["cancelled", "canceled", "cancelled_by_guest"]) {
+				assert.equal(exclusion.reservation_status.$not.test(cancelled), true);
+				assert.equal(exclusion.state.$not.test(cancelled), true);
+			}
+			for (const included of [
+				"checked_out",
+				"inhouse",
+				"no_show",
+				"confirmed",
+				"pending",
+				"rejected",
+			]) {
+				assert.equal(exclusion.reservation_status.$not.test(included), false);
+				assert.equal(exclusion.state.$not.test(included), false);
+			}
+		}
+	});
+});
+
 test("admin rows/count and scorecards share date scope while search stays row-only", async () => {
 	await withReservationReadMocks(async (observed) => {
 		const req = {
