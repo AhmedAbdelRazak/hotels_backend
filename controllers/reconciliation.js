@@ -19,6 +19,9 @@ const {
 	addHotelManagementReservationVisibilityToFilter,
 } = require("../services/reservationVisibility");
 const {
+	buildExcludeCancelledReservationsFilter,
+} = require("../services/reservationStatus");
+const {
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
 } = require("../services/paidBreakdownDateFilter");
@@ -57,7 +60,6 @@ const RECONCILIATION_REPORT_SORT = Object.freeze({
 	createdAt: 1,
 	_id: 1,
 });
-const CANCELLED_RESERVATION_STATUS = /cancel/i;
 const RECONCILIATION_REPORT_ROW_PROJECTION = [
 	"_id",
 	"__v",
@@ -94,11 +96,6 @@ const closestMatchCandidateProjection = (paymentBreakdownKey) =>
 		"state",
 		`paid_amount_breakdown.${paymentBreakdownKey}`,
 	].join(" ");
-
-const buildExcludeCancelledReservationsFilter = () => ({
-	reservation_status: { $not: CANCELLED_RESERVATION_STATUS },
-	state: { $not: CANCELLED_RESERVATION_STATUS },
-});
 
 const closestMatchReservationPriority = (status) => {
 	const normalized = String(status || "")

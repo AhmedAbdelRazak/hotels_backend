@@ -9,6 +9,7 @@ const ObjectId = mongoose.Types.ObjectId;
 const {
 	isPendingConfirmationReservation,
 	buildPendingConfirmationExclusionFilter,
+	buildExcludeCancelledReservationsFilter,
 	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
 const {
@@ -5053,6 +5054,7 @@ const buildPaidBreakdownFilter = ({
 	if (hotelId) {
 		filters.push({ hotelId: new ObjectId(hotelId) });
 	}
+	filters.push(buildExcludeCancelledReservationsFilter());
 	filters.push(buildExcludePendingOtaReviewFilter());
 	filters.push(
 		paymentBreakdownKeys
