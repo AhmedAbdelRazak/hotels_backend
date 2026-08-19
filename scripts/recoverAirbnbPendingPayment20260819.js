@@ -297,8 +297,8 @@ function assertExpectedReservationShape(document, { persisted = false } = {}) {
 	assert.equal(lower(document.customer_details?.confirmation_number2), TARGET.confirmationNumber);
 	assert.equal(buildOtaIdentityKey(TARGET.provider, TARGET.confirmationNumber), `airbnb:${TARGET.confirmationNumber}`);
 	if (persisted) assert.equal(lower(document.otaIdentityKey), `airbnb:${TARGET.confirmationNumber}`);
-	assert.equal(clean(document.state), "OTA Platform Review");
-	assert.equal(clean(document.reservation_status), "OTA Platform Review");
+	assert.equal(lower(document.state), "ota platform review");
+	assert.equal(lower(document.reservation_status), "ota platform review");
 	assert.equal(dateOnly(document.checkin_date), TARGET.checkinDate);
 	assert.equal(dateOnly(document.checkout_date), TARGET.checkoutDate);
 	assert.equal(Number(document.total_rooms), TARGET.roomCount);
@@ -406,7 +406,7 @@ function uniqueReservations(reservations = []) {
 
 async function loadReservationEvidence(dependencies = {}) {
 	const Model = dependencies.Reservations || Reservations;
-	const select = `${RECOVERY_RESERVATION_EVIDENCE_SELECT} adults children`;
+	const select = `${RECOVERY_RESERVATION_EVIDENCE_SELECT} adults children payment financeStatus`;
 	const [providerMatches, broadMatches, stayMatches] = await Promise.all([
 		Model.find(buildOtaConfirmationLookup(TARGET.confirmationNumber, TARGET.provider)).select(select).lean().exec(),
 		Model.find(broadConfirmationLookup(TARGET)).select(select).lean().exec(),
