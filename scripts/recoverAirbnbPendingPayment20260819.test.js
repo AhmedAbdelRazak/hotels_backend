@@ -122,5 +122,7 @@ test("Airbnb recovery uses the ordinary reconciler with proof and outbound-netwo
 	assert.match(source, /withOutboundHttpBlocked/);
 	assert.match(source, /lastMomentGuard/);
 	assert.match(source, /commercialAmountsInvented:\s*false/);
+	assert.match(source, /lower\(document\.state\)/);
+	assert.match(source, /lower\(document\.reservation_status\)/);
 	assert.equal(/require\(["'][^"']*hotelrunner/i.test(source), false);
 });
