@@ -10215,7 +10215,9 @@ function buildPickedRoomsType({ roomDetails, normalized, roomMatch = {} }) {
 		propertyCurrency,
 		...(otaCommercialEvidence ? { otaCommercialEvidence } : {}),
 	};
-	const totalAmountSar = verifiedPropertyGuestGrossSar(normalizedForPricing);
+	const totalAmountSar = isAuthenticatedAirbnbPaymentPendingReview(normalized)
+		? null
+		: verifiedPropertyGuestGrossSar(normalizedForPricing);
 	const totalPayoutSar = verifiedPropertyPayoutSar(normalizedForPricing);
 	const hasVerifiedGuestGross = totalAmountSar !== null;
 	const hasVerifiedPayout = totalPayoutSar !== null;
