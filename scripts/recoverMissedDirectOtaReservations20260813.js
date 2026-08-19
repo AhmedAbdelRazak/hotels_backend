@@ -597,7 +597,11 @@ async function freshNormalizedFromArchive(target, audit, dependencies = {}) {
 	if (target.provider === "agoda") {
 		assert.equal(clean(normalized.agodaPropertyId), target.propertyId, "Agoda Property ID changed.");
 		assert.equal(normalized.sourcePresence?.agodaPropertyId, true, "Agoda Property ID is no longer source-backed.");
-		assert.equal(normalized.agodaHomogeneousRoomQuantity, true, "Agoda room quantity is no longer homogeneous.");
+		assert.equal(
+			normalized.agodaHomogeneousRoomQuantity,
+			target.roomCount > 1,
+			"Agoda homogeneous room-quantity evidence changed."
+		);
 		assert.equal(money(normalized.totalAmountSar), target.grossSar, "Agoda whole-booking gross changed.");
 		assert.equal(money(normalized.totalPayoutSar), target.payoutSar, "Agoda whole-booking payout changed.");
 	} else {
@@ -743,11 +747,15 @@ function assertExpectedReservationShape(target, document, { persisted = false } 
 	assert.equal(clean(document.currency).toUpperCase(), "SAR", "Reservation property currency changed.");
 	assert.equal(dateOnly(document.checkin_date), target.checkinDate, "Reservation check-in changed.");
 	assert.equal(dateOnly(document.checkout_date), target.checkoutDate, "Reservation check-out changed.");
-	assert.equal(Number(document.total_rooms), 2, "Reservation room quantity changed.");
+	assert.equal(Number(document.total_rooms), target.roomCount, "Reservation room quantity changed.");
 	assert.equal(Number(document.total_guests), target.totalGuests, "Reservation aggregate guest count changed.");
 	assert.deepEqual(canonicalize(document.pickedRoomsType || []), canonicalize(document.pickedRoomsPricing || []), "pickedRoomsType and pickedRoomsPricing diverged.");
-	assert.equal(roomRows(document).length, 2, "Reservation must contain two separate room rows.");
-	assert.deepEqual(roomRows(document).map((room) => Number(room.count)), [1, 1], "Each recovered room row must have count one.");
+	assert.equal(roomRows(document).length, target.roomCount, "Reservation room-row quantity changed.");
+	assert.deepEqual(
+		roomRows(document).map((room) => Number(room.count)),
+		Array.from({ length: target.roomCount }, () => 1),
+		"Each recovered room row must have count one."
+	);
 	const expectedDates = generateDateRange(target.checkinDate, target.checkoutDate);
 	for (const room of roomRows(document)) {
 		assert.equal(id(room.hotelRoomConfigId), target.roomConfigId, "Room config mapping changed.");

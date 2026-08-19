@@ -6789,6 +6789,92 @@ test("direct Agoda MIME consensus accepts an exact sell rate split across a plai
 	);
 });
 
+test("current bilingual Agoda vouchers keep translated labels separate from one-room reservation facts", () => {
+	const cases = [
+		{
+			bookingId: "7042704614",
+			roomName: "Comfort Double - Non-Smoking (Comfort Double Room-)",
+			adults: 2,
+			gross: 69.58,
+			payout: 38.77,
+			commission: 9.74,
+			growth: 6.96,
+			tax: 3.24,
+		},
+		{
+			bookingId: "7042712859",
+			roomName: "5 Beds Room (Comfort 5 Beds Room )",
+			adults: 4,
+			gross: 84.72,
+			payout: 53.29,
+			commission: 11.86,
+			growth: 8.47,
+			tax: 3.05,
+		},
+	];
+
+	for (const fixture of cases) {
+		const email = {
+			from: '"agoda.com" <no-reply@agoda.com>',
+			subject: `Agoda Booking ID ${fixture.bookingId} - CONFIRMED Hotel Country: Saudi Arabia Check-in 20-Aug-2026 (20-08-2026) / Language_English`,
+			messageId: `agoda-bilingual-${fixture.bookingId}@mail.agoda.com`,
+			sourceReceivedAt: "2026-08-19T12:03:05.000Z",
+			senderAuthentication: {
+				authenticatedAligned: true,
+				dkimAlignedPass: true,
+				trustedProvider: "agoda",
+				fromDomain: "agoda.com",
+				method: "dkim",
+			},
+			text: [
+				`Booking ID رقم الحجز ${fixture.bookingId} Reservation Information بيانات الحجز`,
+				"مسبق الدفع Booking confirmation تأكيد حجز العقار Zyd Agyad (Property ID 90720772) City المدينة : Mecca",
+				"Customer First Name الاسم الأول للعميل SAFE Customer Last Name اسم العائلة للعميل GUEST Country of Residence بلد الإقامة Saudi Arabia Check-in تسجيل الدخول 20-Aug-2026 (20-08-2026) Check-out تسجيل الخروج 21-Aug-2026 (21-08-2026) Other Guests نزلاء آخرون [RmNo.1] Guest of SAFE GUEST",
+				`Room Type نوع الغرفة No. of Rooms عدد الغرف Occupancy الإشغال No. of Extra Bed عدد الأسرة الإضافية: ${fixture.roomName} 1 ${fixture.adults} Adults 0`,
+				"اسم خطة الأسعار: Non-Refundable ()",
+				"Benefits Included شامل الميزات Free WiFi Special Requests طلب خاص ( All special requests are subject to availability upon arrival. تخضع كافة الطلبات الخاصة لمدى توافرها عند الوصول. ) HighFloor, QuietRoom, AdditionalNotes:موقف سيارة.",
+				"Cancellation Policy سياسة الإلغاء",
+				`Room غرفة Extra Bed سرير إضافي Other غير ذلك From - To من - إلى Rates عروض الأسعار August 20, 2026 SAR ${fixture.payout.toFixed(2)} Reference sell rate (incl. taxes & fees) سعر البيع المرجعي (شامل الضرائب والرسوم) SAR ${fixture.gross.toFixed(2)} Compensation التعويض Commission العمولة SAR -${fixture.commission.toFixed(2)} Agoda Growth Program برنامج أجودا للنمو SAR -${fixture.growth.toFixed(2)} Tax on Commission ضريبة العمولة SAR -${fixture.tax.toFixed(2)}`,
+				`Net rate (incl. taxes & fees) السعر الصافي (شامل الضرائب والرسوم) SAR ${fixture.payout.toFixed(2)}`,
+				"Customer Notes ملاحظات النزيل بيانات العميل - الاسم: SAFE GUEST, الهاتف: 966 500000001",
+				"Attention Hotel Staff",
+			].join("\n"),
+		};
+		const normalized = extractNormalizedReservation(email);
+
+		assert.equal(normalized.confirmationNumber, fixture.bookingId);
+		assert.equal(normalized.hotelName, "Zyd Agyad");
+		assert.equal(normalized.guestName, "SAFE GUEST");
+		assert.equal(normalized.nationality, "Saudi Arabia");
+		assert.equal(normalized.roomName, fixture.roomName);
+		assert.equal(normalized.roomCount, 1);
+		assert.equal(normalized.adults, fixture.adults);
+		assert.equal(normalized.totalGuests, fixture.adults);
+		assert.equal(normalized.guestPhone, "966 500000001");
+		assert.equal(
+			normalized.guestNotes,
+			"HighFloor, QuietRoom, AdditionalNotes:موقف سيارة."
+		);
+		assert.equal(normalized.totalAmountSar, fixture.gross);
+		assert.equal(normalized.totalPayoutSar, fixture.payout);
+		assert.equal(normalized.paymentCollectionModel, "ota_collect");
+		assert.equal(normalized.otaCommissionSar, fixture.commission);
+		assert.deepEqual(
+			normalized.otaDeductionComponents.map((item) => item.amountSar),
+			[fixture.commission, fixture.growth, fixture.tax]
+		);
+		assert.equal(normalized.agodaPropertyId, "90720772");
+		assert.equal(normalized.ambiguousMultiRoomEvidence, false);
+		assert.equal(
+			normalized.requiresManualReview,
+			false,
+			JSON.stringify(normalized.manualReviewReasons)
+		);
+		assert.equal(normalized.blocksUnmappedReservationCreation, false);
+		assert.deepEqual(normalized.agodaMimeConflictFields, []);
+	}
+});
+
 test("production Agoda wrapped plain-text labels agree with unwrapped HTML and preserve two-room cents", () => {
 	const fixture = {
 		bookingId: "6900000467",
