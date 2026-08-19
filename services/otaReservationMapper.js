@@ -4258,6 +4258,16 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		payout.matched === true &&
 		Number.isFinite(Number(payout.amount)) &&
 		Number(payout.amount) >= 0;
+	// Airbnb sometimes confirms the stay before its payment processor has made
+	// any commercial amount available. Preserve only this explicit provider
+	// state; a generic amount-less confirmation must continue to fail closed.
+	const paymentProcessingPending = !!(
+		!hasGuestTotal &&
+		!hasPayout &&
+		/(?:^|\n)\s*Allow\s+time\s+for\s+payment\s+processing\.?(?:\s+Learn\s+more)?\s*(?:\n|$)/i.test(
+			String(text || "")
+		)
+	);
 	const guestTotalCurrency =
 		guestTotal.currency || (hasPayout ? payout.currency : "") || "";
 	const payoutCurrency = payout.currency || "";
@@ -4355,10 +4365,14 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		paymentCollectionModel: hasGuestTotal ? "ota_collect" : "unknown",
 		paymentInstructions: hasGuestTotal
 			? "Airbnb collected guest payment; host payout is provided by Airbnb."
-			: "",
+			: paymentProcessingPending
+				? "Airbnb payment processing is pending; commercial amounts are not yet available."
+				: "",
+		paymentProcessingPending,
 		sourcePresence: {
 			otaCommission:
 				hostServiceFee.matched === true && hostServiceFee.conflict !== true,
+			paymentProcessingPending,
 		},
 		hotelId: hotelMapping.hotelId || "",
 		hotelName: hotelMapping.hotelName || "",
@@ -8292,6 +8306,8 @@ function extractNormalizedReservation(email) {
 		airbnbListingId: airbnbFields.airbnbListingId || "",
 		airbnbListingTitle: airbnbFields.airbnbListingTitle || "",
 		airbnbMapping: airbnbFields.airbnbMapping || {},
+		airbnbPaymentProcessingPending:
+			airbnbFields.paymentProcessingPending === true,
 		roomName,
 		agodaPropertyId: agodaFields.agodaPropertyId || "",
 		agodaHomogeneousRoomQuantity:
@@ -8591,6 +8607,8 @@ function extractNormalizedReservation(email) {
 			comment: !!guestNotes,
 			guestNotes: !!guestNotes,
 			paymentInstructions: !!paymentInstructionField || !!agodaFields.paymentInstructions,
+			airbnbPaymentProcessingPending:
+				airbnbFields.sourcePresence?.paymentProcessingPending === true,
 			paymentCollectionModel: paymentCollectionModel !== "unknown",
 			vccCardLast4: !!cardLast4,
 			vccAmountToCharge: !!amountToChargeField && /\d/.test(amountToChargeField),
@@ -17310,6 +17328,23 @@ function hasAmbiguousMultiRoomEvidence(normalized = {}) {
 	);
 }
 
+function isAuthenticatedAirbnbPaymentPendingReview(normalized = {}) {
+	return !!(
+		normalizeOtaIdentityProvider(normalized.provider) === "airbnb" &&
+		normalizeComparable(normalized.intent) === "new reservation" &&
+		normalizeComparable(normalized.eventType) === "new" &&
+		normalized.sourceSenderTrusted === true &&
+		normalized.sourceSenderAuthenticated === true &&
+		normalized.airbnbPaymentProcessingPending === true &&
+		normalized.sourcePresence?.airbnbPaymentProcessingPending === true &&
+		!hasIncomingAmount(normalized) &&
+		(normalized.sourcePayoutAmount === null ||
+			normalized.sourcePayoutAmount === undefined) &&
+		(normalized.totalPayoutSar === null ||
+			normalized.totalPayoutSar === undefined)
+	);
+}
+
 function canCreateUnmappedOtaReviewReservation(
 	normalized = {},
 	allowCreate = false
@@ -17321,7 +17356,9 @@ function canCreateUnmappedOtaReviewReservation(
 	return requiredNewReservationMissing(normalized).every(
 		(item) =>
 			item === "source-backed hotel/property" ||
-			item === "single unambiguous room block"
+			item === "single unambiguous room block" ||
+			(item === "positive source-backed guest total" &&
+				isAuthenticatedAirbnbPaymentPendingReview(normalized))
 	);
 }
 
@@ -17340,11 +17377,34 @@ function applyExactResolvedHotelToUnmappedReview(
 				: []),
 		])
 	);
+	const airbnbMatchedValue = normalizeIntlComparable(
+		normalized.hotelIdMatchedValue || normalized.airbnbMapping?.matchedValue || ""
+	);
+	const exactSourceBackedAirbnbMapping = !!(
+		normalizeOtaIdentityProvider(normalized.provider) === "airbnb" &&
+		normalizeWhitespace(
+			normalized.hotelIdMatchStrength ||
+				normalized.airbnbMapping?.matchStrength ||
+				""
+		).toLowerCase() === "exact_alias" &&
+		normalizeId(normalized.hotelId) === normalizeId(hotelDetails?._id) &&
+		airbnbMatchedValue &&
+		[
+			normalized.airbnbListingTitle,
+			normalized.roomName,
+			...(Array.isArray(normalized.hotelNameAliases)
+				? normalized.hotelNameAliases
+				: []),
+		].some(
+			(value) => normalizeIntlComparable(value) === airbnbMatchedValue
+		)
+	);
 	if (
 		!hotelDetails?._id ||
 		!hotelDetails?.belongsTo ||
 		!hasSourceField(normalized, "hotelName") ||
-		normalizeId(exactSourceHotel?._id) !== normalizeId(hotelDetails._id) ||
+		(normalizeId(exactSourceHotel?._id) !== normalizeId(hotelDetails._id) &&
+			!exactSourceBackedAirbnbMapping) ||
 		hotelDetails.activateHotel !== true ||
 		hotelDetails.xHotelProActive === false
 	) {
@@ -17354,9 +17414,10 @@ function applyExactResolvedHotelToUnmappedReview(
 	const hotelName = normalizeWhitespace(
 		hotelDetails.hotelName || hotelDetails.hotelName_OtherLanguage || ""
 	);
-	const clientTotal = round2(
-		document?.adminPricing?.clientTotal || document.total_amount || 0
-	);
+	const rawClientTotal =
+		document?.adminPricing?.clientTotal ?? document.total_amount ?? null;
+	const clientTotal =
+		rawClientTotal === null ? null : round2(rawClientTotal);
 	document.hotelId = hotelDetails._id;
 	document.belongsTo = hotelDetails.belongsTo;
 	document.roomId = [];
@@ -17382,10 +17443,11 @@ function applyExactResolvedHotelToUnmappedReview(
 		mode: "ota_assignment_pending_pricing",
 		clientTotal,
 		rootTotal: 0,
-		platformMarginTotal: 0,
+		platformMarginTotal: clientTotal === null ? null : 0,
 		commissionAmount: 0,
 		sourceClientTotalSar: clientTotal,
-		sourceClientTotalSource: "ota_source_guest_total",
+		sourceClientTotalSource:
+			clientTotal === null ? "" : "ota_source_guest_total",
 		pricingReviewRequired: true,
 		hotelAssignmentRequired: false,
 		assignedHotelId: hotelId,
@@ -17394,7 +17456,7 @@ function applyExactResolvedHotelToUnmappedReview(
 	document.ota_financial_summary = {
 		...(document.ota_financial_summary || {}),
 		hotelVisibleAmount: 0,
-		platformProfit: 0,
+		platformProfit: clientTotal === null ? null : 0,
 		commissionAmount: 0,
 	};
 	document.supplierData = {
@@ -17927,6 +17989,8 @@ async function createUnmappedOtaReviewReservation({
 		pmsConfirmationNumber: document.confirmation_number,
 		otaCreatedFromEmail: normalized.source?.from !== "expedia-sync",
 		otaCreatedFromSync: normalized.source?.from === "expedia-sync",
+		otaAirbnbPaymentProcessingPending:
+			normalized.airbnbPaymentProcessingPending === true,
 		otaInboundEmailId: normalized.inboundEmailId || "",
 		otaCreatedAt: new Date(),
 	};
@@ -19251,6 +19315,11 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 		const hotelOnlyMissing =
 			missing.length === 1 &&
 			missing[0] === "source-backed hotel/property";
+		const pendingAirbnbAmountOnly = !!(
+			missing.length === 1 &&
+			missing[0] === "positive source-backed guest total" &&
+			isAuthenticatedAirbnbPaymentPendingReview(normalized)
+		);
 		logReconcile("create_unmapped.missing_non_identity_fields", {
 			confirmationNumber,
 			missing,
@@ -19261,14 +19330,18 @@ async function reconcileOtaReservationUnqueued(inputNormalized, options = {}) {
 			warnings: [
 				...warnings,
 				`Missing reservation field(s): ${missing.join(", ")}. ${
-					hotelOnlyMissing
+					pendingAirbnbAmountOnly
+						? "Saved in OTA platform review with every commercial amount left null while Airbnb payment processing is pending."
+						: hotelOnlyMissing
 						? "Saved as an unassigned OTA platform review pending hotel mapping."
 						: "Held in the inbound audit; no reservation was created."
 				}`,
 			],
 			errors,
-			allowCreate: hotelOnlyMissing,
-			resolvedHotel: hotelRunnerFirstFallbackResolvedHotel,
+			allowCreate: hotelOnlyMissing || pendingAirbnbAmountOnly,
+			resolvedHotel: pendingAirbnbAmountOnly
+				? independentlyResolvedIncomingHotel
+				: hotelRunnerFirstFallbackResolvedHotel,
 			hotelRunnerFirstFallbackBoundary,
 			beforeCreateInsert,
 		});
@@ -20201,12 +20274,18 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 		paymentSummary.sourceCurrency ||
 		normalized.currency ||
 		"";
-	const sourceAmount = Number(
-		normalized.sourceAmount ||
-			paymentSummary.sourceTotalGuestPaymentAmount ||
-			normalized.amount ||
-			0
-	);
+	const pendingAirbnbCommercialAmount =
+		isAuthenticatedAirbnbPaymentPendingReview(normalized);
+	const sourceAmount = pendingAirbnbCommercialAmount
+		? null
+		: Number(
+			normalized.sourceAmount ||
+				paymentSummary.sourceTotalGuestPaymentAmount ||
+				normalized.amount ||
+				0
+		);
+	const storedSourceAmount =
+		sourceAmount === null ? null : round2(sourceAmount);
 	const sourceExchangeRateToSar = Number(
 		normalized.sourceExchangeRateToSar ||
 			paymentSummary.exchangeRateToSar ||
@@ -20460,7 +20539,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			provider: normalized.provider,
 			providerLabel,
 			sourceCurrency,
-			sourceAmount: round2(sourceAmount),
+			sourceAmount: storedSourceAmount,
 			sourceExchangeRateToSar,
 			sourceExchangeRateSource,
 			exchangeRateToSar:
@@ -20493,7 +20572,7 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaCommissionAmount: otaCommissionSar,
 			otaDeductionBreakdown: normalized.otaDeductionComponents || [],
 			sourceCurrency,
-			sourceAmount: round2(sourceAmount),
+			sourceAmount: storedSourceAmount,
 			sourceExchangeRateToSar,
 			sourceExchangeRateSource,
 			paymentSummary,
@@ -20543,10 +20622,10 @@ function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
 			otaGuestNotes: guestComment,
 			otaNationality: normalized.nationality || "",
 			otaCurrency: normalized.currency || "",
-			otaAmount: sourceAmount || null,
+			otaAmount: sourceAmount,
 			otaAmountSar: totalAmountSar,
 			otaSourceCurrency: sourceCurrency,
-			otaSourceAmount: round2(sourceAmount),
+			otaSourceAmount: storedSourceAmount,
 			otaSourceAmountHint: normalized.sourceAmountHint || normalized.amountHint || "",
 			otaSourceExchangeRateToSar: sourceExchangeRateToSar,
 			otaSourceExchangeRateSource: sourceExchangeRateSource,
