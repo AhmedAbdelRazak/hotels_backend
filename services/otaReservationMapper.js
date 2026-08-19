@@ -1856,6 +1856,18 @@ function cleanAgodaValue(value = "") {
 	return cleanFieldValue(stripOtaMarkdownValue(value));
 }
 
+// Agoda's current bilingual voucher inserts an Arabic translation immediately
+// after several English labels (for example `Customer First Name الاسم ...`).
+// Keep the allowance deliberately narrow: only a bounded leading Arabic label
+// is removed, and only when the actual value that follows contains Latin text
+// or a digit. Fully Arabic guest/property values remain untouched.
+function cleanAgodaBilingualValue(value = "") {
+	return cleanAgodaValue(value).replace(
+		/^(?:[\p{Script=Arabic}\p{M}]+(?:\s+[\p{Script=Arabic}\p{M}]+){0,9})\s+(?=[A-Za-z0-9])/u,
+		""
+	);
+}
+
 function findCleanConfirmationField(text, labels = []) {
 	for (const label of labels) {
 		const candidate = cleanConfirmationCandidate(findField(text, [label]));
@@ -2749,12 +2761,24 @@ function extractAgodaValueBetweenLabels(
 			"i"
 		)
 	);
-	return cleanAgodaValue(match?.[1] || "");
+	return cleanAgodaBilingualValue(match?.[1] || "");
+}
+
+const AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN =
+	"(?:\\s*[\\p{Script=Arabic}\\p{M}][\\p{Script=Arabic}\\p{M}\\s()\\[\\]،,./&-]{0,159})?";
+const AGODA_ARABIC_HEADER_SUFFIX_PATTERN =
+	"(?:\\s+[\\p{Script=Arabic}\\p{M}]+){0,8}";
+
+function agodaRoomTableHeaderPattern() {
+	const translated = AGODA_ARABIC_HEADER_SUFFIX_PATTERN;
+	return new RegExp(
+		`\\bRoom\\s+Type\\b${translated}\\s+No\\.?\\s+of\\s+Rooms\\b${translated}\\s+Occupancy\\b${translated}(?:\\s+Children(?:'|’)?s\\s+age\\b${translated})?\\s+No\\.?\\s+of\\s+Extra\\s+Bed\\b${translated}\\s*[:：]?\\s*`,
+		"iu"
+	);
 }
 
 function analyzeCompactAgodaRoomRows(text = "") {
-	const header =
-		/\bRoom\s+Type\s+No\.?\s+of\s+Rooms\s+Occupancy(?:\s+Children(?:'|’)?s\s+age)?\s+No\.?\s+of\s+Extra\s+Bed\s+/i;
+	const header = agodaRoomTableHeaderPattern();
 	const headerMatch = header.exec(String(text || ""));
 	if (!headerMatch) return { rows: [], truncated: false, overflow: false };
 	const rowStart = headerMatch.index + headerMatch[0].length;
@@ -3000,10 +3024,7 @@ function analyzeAgodaRoomTable(email = {}, fallbackText = "") {
 	const parsed = representations.map((representation) => {
 		const compact = analyzeCompactAgodaRoomRows(representation);
 		return {
-			hasHeader:
-				/\bRoom\s+Type\s+No\.?\s+of\s+Rooms\s+Occupancy\b/i.test(
-					representation
-				),
+			hasHeader: agodaRoomTableHeaderPattern().test(representation),
 			rows: compact.rows,
 			truncated: compact.truncated,
 			overflow: compact.overflow,
@@ -3057,10 +3078,10 @@ function extractAgodaMoneyByLabel(text = "", label = "") {
 	const escapedLabel = labelTokens.map(escapeRegExp).join("\\s+");
 	const inline = String(text || "").match(
 		new RegExp(
-			`${escapedLabel}\\s*[:#-]?\\s*((?:(?:${MONEY_CURRENCY_CODES.join(
+			`${escapedLabel}${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s*[:#-]?\\s*((?:(?:${MONEY_CURRENCY_CODES.join(
 				"|"
 			)}|US\\$|\\$|﷼)\\s*)?[+-]?[0-9][0-9,.]*)`,
-			"i"
+			"iu"
 		)
 	);
 	const inlineMoney = parseMoney(inline?.[1] || "");
@@ -3096,8 +3117,10 @@ function extractAgodaMoneyByLabel(text = "", label = "") {
 
 function distinctAgodaReferenceSellRates(text = "") {
 	const rates = [];
-	const pattern =
-		/Reference\s+sell\s+rate\s*\(incl\.\s*taxes\s*&\s*fees\)\s*[:#-]?\s*((?:(?:SAR|SR|USD|US\$|\$|﷼)\s*)?[+-]?[0-9][0-9,.]*)/gi;
+	const pattern = new RegExp(
+		`Reference\\s+sell\\s+rate\\s*\\(incl\\.\\s*taxes\\s*&\\s*fees\\)${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s*[:#-]?\\s*((?:(?:SAR|SR|USD|US\\$|\\$|﷼)\\s*)?[+-]?[0-9][0-9,.]*)`,
+		"giu"
+	);
 	for (const match of String(text || "").matchAll(pattern)) {
 		const parsed = parseMoney(match[1] || "");
 		if (!parsed.amount) continue;
@@ -3118,8 +3141,8 @@ function extractAgodaDeductionByLabel(text = "", label = "") {
 		};
 	}
 	const pattern = new RegExp(
-		`${escapedLabel}\\s*[:#-]?\\s*(${moneyValuePattern()})`,
-		"gi"
+		`${escapedLabel}${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s*[:#-]?\\s*(${moneyValuePattern()})`,
+		"giu"
 	);
 	const matches = [];
 	for (const match of source.matchAll(pattern)) {
@@ -3195,16 +3218,16 @@ function extractAgodaHotelName(text = "") {
 	const fromBlock = nextAgodaValue(
 		lines,
 		bookingConfirmationIndex,
-		/^(prepaid|reservation information|\(?property id\b|city\b|marsha code\b)/i
+		/^(prepaid|reservation information|\(?property id\b|city\b|marsha code\b|تأكيد\s+حجز\s+العقار$)/iu
 	);
 	if (fromBlock) return fromBlock;
-	return cleanAgodaValue(
+	return cleanAgodaBilingualValue(
 		findFirstPattern(text, [
 			/\bBooking confirmation\s*\n\s*\*?([^\n*(]{2,120})\*?/i,
 			// Some plain-text deliveries flatten the heading and property name onto
 			// one line. Keep the capture bounded by the next canonical Agoda label;
 			// an unbounded tail would turn guest/stay fields into a false hotel fact.
-			/\bBooking confirmation\s+\*?(.{2,120}?)\*?(?=\s+(?:Customer\s+First\s+Name|Property\s+ID|City|Reservation\s+Information|PREPAID)\b|$)/i,
+			/\bBooking confirmation\s+\*?(.{2,120}?)\*?(?=\s+(?:Customer\s+First\s+Name|\(?Property\s+ID|City|Reservation\s+Information|PREPAID)\b|$)/i,
 		])
 	);
 }
@@ -3229,8 +3252,9 @@ function extractAgodaSpecialRequestsFromRepresentation(value = "") {
 	);
 	if (!match) return "";
 	const withoutBoilerplate = String(match[1] || "")
+		.replace(/^\s*طلب\s+خاص\s*/u, "")
 		.replace(
-			/^\s*\(\s*All\s+special\s+requests\s+are\s+subject\s+to\s+availability\s+upon\s+arrival\.?\s*\)\s*/i,
+			/^\s*\(\s*All\s+special\s+requests\s+are\s+subject\s+to\s+availability\s+upon\s+arrival\.?[\s\S]{0,500}?\)\s*/iu,
 			""
 		)
 		.trim();
@@ -3257,9 +3281,13 @@ function analyzeAgodaSpecialRequests(email = {}, fallbackText = "") {
 
 function extractAgodaGuestPhoneFromRepresentation(value = "") {
 	const source = String(value || "").replace(/\r/g, "");
-	const match = source.match(
-		/Customer\s+Info\s*-\s*Name\s*:[^,\n]{1,180},\s*Phone\s*:\s*([^\n]{0,80})/i
-	);
+	const match =
+		source.match(
+			/Customer\s+Info\s*-\s*Name\s*:[^,\n]{1,180},\s*Phone\s*:\s*([^\n]{0,80})/i
+		) ||
+		source.match(
+			/Customer\s+Notes\b[\s\S]{0,180}?-\s*الاسم\s*:[^,\n]{1,180},\s*الهاتف\s*:\s*([^\n]{0,80})/iu
+		);
 	if (!match) return "";
 	const candidate = normalizeWhitespace(match[1] || "")
 		.split(/\b(?:Attention\s+Hotel\s+Staff|Agoda\s+Hotline)\b/i)[0]
@@ -3344,8 +3372,14 @@ function extractAgodaMimeRepresentationFacts(value = "") {
 		confirmationNumber: cleanConfirmationCandidate(
 			firstNonEmpty(
 				findFirstPattern(source, [
-					/\bAgoda\s+Booking\s+ID\s+([A-Z0-9-]{5,})\b/i,
-					/\bBooking\s+ID\s*[:#-]?\s*([A-Z0-9-]{5,})\b/i,
+					new RegExp(
+						`\\bAgoda\\s+Booking\\s+ID${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s+([A-Z0-9-]{5,})\\b`,
+						"iu"
+					),
+					new RegExp(
+						`\\bBooking\\s+ID${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s*[:#-]?\\s*([A-Z0-9-]{5,})\\b`,
+						"iu"
+					),
 				]),
 				findNextLineAfterExactLabel(source, "Booking ID", 4)
 			)
@@ -3528,8 +3562,14 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		firstNonEmpty(
 			mimeFacts.confirmationNumber,
 			findFirstPattern(source, [
-				/\bAgoda\s+Booking\s+ID\s+([A-Z0-9-]{5,})\b/i,
-				/\bBooking\s+ID\s*\n\s*([A-Z0-9-]{5,})\b/i,
+				new RegExp(
+					`\\bAgoda\\s+Booking\\s+ID${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s+([A-Z0-9-]{5,})\\b`,
+					"iu"
+				),
+				new RegExp(
+					`\\bBooking\\s+ID${AGODA_OPTIONAL_ARABIC_LABEL_TRANSLATION_PATTERN}\\s*([A-Z0-9-]{5,})\\b`,
+					"iu"
+				),
 			]),
 			findNextLineAfterExactLabel(text, "Booking ID", 4)
 		)
@@ -3668,7 +3708,7 @@ function extractAgodaFields(email = {}, text = "", provider = "") {
 		)
 	);
 	const paymentCollectionModel =
-		/\b(prepaid|booked and payable by\s+agoda)\b/i.test(source)
+		/(?:\b(?:prepaid|booked and payable by\s+agoda)\b|مسبق\s+الدفع)/iu.test(source)
 			? "ota_collect"
 			: "unknown";
 
