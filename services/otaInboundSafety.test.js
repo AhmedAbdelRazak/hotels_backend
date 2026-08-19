@@ -7736,6 +7736,229 @@ test("Airbnb two-column stay dates and guest totals remain source-backed", () =>
 	);
 });
 
+const authenticatedAirbnbPaymentPendingEmail = ({
+	confirmationNumber = "HMPENDINGPAY1",
+} = {}) => ({
+	from: '"Airbnb" <automated@airbnb.com>',
+	to: "reservations@example.com",
+	subject: "Reservation confirmed - Pending Payment Guest arrives Aug 19",
+	messageId: `airbnb-${confirmationNumber}@mail.airbnb.com`,
+	sourceReceivedAt: "2026-08-19T16:52:54.000Z",
+	senderAuthentication: {
+		authenticatedAligned: true,
+		dkimAlignedPass: true,
+		trustedProvider: "airbnb",
+		method: "dkim",
+	},
+	text: [
+		"NEW BOOKING CONFIRMED! PENDING PAYMENT GUEST ARRIVES AUG 19.",
+		"Pending Payment Guest",
+		"Identity verified",
+		"COMFY QUAD FAMILY ROOM - AJYAD - FREE BUS TO HARAM",
+		"Room",
+		"Check-in Checkout",
+		"Wed, Aug 19 Fri, Aug 21",
+		"8:00 PM 11:00 AM",
+		"Guests",
+		"2 adults, 2 children",
+		"Confirmation code",
+		confirmationNumber,
+		"View earnings",
+		"Allow time for payment processing. Learn more",
+	].join("\n"),
+});
+
+test("authenticated Airbnb payment-processing confirmations preserve the stay with unknown commercial amounts", async () => {
+	const originalReservationFind = Reservations.find;
+	const originalReservationExists = Reservations.exists;
+	const originalReservationCreate = Reservations.create;
+	const originalHotelFind = HotelDetails.find;
+	const originalHotelFindOne = HotelDetails.findOne;
+	let createdDocument = null;
+	const hotel = {
+		_id: "6a40b6a1a6efe70450536038",
+		belongsTo: "68b74714fb50e159d48c714d",
+		hotelName: "zad ajyad",
+		activateHotel: true,
+		xHotelProActive: true,
+		roomCountDetails: [],
+	};
+	Reservations.find = () => ({
+		limit() {
+			return this;
+		},
+		select() {
+			return this;
+		},
+		async exec() {
+			return [];
+		},
+	});
+	Reservations.exists = async () => false;
+	Reservations.create = async (document) => {
+		createdDocument = document;
+		return { ...document, _id: "created-airbnb-payment-pending" };
+	};
+	HotelDetails.find = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return [hotel];
+		},
+	});
+	HotelDetails.findOne = () => ({
+		select() {
+			return this;
+		},
+		async lean() {
+			return hotel;
+		},
+	});
+
+	try {
+		const normalized = {
+			...extractNormalizedReservation(
+				authenticatedAirbnbPaymentPendingEmail()
+			),
+			inboundEmailId: "audit-airbnb-payment-pending",
+		};
+		assert.equal(normalized.provider, "airbnb");
+		assert.equal(normalized.hotelId, hotel._id);
+		assert.equal(normalized.checkinDate, "2026-08-19");
+		assert.equal(normalized.checkoutDate, "2026-08-21");
+		assert.equal(normalized.adults, 2);
+		assert.equal(normalized.children, 2);
+		assert.equal(normalized.totalGuests, 4);
+		assert.equal(normalized.airbnbPaymentProcessingPending, true);
+		assert.equal(
+			normalized.sourcePresence.airbnbPaymentProcessingPending,
+			true
+		);
+		assert.equal(normalized.sourcePresence.amount, false);
+		assert.equal(normalized.totalAmountSar, 0);
+		assert.equal(normalized.totalPayoutSar, null);
+		assert.deepEqual(requiredNewReservationMissing(normalized), [
+			"positive source-backed guest total",
+		]);
+		assert.equal(
+			canCreateUnmappedOtaReviewReservation(normalized, true),
+			true
+		);
+
+		const result = await reconcileOtaReservation(normalized);
+		assert.equal(result.status, "created");
+		assert.equal(result.actionTaken, "created_unmapped_ota_review");
+		assert.equal(String(result.hotelId), hotel._id);
+		assert.ok(createdDocument);
+		assert.equal(String(createdDocument.hotelId), hotel._id);
+		assert.equal(createdDocument.total_amount, null);
+		assert.equal(createdDocument.adminPricing.clientTotal, null);
+		assert.equal(createdDocument.adminPricing.sourceAmount, null);
+		assert.equal(createdDocument.adminPricing.commercialResolution, "unresolved");
+		assert.equal(createdDocument.adminPricing.platformMarginTotal, null);
+		assert.equal(createdDocument.ota_financial_summary.clientTotal, null);
+		assert.equal(createdDocument.ota_financial_summary.netAfterExpenses, null);
+		assert.equal(createdDocument.ota_financial_summary.platformProfit, null);
+		assert.equal(createdDocument.supplierData.otaAmount, null);
+		assert.equal(createdDocument.supplierData.otaAmountSar, null);
+		assert.equal(createdDocument.supplierData.otaSourceAmount, null);
+		assert.equal(createdDocument.supplierData.otaTotalPayoutSar, null);
+		assert.equal(
+			createdDocument.supplierData.otaAirbnbPaymentProcessingPending,
+			true
+		);
+		assert.equal(createdDocument.paid_amount, 0);
+		assert.equal(createdDocument.payment, "not paid");
+		assert.equal(createdDocument.financeStatus, "not paid");
+		assert.equal(createdDocument.total_rooms, 1);
+		assert.equal(createdDocument.pickedRoomsPricing.length, 1);
+		assert.equal(
+			createdDocument.pickedRoomsPricing[0].hotelRoomConfigId,
+			undefined
+		);
+		assert.deepEqual(
+			createdDocument.pickedRoomsPricing[0].pricingByDay.map((day) => ({
+				date: day.date,
+				clientPrice: day.clientPrice,
+				rootPrice: day.rootPrice,
+			})),
+			[
+				{ date: "2026-08-19", clientPrice: null, rootPrice: 0 },
+				{ date: "2026-08-20", clientPrice: null, rootPrice: 0 },
+			]
+		);
+		assert.equal(createdDocument.otaPlatformReview.status, "pending");
+		assert.equal(
+			createdDocument.otaPlatformReview.hotelAssignmentRequired,
+			false
+		);
+		assert.equal(createdDocument.otaPlatformReview.roomMappingStatus, "unreviewed");
+	} finally {
+		Reservations.find = originalReservationFind;
+		Reservations.exists = originalReservationExists;
+		Reservations.create = originalReservationCreate;
+		HotelDetails.find = originalHotelFind;
+		HotelDetails.findOne = originalHotelFindOne;
+	}
+});
+
+test("Airbnb amount-less creation remains blocked without every payment-pending trust gate", () => {
+	const trusted = extractNormalizedReservation(
+		authenticatedAirbnbPaymentPendingEmail({
+			confirmationNumber: "HMPENDINGPAY2",
+		})
+	);
+	const cases = [
+		{
+			...trusted,
+			sourceSenderAuthenticated: false,
+		},
+		{
+			...trusted,
+			sourceSenderTrusted: false,
+		},
+		{
+			...trusted,
+			airbnbPaymentProcessingPending: false,
+		},
+		{
+			...trusted,
+			sourcePresence: {
+				...trusted.sourcePresence,
+				airbnbPaymentProcessingPending: false,
+			},
+		},
+		{
+			...trusted,
+			guestName: "",
+			sourcePresence: { ...trusted.sourcePresence, guestName: false },
+		},
+	];
+	for (const normalized of cases) {
+		assert.equal(
+			canCreateUnmappedOtaReviewReservation(normalized, true),
+			false
+		);
+	}
+	const genericAmountLess = extractNormalizedReservation({
+		...authenticatedAirbnbPaymentPendingEmail({
+			confirmationNumber: "HMPENDINGPAY3",
+		}),
+		text: authenticatedAirbnbPaymentPendingEmail({
+			confirmationNumber: "HMPENDINGPAY3",
+		}).text.replace(
+			"Allow time for payment processing. Learn more",
+			"View details later."
+		),
+	});
+	assert.equal(genericAmountLess.airbnbPaymentProcessingPending, false);
+	assert.equal(
+		canCreateUnmappedOtaReviewReservation(genericAmountLess, true),
+		false
+	);
+});
+
 const authenticatedAirbnbCommercialEmail = ({
 	confirmationNumber = "HMSAFEMONEY1",
 	guestTotal = "100.00",
