@@ -6,8 +6,9 @@ const DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER = "all";
 const PAID_BREAKDOWN_UPDATED_AT_FIELD = "paid_amount_breakdown_updated_at";
 const PAID_BREAKDOWN_UPDATED_FILTERS = new Set([
 	DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER,
-	"yesterday",
 	"today",
+	"yesterday",
+	"last_7_days",
 ]);
 const PAID_BREAKDOWN_DATE_FIELDS = new Set([
 	"createdAt",
@@ -50,14 +51,14 @@ const normalizePaidBreakdownUpdatedFilter = (value) => {
 	if (!hasQueryValue(value)) return DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER;
 	if (typeof value !== "string") {
 		throw new PaidBreakdownDateFilterError(
-			"breakdownUpdated must be one of all, yesterday, or today"
+			"breakdownUpdated must be one of all, today, yesterday, or last_7_days"
 		);
 	}
 
 	const normalized = value.trim().toLowerCase();
 	if (!PAID_BREAKDOWN_UPDATED_FILTERS.has(normalized)) {
 		throw new PaidBreakdownDateFilterError(
-			"breakdownUpdated must be one of all, yesterday, or today"
+			"breakdownUpdated must be one of all, today, yesterday, or last_7_days"
 		);
 	}
 	return normalized;
@@ -91,11 +92,18 @@ const buildPaidBreakdownUpdatedFilter = (
 	const normalized = normalizePaidBreakdownUpdatedFilter(value);
 	if (normalized === DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER) return null;
 
-	const start = moment
+	const todayStart = moment
 		.tz(referenceDate, PAID_BREAKDOWN_REPORT_TIMEZONE)
 		.startOf("day");
-	if (normalized === "yesterday") start.subtract(1, "day");
-	const endExclusive = start.clone().add(1, "day");
+	const start = todayStart.clone();
+	let endExclusive = todayStart.clone().add(1, "day");
+	if (normalized === "yesterday") {
+		start.subtract(1, "day");
+		endExclusive = todayStart;
+	} else if (normalized === "last_7_days") {
+		// Seven Riyadh calendar days including today: today plus the prior six.
+		start.subtract(6, "days");
+	}
 	const range = {
 		$gte: start.toDate(),
 		$lt: endExclusive.toDate(),

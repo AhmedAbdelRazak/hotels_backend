@@ -176,6 +176,10 @@ test("payment breakdown update scope defaults to all and rejects unknown values"
 	assert.equal(normalizePaidBreakdownUpdatedFilter(" ALL "), "all");
 	assert.equal(normalizePaidBreakdownUpdatedFilter("Yesterday"), "yesterday");
 	assert.equal(normalizePaidBreakdownUpdatedFilter("today"), "today");
+	assert.equal(
+		normalizePaidBreakdownUpdatedFilter("LAST_7_DAYS"),
+		"last_7_days"
+	);
 	assert.equal(buildPaidBreakdownUpdatedFilter(), null);
 	for (const value of ["tomorrow", "$where", ["today"], { day: "today" }]) {
 		expectDateFilterError(
@@ -185,11 +189,15 @@ test("payment breakdown update scope defaults to all and rejects unknown values"
 	}
 });
 
-test("today and yesterday use Riyadh half-open days with a legacy audit fallback", () => {
+test("relative update scopes use Riyadh half-open days with a legacy audit fallback", () => {
 	const referenceDate = new Date("2026-08-20T18:30:00.000Z");
 	const today = buildPaidBreakdownUpdatedFilter("today", referenceDate);
 	const yesterday = buildPaidBreakdownUpdatedFilter(
 		"yesterday",
+		referenceDate
+	);
+	const lastSevenDays = buildPaidBreakdownUpdatedFilter(
+		"last_7_days",
 		referenceDate
 	);
 
@@ -205,6 +213,16 @@ test("today and yesterday use Riyadh half-open days with a legacy audit fallback
 	assert.equal(
 		yesterdayRange.$lt.toISOString(),
 		"2026-08-19T21:00:00.000Z"
+	);
+	const lastSevenDaysRange =
+		lastSevenDays.$or[0].paid_amount_breakdown_updated_at;
+	assert.equal(
+		lastSevenDaysRange.$gte.toISOString(),
+		"2026-08-13T21:00:00.000Z"
+	);
+	assert.equal(
+		lastSevenDaysRange.$lt.toISOString(),
+		"2026-08-20T21:00:00.000Z"
 	);
 
 	const legacyFallback = today.$or[1];
