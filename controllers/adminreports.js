@@ -25,6 +25,8 @@ const {
 const {
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
+	buildPaidBreakdownUpdatedFilter,
+	normalizePaidBreakdownUpdatedFilter,
 } = require("../services/paidBreakdownDateFilter");
 const {
 	buildExecutiveDateWindow,
@@ -5047,6 +5049,7 @@ const buildPaidBreakdownFilter = ({
 	dateFrom,
 	dateTo,
 	dateRanges,
+	breakdownUpdated,
 	paymentBreakdownKeys,
 	reconciliationStatus = "all",
 }) => {
@@ -5068,6 +5071,9 @@ const buildPaidBreakdownFilter = ({
 		dateRanges,
 	});
 	if (dateFilter) filters.push(dateFilter);
+	const breakdownUpdatedFilter =
+		buildPaidBreakdownUpdatedFilter(breakdownUpdated);
+	if (breakdownUpdatedFilter) filters.push(breakdownUpdatedFilter);
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
 	const reconciliationFilter = buildReconciliationStatusFilter(
@@ -5262,11 +5268,15 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 		const reconciliationStatus = normalizeReconciliationStatus(
 			req.query.reconciliationStatus
 		);
+		const breakdownUpdated = normalizePaidBreakdownUpdatedFilter(
+			req.query.breakdownUpdated
+		);
 		const dateFilterOptions = {
 			dateBy: req.query.dateBy,
 			dateFrom: req.query.dateFrom,
 			dateTo: req.query.dateTo,
 			dateRanges: req.query.dateRanges,
+			breakdownUpdated,
 		};
 		const totalMode = normalizeAdminReportFinancialMode(req.query.totalMode);
 		const includeScorecards =
@@ -5371,6 +5381,7 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 			scorecards,
 			selectedPaymentBreakdownKeys,
 			reconciliationStatus,
+			breakdownUpdated,
 			reconciliationSummary: scorecards?.reconciliation || null,
 		});
 	} catch (err) {

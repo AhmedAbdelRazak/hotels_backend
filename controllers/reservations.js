@@ -475,7 +475,8 @@ const PAYMENT_BREAKDOWN_NUMERIC_KEYS = [
 
 const buildNarrowPaidBreakdownPersistenceUpdate = (
 	updates = {},
-	reservation = {}
+	reservation = {},
+	breakdownUpdatedAt = new Date()
 ) => {
 	if (
 		!Object.prototype.hasOwnProperty.call(updates, "paid_amount_breakdown") ||
@@ -496,6 +497,7 @@ const buildNarrowPaidBreakdownPersistenceUpdate = (
 			? reservation.paid_amount_breakdown.toObject()
 			: reservation?.paid_amount_breakdown || {};
 	const persistenceUpdate = { ...updates };
+	let breakdownChanged = false;
 
 	delete persistenceUpdate.paid_amount_breakdown;
 	Object.keys(persistenceUpdate).forEach((field) => {
@@ -508,6 +510,7 @@ const buildNarrowPaidBreakdownPersistenceUpdate = (
 		const nextValue = n2(requestedBreakdown[key]);
 		if (nextValue !== n2(existingBreakdown[key])) {
 			persistenceUpdate[`paid_amount_breakdown.${key}`] = nextValue;
+			breakdownChanged = true;
 		}
 	}
 
@@ -521,6 +524,16 @@ const buildNarrowPaidBreakdownPersistenceUpdate = (
 			: "";
 	if (nextComment !== existingComment) {
 		persistenceUpdate["paid_amount_breakdown.payment_comments"] = nextComment;
+		breakdownChanged = true;
+	}
+
+	if (breakdownChanged) {
+		const timestamp = new Date(breakdownUpdatedAt);
+		persistenceUpdate.paid_amount_breakdown_updated_at = Number.isNaN(
+			timestamp.valueOf()
+		)
+			? new Date()
+			: timestamp;
 	}
 
 	// A payment-editor payload always recomputes paid_amount from the normalized
@@ -903,12 +916,16 @@ const TRACKED_RESERVATION_FIELDS = [
 ];
 
 const PAYMENT_RECONCILIATION_FIELD = "payment_reconciliation";
+const PAID_BREAKDOWN_UPDATED_AT_FIELD =
+	"paid_amount_breakdown_updated_at";
 
 const stripClientSuppliedPaymentReconciliation = (payload = {}) => {
 	Object.keys(payload || {}).forEach((field) => {
 		if (
 			field === PAYMENT_RECONCILIATION_FIELD ||
-			field.startsWith(`${PAYMENT_RECONCILIATION_FIELD}.`)
+			field.startsWith(`${PAYMENT_RECONCILIATION_FIELD}.`) ||
+			field === PAID_BREAKDOWN_UPDATED_AT_FIELD ||
+			field.startsWith(`${PAID_BREAKDOWN_UPDATED_AT_FIELD}.`)
 		) {
 			delete payload[field];
 		}
@@ -925,6 +942,7 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"__v",
 	"createdAt",
 	"updatedAt",
+	PAID_BREAKDOWN_UPDATED_AT_FIELD,
 	"adminLastUpdatedAt",
 	"adminLastUpdatedBy",
 	"adminChangeLog",
@@ -9309,7 +9327,10 @@ exports.updateReservation = async (req, res) => {
 		const persistenceUpdatePayload =
 			buildNarrowPaidBreakdownPersistenceUpdate(
 				updatePayload,
-				existingReservation
+				existingReservation,
+				auditEntries.find(
+					(entry) => entry.field === "paid_amount_breakdown"
+				)?.at
 			);
 		const updateOperation = { $set: persistenceUpdatePayload };
 

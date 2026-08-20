@@ -40,6 +40,7 @@ const createResponse = () => ({
 
 const forgedReconciliationPayload = () => ({
 	comment: "this legitimate field must survive",
+	paid_amount_breakdown_updated_at: "2099-01-01T00:00:00.000Z",
 	payment_reconciliation: {
 		status: "reconciled",
 		reconciledBy: "forged-actor",
@@ -100,6 +101,7 @@ test("public create strips client-supplied reconciliation before database work",
 	assert.equal(databaseLookupStarted, true);
 	assert.equal(res.statusCode, 400);
 	assert.equal(req.body.payment_reconciliation, undefined);
+	assert.equal(req.body.paid_amount_breakdown_updated_at, undefined);
 	assert.equal(req.body["payment_reconciliation.status"], undefined);
 	assert.equal(
 		req.body["payment_reconciliation.entries.0.status"],
@@ -184,6 +186,8 @@ const existingPaidReservation = () => ({
 	},
 });
 
+const BREAKDOWN_UPDATED_AT = new Date("2026-08-20T17:16:51.014Z");
+
 const fullPaymentEditorPayload = (overrides = {}) => {
 	const existing = existingPaidReservation();
 	return {
@@ -202,6 +206,7 @@ test("generic payment-editor no-op emits no breakdown mutation", () => {
 		reservationsController.__test.buildNarrowPaidBreakdownPersistenceUpdate(
 			fullPaymentEditorPayload(),
 			existing,
+			BREAKDOWN_UPDATED_AT,
 		);
 
 	assert.deepEqual(narrowed, { unrelated_field: "must survive" });
@@ -214,11 +219,13 @@ test("generic payment-editor comment-only save preserves reconciliation", () => 
 		reservationsController.__test.buildNarrowPaidBreakdownPersistenceUpdate(
 			fullPaymentEditorPayload({ payment_comments: "receipt checked" }),
 			existing,
+			BREAKDOWN_UPDATED_AT,
 		);
 
 	assert.deepEqual(narrowed, {
 		unrelated_field: "must survive",
 		"paid_amount_breakdown.payment_comments": "receipt checked",
+		paid_amount_breakdown_updated_at: BREAKDOWN_UPDATED_AT,
 	});
 	assert.strictEqual(withPaymentReconciliationInvalidation(narrowed), narrowed);
 });
@@ -232,18 +239,21 @@ test("generic payment-editor monetary save invalidates only the changed category
 				paid_amount: 185,
 			},
 			existing,
+			BREAKDOWN_UPDATED_AT,
 		);
 
 	assert.deepEqual(narrowed, {
 		unrelated_field: "must survive",
 		paid_amount: 185,
 		"paid_amount_breakdown.paid_at_hotel_card": 35,
+		paid_amount_breakdown_updated_at: BREAKDOWN_UPDATED_AT,
 	});
 	const invalidated = withPaymentReconciliationInvalidation(narrowed);
 	assert.deepEqual(invalidated.$set, {
 		unrelated_field: "must survive",
 		paid_amount: 185,
 		"paid_amount_breakdown.paid_at_hotel_card": 35,
+		paid_amount_breakdown_updated_at: BREAKDOWN_UPDATED_AT,
 	});
 	assert.deepEqual(invalidated.$unset, {
 		"payment_reconciliation.breakdown.paid_at_hotel_card": 1,

@@ -6,7 +6,9 @@ const {
 	MAX_PAID_BREAKDOWN_DATE_RANGES,
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
+	buildPaidBreakdownUpdatedFilter,
 	normalizePaidBreakdownDateField,
+	normalizePaidBreakdownUpdatedFilter,
 	parsePaidBreakdownDateOnly,
 	parsePaidBreakdownDateRanges,
 	serializePaidBreakdownDateRanges,
@@ -58,6 +60,13 @@ const dateRangeClausesFor = (filter, field) =>
 		Array.isArray(clause?.$or)
 			? clause.$or.filter((condition) => condition?.[field])
 			: [],
+	);
+
+const breakdownUpdatedClauseFor = (filter) =>
+	clausesFor(filter).find((clause) =>
+		clause?.$or?.some(
+			(condition) => condition?.paid_amount_breakdown_updated_at
+		)
 	);
 
 const withReservationReadMocks = async (
@@ -160,6 +169,51 @@ test("an absent range leaves the existing paid report unfiltered by date", () =>
 		buildPaidBreakdownDateFilter({ dateBy: "checkout_date" }),
 		null,
 	);
+});
+
+test("payment breakdown update scope defaults to all and rejects unknown values", () => {
+	assert.equal(normalizePaidBreakdownUpdatedFilter(), "all");
+	assert.equal(normalizePaidBreakdownUpdatedFilter(" ALL "), "all");
+	assert.equal(normalizePaidBreakdownUpdatedFilter("Yesterday"), "yesterday");
+	assert.equal(normalizePaidBreakdownUpdatedFilter("today"), "today");
+	assert.equal(buildPaidBreakdownUpdatedFilter(), null);
+	for (const value of ["tomorrow", "$where", ["today"], { day: "today" }]) {
+		expectDateFilterError(
+			() => normalizePaidBreakdownUpdatedFilter(value),
+			/breakdownUpdated must be one of/
+		);
+	}
+});
+
+test("today and yesterday use Riyadh half-open days with a legacy audit fallback", () => {
+	const referenceDate = new Date("2026-08-20T18:30:00.000Z");
+	const today = buildPaidBreakdownUpdatedFilter("today", referenceDate);
+	const yesterday = buildPaidBreakdownUpdatedFilter(
+		"yesterday",
+		referenceDate
+	);
+
+	const todayRange = today.$or[0].paid_amount_breakdown_updated_at;
+	assert.equal(todayRange.$gte.toISOString(), "2026-08-19T21:00:00.000Z");
+	assert.equal(todayRange.$lt.toISOString(), "2026-08-20T21:00:00.000Z");
+	const yesterdayRange =
+		yesterday.$or[0].paid_amount_breakdown_updated_at;
+	assert.equal(
+		yesterdayRange.$gte.toISOString(),
+		"2026-08-18T21:00:00.000Z"
+	);
+	assert.equal(
+		yesterdayRange.$lt.toISOString(),
+		"2026-08-19T21:00:00.000Z"
+	);
+
+	const legacyFallback = today.$or[1];
+	assert.deepEqual(legacyFallback.$and[0], {
+		paid_amount_breakdown_updated_at: null,
+	});
+	const expressionText = JSON.stringify(legacyFallback.$and[1]);
+	assert.match(expressionText, /adminChangeLog/);
+	assert.match(expressionText, /paid_amount_breakdown/);
 });
 
 test("Riyadh date boundaries are half-open and inclusive of the selected days", () => {
@@ -429,6 +483,7 @@ test("admin rows/count and scorecards share date scope while search stays row-on
 				dateBy: "checkout_date",
 				dateFrom: "2026-07-14",
 				dateTo: "2026-07-15",
+				breakdownUpdated: "today",
 			},
 			profile: { role: 8000 },
 		};
@@ -458,6 +513,11 @@ test("admin rows/count and scorecards share date scope while search stays row-on
 		assert.ok(rowDateClause);
 		assert.ok(scorecardDateClause);
 		assert.deepEqual(rowDateClause, scorecardDateClause);
+		assert.deepEqual(
+			breakdownUpdatedClauseFor(observed.countFilter),
+			breakdownUpdatedClauseFor(observed.aggregateMatch)
+		);
+		assert.equal(res.payload.breakdownUpdated, "today");
 		assert.equal(hasSearchClause(observed.countFilter), true);
 		assert.equal(hasSearchClause(observed.aggregateMatch), false);
 	});
@@ -559,6 +619,10 @@ test("invalid admin date queries return 400 before reservation reads", async () 
 				hotelId: HOTEL_ID,
 				dateBy: "constructor.prototype",
 			},
+			{
+				hotelId: HOTEL_ID,
+				breakdownUpdated: "tomorrow",
+			},
 		]) {
 			const res = makeResponse();
 			await paidBreakdownReportAdmin(
@@ -566,7 +630,10 @@ test("invalid admin date queries return 400 before reservation reads", async () 
 				res,
 			);
 			assert.equal(res.statusCode, 400);
-			assert.match(res.payload?.error || "", /dateBy|dateFrom/);
+			assert.match(
+				res.payload?.error || "",
+				/dateBy|dateFrom|breakdownUpdated/
+			);
 		}
 		assert.equal(readCount, 0);
 	} finally {

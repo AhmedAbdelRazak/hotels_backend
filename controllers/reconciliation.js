@@ -24,6 +24,8 @@ const {
 const {
 	PaidBreakdownDateFilterError,
 	buildPaidBreakdownDateFilter,
+	buildPaidBreakdownUpdatedFilter,
+	normalizePaidBreakdownUpdatedFilter,
 } = require("../services/paidBreakdownDateFilter");
 const {
 	attachAdminReservationRoomDetails,
@@ -177,6 +179,7 @@ const buildReportFilter = ({
 	dateFrom,
 	dateTo,
 	dateRanges,
+	breakdownUpdated,
 }) => {
 	const filters = [
 		{ hotelId: new ObjectId(hotelId) },
@@ -191,6 +194,9 @@ const buildReportFilter = ({
 		dateRanges,
 	});
 	if (dateFilter) filters.push(dateFilter);
+	const breakdownUpdatedFilter =
+		buildPaidBreakdownUpdatedFilter(breakdownUpdated);
+	if (breakdownUpdatedFilter) filters.push(breakdownUpdatedFilter);
 	const searchFilter = buildSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
 	const statusFilter = buildReconciliationStatusFilter(
@@ -471,12 +477,16 @@ exports.reconciliationReport = async (req, res) => {
 			String(req.query?.includeScorecards || "")
 				.trim()
 				.toLowerCase() !== "false";
+		const breakdownUpdated = normalizePaidBreakdownUpdatedFilter(
+			req.query?.breakdownUpdated
+		);
 		const { page, limit, skip } = parsePagination(req.query);
 		const dateOptions = {
 			dateBy: req.query?.dateBy,
 			dateFrom: req.query?.dateFrom,
 			dateTo: req.query?.dateTo,
 			dateRanges: req.query?.dateRanges,
+			breakdownUpdated,
 		};
 		const scorecardFilter = buildReportFilter({
 			hotelId,
@@ -524,6 +534,7 @@ exports.reconciliationReport = async (req, res) => {
 			limit,
 			selectedPaymentBreakdownKeys: selectedKeys,
 			reconciliationStatus,
+			breakdownUpdated,
 			scorecards,
 		});
 	} catch (error) {
@@ -1400,6 +1411,7 @@ exports.closestReconciliationMatch = async (req, res) => {
 			dateBy: body.dateBy,
 			dateFrom: body.dateFrom,
 			dateTo: body.dateTo,
+			breakdownUpdated: body.breakdownUpdated,
 			dateRanges:
 				Array.isArray(body.dateRanges) && body.dateRanges.length === 0
 					? undefined
