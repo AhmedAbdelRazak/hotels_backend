@@ -133,6 +133,7 @@ test("Airbnb guest conversation subjects are terminal but confirmations are not"
 	for (const subject of [
 		"Sahad wants to change their reservation",
 		"Inquiry for Double Room near Haram",
+		"Same-day inquiry for Double Room near Haram for today through August 21, 2026",
 		"Fatima sent you a message",
 	]) {
 		const classification = classifyOtaGuestCommunication({
@@ -149,6 +150,52 @@ test("Airbnb guest conversation subjects are terminal but confirmations are not"
 		text: "Your guest Jane sent you a message after booking.",
 	});
 	assert.equal(confirmation.matched, false);
+});
+
+test("authenticated Airbnb same-day inquiry terminates before reservation extraction and alerting", async () => {
+	const email = {
+		from: '"Airbnb" <automated@airbnb.com>',
+		subject:
+			"Same-day inquiry for Comfy Family 6 Beds Room - AJYAD Hotel - Free Bus. for today through August 21, 2026",
+		text: [
+			"RESPOND TO MOHAMMED'S INQUIRY",
+			"If check-in is late tonight after 12:00, when would check-out be tomorrow?",
+			"Pre-approve / Decline",
+			"Check-in Checkout",
+			"Thu, Aug 20 Fri, Aug 21",
+			"YOU HAVE 24 HOURS TO RESPOND",
+		].join("\n"),
+		senderAuthentication: {
+			authenticatedAligned: true,
+			trustedProvider: "airbnb",
+			method: "dkim",
+		},
+	};
+
+	const classification = classifyOtaGuestCommunication(email);
+	assert.equal(classification.matched, true);
+	assert.equal(classification.provider, "airbnb");
+	assert.equal(classification.intent, "not_reservation");
+	assert.equal(classification.reason, "airbnb_guest_message");
+	assert.equal(classification.suppressForwarding, true);
+	assert.deepEqual(classification.evidence, ["message_subject"]);
+
+	const orchestration = await orchestrateInboundReservationEmail(email);
+	assert.equal(orchestration.normalized.intent, "not_reservation");
+	assert.equal(orchestration.normalized.terminalNonReservation, true);
+	assert.equal(orchestration.normalized.confirmationNumber, "");
+	assert.deepEqual(orchestration.normalized.warnings, []);
+	assert.equal(orchestration.decision.usedAI, false);
+	assert.equal(orchestration.decision.skipReason, "airbnb_guest_message");
+
+	const forwardDecision = buildImportantEmailForwardDecision({
+		email,
+		normalized: orchestration.normalized,
+		reconciliation: { status: "not_reservation" },
+	});
+	assert.equal(forwardDecision.shouldForward, false);
+	assert.equal(forwardDecision.suppressed, true);
+	assert.equal(forwardDecision.reason, "airbnb_guest_message");
 });
 
 test("authenticated Airbnb Reservation-for thread replies terminate before AI without hiding lifecycle mail", async () => {
