@@ -231,7 +231,7 @@ const classifyOtaGuestCommunication = (email = {}, context = {}) => {
 		});
 	}
 	const airbnbMessageSubject = subjectCandidates.some((subject) =>
-		/^(?:inquiry for\b|(?:you have a )?(?:new )?(?:message|inquiry) from\b|.{1,100}\s+(?:sent|wrote) (?:you )?(?:a )?message\b|.{1,100}\s+wants to change (?:his|her|their|the) reservation\b)/i.test(
+		/^(?:(?:same-day\s+)?inquiry for\b|(?:you have a )?(?:new )?(?:message|inquiry) from\b|.{1,100}\s+(?:sent|wrote) (?:you )?(?:a )?message\b|.{1,100}\s+wants to change (?:his|her|their|the) reservation\b)/i.test(
 			subject
 		)
 	);
