@@ -1102,13 +1102,13 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 						paymentBreakdownKeys:
 							"paid_at_hotel_cash,paid_at_hotel_card",
 						searchQuery: "guest",
-						breakdownUpdated: "today",
+						breakdownUpdated: "last_7_days",
 					},
 				},
 				res
 			);
 			assert.equal(res.statusCode, 200);
-			assert.equal(res.payload.breakdownUpdated, "today");
+			assert.equal(res.payload.breakdownUpdated, "last_7_days");
 			assert.equal(res.payload.totalDocuments, 1);
 			assert.equal(res.payload.data[0].ota_total_amount, 300);
 			assert.equal(
