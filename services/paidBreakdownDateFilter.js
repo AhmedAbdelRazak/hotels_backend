@@ -2,6 +2,13 @@ const moment = require("moment-timezone");
 
 const PAID_BREAKDOWN_REPORT_TIMEZONE = "Asia/Riyadh";
 const DEFAULT_PAID_BREAKDOWN_DATE_FIELD = "createdAt";
+const DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER = "all";
+const PAID_BREAKDOWN_UPDATED_AT_FIELD = "paid_amount_breakdown_updated_at";
+const PAID_BREAKDOWN_UPDATED_FILTERS = new Set([
+	DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER,
+	"yesterday",
+	"today",
+]);
 const PAID_BREAKDOWN_DATE_FIELDS = new Set([
 	"createdAt",
 	"checkin_date",
@@ -37,6 +44,91 @@ const normalizePaidBreakdownDateField = (value) => {
 		);
 	}
 	return value;
+};
+
+const normalizePaidBreakdownUpdatedFilter = (value) => {
+	if (!hasQueryValue(value)) return DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER;
+	if (typeof value !== "string") {
+		throw new PaidBreakdownDateFilterError(
+			"breakdownUpdated must be one of all, yesterday, or today"
+		);
+	}
+
+	const normalized = value.trim().toLowerCase();
+	if (!PAID_BREAKDOWN_UPDATED_FILTERS.has(normalized)) {
+		throw new PaidBreakdownDateFilterError(
+			"breakdownUpdated must be one of all, yesterday, or today"
+		);
+	}
+	return normalized;
+};
+
+const latestLegacyPaidBreakdownAuditAtExpression = () => ({
+	$arrayElemAt: [
+		{
+			$map: {
+				input: {
+					$filter: {
+						input: { $ifNull: ["$adminChangeLog", []] },
+						as: "change",
+						cond: {
+							$eq: ["$$change.field", "paid_amount_breakdown"],
+						},
+					},
+				},
+				as: "change",
+				in: "$$change.at",
+			},
+		},
+		-1,
+	],
+});
+
+const buildPaidBreakdownUpdatedFilter = (
+	value,
+	referenceDate = new Date()
+) => {
+	const normalized = normalizePaidBreakdownUpdatedFilter(value);
+	if (normalized === DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER) return null;
+
+	const start = moment
+		.tz(referenceDate, PAID_BREAKDOWN_REPORT_TIMEZONE)
+		.startOf("day");
+	if (normalized === "yesterday") start.subtract(1, "day");
+	const endExclusive = start.clone().add(1, "day");
+	const range = {
+		$gte: start.toDate(),
+		$lt: endExclusive.toDate(),
+	};
+
+	// New saves use the dedicated server-managed timestamp. Existing records use
+	// the append-only admin audit entry only while that timestamp is absent.
+	return {
+		$or: [
+			{ [PAID_BREAKDOWN_UPDATED_AT_FIELD]: range },
+			{
+				$and: [
+					{ [PAID_BREAKDOWN_UPDATED_AT_FIELD]: null },
+					{
+						$expr: {
+							$let: {
+								vars: {
+									updatedAt:
+										latestLegacyPaidBreakdownAuditAtExpression(),
+								},
+								in: {
+									$and: [
+										{ $gte: ["$$updatedAt", range.$gte] },
+										{ $lt: ["$$updatedAt", range.$lt] },
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		],
+	};
 };
 
 const parsePaidBreakdownDateOnly = (value, parameterName) => {
@@ -211,11 +303,15 @@ const buildPaidBreakdownDateFilter = ({
 module.exports = {
 	PAID_BREAKDOWN_REPORT_TIMEZONE,
 	DEFAULT_PAID_BREAKDOWN_DATE_FIELD,
+	DEFAULT_PAID_BREAKDOWN_UPDATED_FILTER,
+	PAID_BREAKDOWN_UPDATED_AT_FIELD,
 	MAX_PAID_BREAKDOWN_DATE_RANGES,
 	PaidBreakdownDateFilterError,
 	normalizePaidBreakdownDateField,
+	normalizePaidBreakdownUpdatedFilter,
 	parsePaidBreakdownDateOnly,
 	parsePaidBreakdownDateRanges,
 	serializePaidBreakdownDateRanges,
 	buildPaidBreakdownDateFilter,
+	buildPaidBreakdownUpdatedFilter,
 };

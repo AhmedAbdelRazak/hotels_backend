@@ -351,6 +351,13 @@ const reservationsSchema = new mongoose.Schema(
 				payment_comments: "",
 			},
 		},
+		// Changed only by the authenticated payment-breakdown editor when an
+		// amount or its comment actually changes. This is intentionally separate
+		// from the reservation's general updatedAt timestamp.
+		paid_amount_breakdown_updated_at: {
+			type: Date,
+			default: null,
+		},
 
 		// Server-managed, per-payment-category payout reconciliation snapshots.
 		// An absent category (including on legacy reservations) means waiting.

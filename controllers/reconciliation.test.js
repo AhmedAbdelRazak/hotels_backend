@@ -1102,11 +1102,13 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 						paymentBreakdownKeys:
 							"paid_at_hotel_cash,paid_at_hotel_card",
 						searchQuery: "guest",
+						breakdownUpdated: "today",
 					},
 				},
 				res
 			);
 			assert.equal(res.statusCode, 200);
+			assert.equal(res.payload.breakdownUpdated, "today");
 			assert.equal(res.payload.totalDocuments, 1);
 			assert.equal(res.payload.data[0].ota_total_amount, 300);
 			assert.equal(
@@ -1179,6 +1181,17 @@ test("report returns canonical OTA, independent nightly, and reconciliation tota
 				scorecardPipeline[2].$group.waitingReservationsCount
 			);
 			const rowFilter = observedFilters.find((item) => item.kind === "count").filter;
+			const updateClauseFor = (filter) =>
+				filter.$and.find((clause) =>
+					clause?.$or?.some(
+						(condition) =>
+							condition?.paid_amount_breakdown_updated_at
+					)
+				);
+			assert.deepEqual(
+				updateClauseFor(rowFilter),
+				updateClauseFor(scorecardPipeline[0].$match)
+			);
 			const categoryClause = rowFilter.$and.find(
 				(clause) =>
 					Array.isArray(clause?.$expr?.$or) &&
