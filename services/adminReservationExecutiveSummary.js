@@ -302,10 +302,23 @@ const activityMetricKey = (activityType) =>
 		  : "newReservations";
 
 const emptyActivityMetrics = () => ({
-	checkins: { count: 0, sarAmount: 0, excludedNonSarCount: 0, invalidAmountCount: 0 },
-	checkouts: { count: 0, sarAmount: 0, excludedNonSarCount: 0, invalidAmountCount: 0 },
+	checkins: {
+		count: 0,
+		nights: 0,
+		sarAmount: 0,
+		excludedNonSarCount: 0,
+		invalidAmountCount: 0,
+	},
+	checkouts: {
+		count: 0,
+		nights: 0,
+		sarAmount: 0,
+		excludedNonSarCount: 0,
+		invalidAmountCount: 0,
+	},
 	newReservations: {
 		count: 0,
+		nights: 0,
 		sarAmount: 0,
 		excludedNonSarCount: 0,
 		invalidAmountCount: 0,
@@ -317,10 +330,12 @@ const addReservationToActivityMetrics = (metrics, reservation, activityTypes) =>
 		.trim()
 		.toUpperCase();
 	const amount = finiteNumberOrNull(reservation.total_amount);
+	const nights = reservationNights(reservation);
 
 	for (const activityType of activityTypes) {
 		const metric = metrics[activityMetricKey(activityType)];
 		metric.count += 1;
+		metric.nights += nights;
 		if (currency !== "SAR") {
 			metric.excludedNonSarCount += 1;
 		} else if (amount === null || amount < 0) {

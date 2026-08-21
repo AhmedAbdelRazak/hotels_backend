@@ -98,6 +98,9 @@ test("executive summary categorizes unique rows without exposing private fields"
 	assert.equal(result.summary.checkins, 1);
 	assert.equal(result.summary.checkouts, 1);
 	assert.equal(result.summary.newReservations, 2);
+	assert.equal(result.summary.metrics.checkins.nights, 2);
+	assert.equal(result.summary.metrics.checkouts.nights, 0);
+	assert.equal(result.summary.metrics.newReservations.nights, 2);
 	assert.equal(result.summary.totalUniqueReservations, 3);
 	assert.equal(result.summary.totalAmount, 560);
 	assert.equal(result.summary.currency, "SAR");
@@ -302,6 +305,7 @@ test("activity scorecards include SAR totals and prior Makkah-day count variance
 				_id: "current-1",
 				reservation_status: "confirmed",
 				checkin_date: "2026-07-19T02:00:00.000Z",
+				checkout_date: "2026-08-08T02:00:00.000Z",
 				total_amount: 400,
 				currency: "SAR",
 			},
@@ -309,6 +313,7 @@ test("activity scorecards include SAR totals and prior Makkah-day count variance
 				_id: "current-2",
 				reservation_status: "confirmed",
 				checkin_date: "2026-07-19T05:00:00.000Z",
+				checkout_date: "2026-08-17T05:00:00.000Z",
 				total_amount: 200,
 				currency: "sar",
 			},
@@ -316,6 +321,7 @@ test("activity scorecards include SAR totals and prior Makkah-day count variance
 				_id: "current-3",
 				reservation_status: "confirmed",
 				checkin_date: "2026-07-19T08:00:00.000Z",
+				checkout_date: "2026-07-20T08:00:00.000Z",
 				total_amount: 75,
 				currency: "USD",
 			},
@@ -347,6 +353,7 @@ test("activity scorecards include SAR totals and prior Makkah-day count variance
 	assert.equal(result.comparison.date, "2026-07-18");
 	assert.deepEqual(result.summary.metrics.checkins, {
 		count: 3,
+		nights: 50,
 		sarAmount: 600,
 		excludedNonSarCount: 1,
 		invalidAmountCount: 0,
